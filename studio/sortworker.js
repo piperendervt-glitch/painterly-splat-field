@@ -2,7 +2,7 @@
 // 受け取るもの：
 //   { type: 'source', P, B, C, D }  粒の元の並びでの描画用の値（各 vec4 × 粒の数）。表示や粒を変えたときに送られてくる
 //   { type: 'sort', eye, A, B, C, D }  eye（[x, y, z]）から遠い順に並べ、A・B・C・D（渡された空きの配列）に書いて返す
-// 描画用の vec4 の中身は studio/splat.js の sortAndFill の説明のとおり。
+// 描画用の vec4 の中身は studio/splat.js の sendSource の説明のとおり。
 let P = null, SB = null, SC = null, SD = null, keys = null, dist = null, order = null;
 
 self.onmessage = (e) => {
