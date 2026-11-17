@@ -1,0 +1,14 @@
+{
+  "name": "painterly-splat-field-paint",
+  "private": true,
+  "type": "module",
+  "description": "プレビズの絵を下絵にして、ChatGPT の月額プラン（Codex CLI の画像生成）で絵画的な絵を作る",
+  "scripts": {
+    "views": "node paint.mjs views",
+    "fill": "node paint.mjs fill",
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  }
+}
