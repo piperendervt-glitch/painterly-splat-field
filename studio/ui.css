@@ -4,6 +4,7 @@
   --font:"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic UI","Noto Sans JP",sans-serif;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{height:100%;margin:0}
 body{background:var(--room);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.6}
 body.tool{display:grid;grid-template-columns:minmax(0,1fr) 320px;overflow:hidden}
