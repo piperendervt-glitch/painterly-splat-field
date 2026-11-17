@@ -23,7 +23,8 @@ for (const name of ['A', 'B']) {
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) img.data.set([x * 4, y * 2, name === 'A' ? 50 : 200, 255], (y * W + x) * 4);
   writePng(path.join(inDir, `${name}_color.png`), img);
   writePng(path.join(inDir, `${name}_depth_view.png`), img);
-  views.push({ name, color: `${name}_color.png`, depth_view: `${name}_depth_view.png`, width: W, height: H });
+  writePng(path.join(inDir, `${name}_flat.png`), img);
+  views.push({ name, color: `${name}_color.png`, depth_view: `${name}_depth_view.png`, flat: `${name}_flat.png`, lit: `${name}_lit.png`, width: W, height: H });
 }
 fs.writeFileSync(path.join(inDir, 'cameras.json'), JSON.stringify({ views }));
 
@@ -49,6 +50,18 @@ assert.match(promptB, /style\.png/);
 assert.ok(fs.existsSync(path.join(work, 'B', 'references', 'style.png')));
 assert.doesNotMatch(fs.readFileSync(path.join(work, 'A', 'prompt.txt'), 'utf8'), /style\.png/);
 console.log('ok views：大きさを合わせ、2 枚目に 1 枚目を画風の見本として渡す。API キーは渡さない');
+
+// views --light：下絵と出すファイルの名前が替わり、光の指示が入る。下絵が無ければ止まる
+const flatOut = path.join(tmp, 'flat');
+run('views', '--in', inDir, '--out', flatOut, '--codex', fake, '--views', 'A', '--light', 'flat');
+assert.ok(fs.existsSync(path.join(flatOut, 'A_painted_flat.png')) && fs.existsSync(path.join(flatOut, 'A_overlay_flat.png')));
+assert.ok(!fs.existsSync(path.join(flatOut, 'A_painted.png')));
+const flatWork = path.join(flatOut, 'work', fs.readdirSync(path.join(flatOut, 'work'))[0]);
+assert.match(fs.readFileSync(path.join(flatWork, 'A', 'prompt.txt'), 'utf8'), /shadowless light/);
+assert.doesNotMatch(fs.readFileSync(path.join(flatWork, 'A', 'prompt.txt'), 'utf8'), /late-afternoon/);
+assert.doesNotMatch(fs.readFileSync(path.join(work, 'A', 'prompt.txt'), 'utf8'), /LIGHTING/);
+assert.throws(() => run('views', '--in', inDir, '--out', path.join(tmp, 'lit'), '--codex', fake, '--light', 'previz', '--dry-run'), /Command failed/);
+console.log('ok views --light：flat は _flat の下絵と名前で出す。下絵が無い previz は止まる');
 
 // fill：穴の外は 1 画素も変わらない
 const img = readPng(path.join(inDir, 'A_color.png'));
