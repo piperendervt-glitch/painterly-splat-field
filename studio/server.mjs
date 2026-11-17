@@ -12,7 +12,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DIRS = { 'previz-export': path.join(ROOT, 'previz-export'), 'paint-out': path.join(ROOT, 'paint', 'out') };
+// 場面の切り替え：環境変数 PSF_SCENE=<名前> で起動すると、scenes/<名前>/ の中を使う（実在の絵から作った場面など）。
+const SCENE = /^[A-Za-z0-9_-]+$/.test(process.env.PSF_SCENE || '') ? process.env.PSF_SCENE : '';
+const DIRS = SCENE
+  ? { 'previz-export': path.join(ROOT, 'scenes', SCENE, 'previz-export'), 'paint-out': path.join(ROOT, 'scenes', SCENE, 'paint-out') }
+  : { 'previz-export': path.join(ROOT, 'previz-export'), 'paint-out': path.join(ROOT, 'paint', 'out') };
 const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json)$/;
 const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8' };
 const WIN = process.platform === 'win32';
@@ -36,7 +40,7 @@ function readBody(req, limit = 64 * 1024 * 1024) {
 const stat = (file) => { try { const s = fs.statSync(file); return { size: s.size, mtime: Math.round(s.mtimeMs) }; } catch { return null; } };
 
 function state() {
-  const out = { previz: null, views: [], paintReady: fs.existsSync(path.join(ROOT, 'paint', 'node_modules', 'pngjs')) };
+  const out = { scene: SCENE, previz: null, views: [], paintReady: fs.existsSync(path.join(ROOT, 'paint', 'node_modules', 'pngjs')) };
   const camFile = path.join(DIRS['previz-export'], 'cameras.json');
   if (!fs.existsSync(camFile)) return out;
   let cams;

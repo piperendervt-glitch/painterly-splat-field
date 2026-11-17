@@ -8,3 +8,6 @@ prototype/*.jpg
 prototype/*.png
 # プレビズの書き出し（GUI の「previz-export に保存」や zip の展開先）
 previz-export/
+# 絵から場面を作る道具：奥行き推定モデル（初回に自動で取得）と、確かめ用の大きな重ね絵
+painting/models/
+scenes/*/previz-export/*_overlay.png
