@@ -4,16 +4,46 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>painterly-splat-field</title>
+<link rel="stylesheet" href="./studio/ui.css">
 <style>
-body{background:#0e120f;color:#dfe5da;font-family:"Hiragino Sans","Yu Gothic UI","Noto Sans JP",sans-serif;max-width:640px;margin:48px auto;padding:0 16px;line-height:1.8}
-a{color:#9ccf5a}
+body{display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
+nav{display:flex;align-items:center;gap:4px;padding:0 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+nav strong{margin-right:14px;letter-spacing:.04em}
+nav button{border:0;background:transparent;color:var(--muted);font:inherit;padding:11px 14px;cursor:pointer;border-bottom:2px solid transparent}
+nav button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--moss);font-weight:700}
+nav .step{color:var(--moss);margin-right:6px;font-variant-numeric:tabular-nums}
+#frames{position:relative;min-height:0}
+#frames iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--room)}
+#frames iframe[hidden]{display:none}
 </style>
 </head>
 <body>
-<h1>painterly-splat-field</h1>
-<ul>
-  <li><a href="./previz/">プレビズ</a>：地面・アーチ・奥の塔。2視点の色・奥行き・カメラ情報を書き出す。</li>
-  <li><a href="./prototype/">粒の絵画ビューア（試作）</a>：1枚の絵を粒にして覗き込む。素材は別途 prototype/ に置く。</li>
-</ul>
+<nav role="tablist" id="tabs">
+  <strong>painterly-splat-field</strong>
+  <button type="button" role="tab" data-tab="previz" data-src="./previz/"><span class="step">1</span>プレビズ</button>
+  <button type="button" role="tab" data-tab="paint" data-src="./studio/paint.html"><span class="step">2</span>絵画化</button>
+  <button type="button" role="tab" data-tab="splat" data-src="./studio/splat.html"><span class="step">3</span>粒の空間</button>
+  <button type="button" role="tab" data-tab="prototype" data-src="./prototype/">試作</button>
+</nav>
+<div id="frames"></div>
+<script type="module">
+// 各画面は別ページのまま、タブで切り替える。開いた画面は残しておく（3D を作り直さないため）。
+const tabs = document.getElementById('tabs'), frames = document.getElementById('frames');
+const gl = new URLSearchParams(location.search).has('gl') ? '?gl' : '';
+function show(name) {
+  let found = false;
+  for (const b of tabs.querySelectorAll('button')) {
+    const on = b.dataset.tab === name; found ||= on;
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+    let f = frames.querySelector(`iframe[data-tab="${b.dataset.tab}"]`);
+    if (on && !f) { f = document.createElement('iframe'); f.dataset.tab = b.dataset.tab; f.src = b.dataset.src + gl; f.title = b.textContent; f.allow = 'fullscreen'; frames.append(f); }
+    if (f) { f.hidden = !on; if (on) f.focus(); }
+  }
+  if (!found) return show('previz');
+  history.replaceState(null, '', `#${name}`);
+}
+tabs.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) show(b.dataset.tab); });
+show(location.hash.slice(1) || 'previz');
+</script>
 </body>
 </html>

@@ -1,0 +1,43 @@
+:root{
+  color-scheme:dark;
+  --room:#0e120f; --panel:#151a16; --line:#2a332b; --text:#dfe5da; --muted:#8f9a8c; --moss:#9ccf5a; --warn:#e8a04a;
+  --font:"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic UI","Noto Sans JP",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--room);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.6}
+body.tool{display:grid;grid-template-columns:minmax(0,1fr) 320px;overflow:hidden}
+#stage{position:relative;min-height:0;min-width:0;overflow:hidden;touch-action:none}
+#stage canvas{display:block;position:absolute;inset:0;width:100%;height:100%}
+#msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--muted);pointer-events:none;white-space:pre-line}
+#hint{position:absolute;left:16px;bottom:14px;color:var(--text);font-size:12px;pointer-events:none;text-shadow:0 1px 3px #000}
+aside{background:var(--panel);border-left:1px solid var(--line);padding:20px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:18px}
+h1{font-weight:700;font-size:20px;margin:0;letter-spacing:.04em}
+h2{font-weight:700;font-size:15px;margin:0}
+.lead{margin:6px 0 0;color:var(--muted);font-size:12.5px}
+.group{display:flex;flex-direction:column;gap:8px}
+.label{font-weight:500;display:flex;justify-content:space-between;gap:8px}
+.label output{color:var(--muted);font-variant-numeric:tabular-nums}
+.note{color:var(--muted);font-size:12px;margin:0}
+.warn{color:var(--warn)}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;color:var(--muted);padding:7px 4px;font:inherit;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--moss);color:#10140c;font-weight:700}
+.check{display:flex;align-items:center;gap:8px;cursor:pointer}
+.check input{accent-color:var(--moss);width:16px;height:16px;margin:0}
+input[type=range]{width:100%;accent-color:var(--moss);margin:0}
+input[type=text],textarea{width:100%;background:var(--room);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit}
+button.plain{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer}
+button.plain:hover{border-color:var(--moss)}
+button.main{border:0;background:var(--moss);color:#10140c;border-radius:6px;padding:10px;font:inherit;font-weight:700;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+.row{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:8px}
+:focus-visible{outline:2px solid var(--moss);outline-offset:2px}
+dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+dt{color:var(--muted)}
+dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+@media (max-width:760px){
+  body.tool{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) auto}
+  aside{border-left:0;border-top:1px solid var(--line);max-height:50%;padding:14px 16px}
+}

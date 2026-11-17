@@ -300,6 +300,25 @@ $('export').addEventListener('click', async () => {
   } finally { btn.disabled = false; }
 });
 
+// GUI（start.bat / npm run dev）から開いたときは、previz-export フォルダへ直接保存できる。
+fetch('/api/state').then((r) => (r.ok ? r.json() : null)).then((s) => {
+  if (!s || !('views' in s)) return;
+  const btn = $('save'), note = $('saveNote'), zip = $('export');
+  btn.hidden = note.hidden = false; zip.className = 'plain';
+  btn.addEventListener('click', async () => {
+    if (!app || !app.caps) return;
+    btn.disabled = true;
+    try {
+      const files = await exportFiles(app.caps);
+      for (const [name, bytes] of Object.entries(files)) {
+        const res = await fetch(`/api/previz-export/${name}`, { method: 'POST', body: bytes });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存できませんでした（${res.status}）`);
+      }
+      note.textContent = `保存しました（${Object.keys(files).length} ファイル、${new Date().toLocaleTimeString()}）。`;
+    } catch (e) { note.textContent = e.message; } finally { btn.disabled = false; }
+  });
+}).catch(() => {});
+
 // 公開ページの枠の中ではファイルの保存ができないため、その場合は書き出しボタンを出さない。
 if (import.meta.env.VITE_NO_DOWNLOAD) {
   $('export').hidden = true;
