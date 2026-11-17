@@ -310,38 +310,55 @@ async function updateSun() {
   } catch (e) { console.error(e); } finally { sunBusy = false; }
 }
 
-// 遠い順（視点からの距離）に並べ、描画用の配列へ書き込む。eye が null なら並びはそのままで書き直すだけ。
 // 描画用は vec4 を3本にまとめる（WebGPU は頂点バッファの本数に上限があるため、列ごとに分けない）。
 //   A = [位置 xyz, 粒の間隔]  B = [表示する色 rgb, 境界からの距離]  C = [空, 視点, 空き, 空き]
-function sortAndFill(eye) {
+// 遠い順（視点からの距離）に並べ直すのは別の糸（studio/sortworker.js）で行い、描画は止めない。
+// ここでは、粒の元の並びのまま描画用の値を作って渡す（表示・光・粒を変えたときだけ）。
+function sendSource() {
   const a = app, c = cloud; if (!a || !c) return;
-  const t0 = performance.now();
-  const { n, position, order, keys, dist } = c;
-  if (eye) {
-    const ex = eye.x, ey = eye.y, ez = eye.z;
-    let far = 0;
-    for (let i = 0; i < n; i++) {
-      const dx = position[i * 3] - ex, dy = position[i * 3 + 1] - ey, dz = position[i * 3 + 2] - ez;
-      const d = Math.sqrt(dx * dx + dy * dy + dz * dz); dist[i] = d; if (d > far) far = d;
-    }
-    // 近い所ほど細かく分けたいので、距離の平方根で 16bit に刻む
-    const scale = 65535 / Math.sqrt(far || 1), count = new Uint32Array(65537);
-    for (let i = 0; i < n; i++) { const key = 65535 - Math.min(65535, Math.sqrt(dist[i]) * scale | 0); keys[i] = key; count[key + 1]++; }
-    for (let i = 0; i < 65536; i++) count[i + 1] += count[i];
-    for (let i = 0; i < n; i++) order[count[keys[i]]++] = i;
-  }
+  const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4);
   prepareLight();
-  const A = a.attrA.array, B = a.attrB.array, C = a.attrC.array, display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0];
-  for (let j = 0; j < n; j++) {
-    const i = order[j], o = j * 4;
-    A[o] = position[i * 3]; A[o + 1] = position[i * 3 + 1]; A[o + 2] = position[i * 3 + 2]; A[o + 3] = c.size[i];
+  const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    P[o] = c.position[i * 3]; P[o + 1] = c.position[i * 3 + 1]; P[o + 2] = c.position[i * 3 + 2]; P[o + 3] = c.size[i];
     display(c, i, rgb);
     B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i];
     C[o] = c.sky[i]; C[o + 1] = c.view[i];
   }
-  a.attrA.needsUpdate = a.attrB.needsUpdate = a.attrC.needsUpdate = true;
-  if (eye) { a.sortEye.copy(eye); a.sortAt = performance.now(); $('sSort').textContent = `${Math.round(a.sortAt - t0)} ms`; }
+  a.sorter.worker.postMessage({ type: 'source', P, B, C }, [P.buffer, B.buffer, C.buffer]);
 }
+// 並べ直しの係。終わった配列を描画用の値と入れ替え、外した方を次の並べ直しの書き込み先に回す。
+function makeSorter(a, n) {
+  const worker = new Worker(new URL('./sortworker.js', import.meta.url), { type: 'module' });
+  const s = { worker, busy: false, pending: null, spare: [new Float32Array(n * 4), new Float32Array(n * 4), new Float32Array(n * 4)], done: 0 };
+  s.sort = (eye) => { // eye = [x, y, z]
+    if (s.busy || !s.spare) { s.pending = eye; return; }
+    s.busy = true; const [A, B, C] = s.spare; s.spare = null;
+    worker.postMessage({ type: 'sort', eye, A, B, C }, [A.buffer, B.buffer, C.buffer]);
+  };
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (!m.empty) {
+      s.spare = [a.attrA.array, a.attrB.array, a.attrC.array];
+      a.attrA.array = m.A; a.attrB.array = m.B; a.attrC.array = m.C;
+      a.attrA.needsUpdate = a.attrB.needsUpdate = a.attrC.needsUpdate = true;
+      s.done++;
+      $('sSort').textContent = `${Math.round(m.ms)} ms（描画とは別の糸）`;
+    } else s.spare = [m.A, m.B, m.C];
+    s.busy = false;
+    if (s.pending) { const p = s.pending; s.pending = null; s.sort(p); }
+  };
+  worker.onerror = (e) => { console.error(e); say('並べ直しの準備に失敗しました：' + (e.message || '')); };
+  return s;
+}
+// 並べ直しを頼む。「並べ直す」では今のカメラ、「固定」「不透明」では最初の視点（カメラA）から。
+function orderEye() {
+  const a = app;
+  if (ui.order === 'sort') return a.camera.position.toArray();
+  return new THREE.Vector3().setFromMatrixPosition(data.views[0].matrix).toArray();
+}
+function requestSort() { const a = app; if (!a) return; const e = orderEye(); a.sortEye.fromArray(e); a.sorter.sort(e); }
 
 // ---- 材質 ----
 function makeMaterials(a) {
@@ -368,7 +385,7 @@ async function start(useGL) {
   if (starting) return; starting = true;
   say('準備しています…');
   const keep = app ? { pos: app.camera.position.clone(), quat: app.camera.quaternion.clone(), target: app.controls.target.clone(), feet: app.walk.wk.feet.slice() } : null;
-  if (app) { app.renderer.setAnimationLoop(null); app.controls.dispose(); app.renderer.domElement.remove(); app.renderer.dispose(); app = null; }
+  if (app) { app.sorter.worker.terminate(); app.renderer.setAnimationLoop(null); app.controls.dispose(); app.renderer.domElement.remove(); app.renderer.dispose(); app = null; }
 
   try { if (!data) { data = await loadData(); setupViewButtons(); } }
   catch (e) { starting = false; console.error(e); return say(e.message); }
@@ -390,8 +407,9 @@ async function start(useGL) {
     attrA: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
     attrB: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
     attrC: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
-    sortEye: new THREE.Vector3(Infinity, 0, 0), sortAt: 0, yaw: 0, pitch: 0,
+    sortEye: new THREE.Vector3(Infinity, 0, 0), yaw: 0, pitch: 0,
   };
+  a.sorter = makeSorter(a, n);
   a.mats = makeMaterials(a);
   a.sprite = new THREE.Sprite(a.mats.soft);
   a.sprite.count = n; a.sprite.frustumCulled = false; a.sprite.renderOrder = 1;
@@ -417,7 +435,7 @@ async function start(useGL) {
   else jump('0');
   if (keep && keep.feet) a.walk.place(...keep.feet); else placeAtCamera();
 
-  if (ui.order !== 'sort') { sortAndFill(new THREE.Vector3().setFromMatrixPosition(data.views[0].matrix)); a.sortEye.set(Infinity, 0, 0); }
+  sendSource(); requestSort();
   applyUi();
   await updateSun();
 
@@ -435,7 +453,7 @@ async function start(useGL) {
   renderer.setAnimationLoop(() => {
     const now = performance.now(), dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (ui.nav === 'walk') walkStep(dt); else controls.update();
-    if (ui.order === 'sort' && now - a.sortAt > 120 && camera.position.distanceToSquared(a.sortEye) > 0.09) sortAndFill(camera.position);
+    if (ui.order === 'sort' && !a.sorter.busy && camera.position.distanceToSquared(a.sortEye) > 0.09) requestSort(); // 0.3 m 動いたら、前の並べ直しが終わっていれば次を頼む
     renderer.render(scene, camera);
     if (++frames >= 30) {
       $('sFps').textContent = Math.round(frames * 1000 / (now - t0)) + ' fps'; frames = 0; t0 = now;
@@ -587,7 +605,7 @@ function setColorSrc(v, andRebuild = true) {
   ui.paintLight = SOURCES[v].light; press($('paintLight'), ui.paintLight); // その絵が描かれたときの光の見立て
   if (andRebuild) rebuild();
 }
-const refill = () => { if (app) { sortAndFill(null); } };
+const refill = () => { if (app) { sendSource(); requestSort(); } };
 const rebuild = () => { press($('stride'), ui.stride); start(forceGL).catch(fail); };
 
 // ---- 光の操作 ----
@@ -628,8 +646,7 @@ seg('mode', (v) => { ui.mode = v; refill(); });
 seg('stride', (v) => { ui.stride = Number(v); rebuild(); });
 seg('order', (v) => {
   ui.order = v; if (!app) return;
-  if (v === 'fixed') { sortAndFill(new THREE.Vector3().setFromMatrixPosition(data.views[0].matrix)); }
-  app.sortEye.set(Infinity, 0, 0); applyUi();
+  requestSort(); applyUi();
 });
 $('jump').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { jump(b.dataset.v); if (ui.nav === 'walk') placeAtCamera(); } });
 for (const id of ['size', 'edge']) $(id).addEventListener('input', applyUi);
