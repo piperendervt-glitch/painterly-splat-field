@@ -1,0 +1,16 @@
+{
+  "name": "painterly-splat-field",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:previz": "vite build previz --base ./ --outDir ../dist-previz --emptyOutDir"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0"
+  }
+}
