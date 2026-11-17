@@ -6,3 +6,5 @@ prototype/painting.jpg
 prototype/depth.png
 prototype/*.jpg
 prototype/*.png
+# プレビズの書き出し（GUI の「previz-export に保存」や zip の展開先）
+previz-export/

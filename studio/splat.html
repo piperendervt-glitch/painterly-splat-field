@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>粒の空間</title>
+<link rel="stylesheet" href="./ui.css">
+</head>
+<body class="tool">
+<main id="stage">
+  <div id="msg">準備しています…</div>
+  <div id="hint"></div>
+</main>
+<aside>
+  <header>
+    <h1>粒の空間</h1>
+    <p class="lead">書き出した奥行きとカメラ情報を使って、絵の1画素を1粒として3D空間に置きます。</p>
+  </header>
+
+  <div class="group">
+    <div class="label">粒の色のもと</div>
+    <div class="seg" id="colorSrc">
+      <button type="button" data-v="painted" aria-pressed="false">絵画</button>
+      <button type="button" data-v="previz" aria-pressed="true">プレビズの色</button>
+    </div>
+    <p class="note" id="srcNote"></p>
+    <div class="label">使う視点</div>
+    <div class="seg" id="source">
+      <button type="button" data-v="all" aria-pressed="true">すべて</button>
+    </div>
+    <button type="button" class="plain" id="reload">ファイルを読み直す</button>
+  </div>
+
+  <div class="group">
+    <div class="label">動かし方</div>
+    <div class="seg" id="nav">
+      <button type="button" data-v="orbit" aria-pressed="true">回して見る</button>
+      <button type="button" data-v="walk" aria-pressed="false">歩く</button>
+    </div>
+    <div class="label">視点を移す</div>
+    <div class="row" id="jump">
+      <button type="button" class="plain" data-v="overview">俯瞰</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="label">表示</div>
+    <div class="seg" id="mode">
+      <button type="button" data-v="0" aria-pressed="true">絵の色</button>
+      <button type="button" data-v="1" aria-pressed="false">奥行き</button>
+      <button type="button" data-v="2" aria-pressed="false">視点別</button>
+    </div>
+    <p class="note">「視点別」は、どの視点の絵から来た粒かを色で示します（A が橙、B が水色）。</p>
+    <label class="check" for="holes"><input type="checkbox" id="holes"><span>穴を目立たせる（背景をマゼンタに）</span></label>
+    <label class="check" for="wire"><input type="checkbox" id="wire"><span>プレビズの形を線で重ねる</span></label>
+    <label class="check" for="frusta"><input type="checkbox" id="frusta"><span>カメラの視錐台を表示</span></label>
+    <label class="check" for="sky"><input type="checkbox" id="sky" checked><span>空も粒にする（遠くの壁に置く）</span></label>
+  </div>
+
+  <div class="group">
+    <div class="label"><span>粒の大きさ</span><output id="oSize"></output></div>
+    <input type="range" id="size" min="0.6" max="5" step="0.05" value="2.6">
+    <div class="label"><span>境界の粒を消す</span><output id="oEdge"></output></div>
+    <input type="range" id="edge" min="0" max="6" step="1" value="1">
+    <p class="note">奥行きが急に変わる所（柱の縁など）から何画素ぶんの粒を消すか。絵と形のずれで、縁に空の色が乗るのを隠します。</p>
+    <div class="label">粒の細かさ</div>
+    <div class="seg" id="stride">
+      <button type="button" data-v="4" aria-pressed="false">粗い</button>
+      <button type="button" data-v="2" aria-pressed="true">ふつう</button>
+      <button type="button" data-v="1" aria-pressed="false">全画素</button>
+    </div>
+    <div class="label">重ね順</div>
+    <div class="seg" id="order">
+      <button type="button" data-v="sort" aria-pressed="true">並べ直す</button>
+      <button type="button" data-v="fixed" aria-pressed="false">固定</button>
+      <button type="button" data-v="opaque" aria-pressed="false">不透明</button>
+    </div>
+    <p class="note">「並べ直す」は視点が動くたびに遠い順に並べます。「固定」は最初の並びのまま（試作と同じ）。「不透明」はぼかさず深度テストで描きます。</p>
+  </div>
+
+  <dl>
+    <dt>粒の数</dt><dd id="sCount">–</dd>
+    <dt>描画方式</dt><dd id="sBackend">–</dd>
+    <dt>描画速度</dt><dd id="sFps">–</dd>
+    <dt>並べ直し</dt><dd id="sSort">–</dd>
+    <dt>いまの位置</dt><dd id="sPos">–</dd>
+  </dl>
+  <div class="group">
+    <button type="button" class="plain" id="swap">WebGL 2 で描き直す</button>
+  </div>
+</aside>
+<script type="module" src="./splat.js"></script>
+</body>
+</html>
