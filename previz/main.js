@@ -12,7 +12,7 @@ const say = (text) => { msg.textContent = text; msg.style.display = text ? 'flex
 const { width: W, height: H, fovY, near: NEAR, far: FAR } = EXPORT;
 const FY = (H / 2) / Math.tan(THREE.MathUtils.degToRad(fovY / 2)), FX = FY, CX = W / 2, CY = H / 2;
 const CLOUD_STRIDE = 3;
-const FRUSTUM_COLORS = [0xffa23a, 0x4fd2ff];
+const FRUSTUM_COLORS = [0xffa23a, 0x4fd2ff, 0xc78cff, 0x99e666, 0xff6f91, 0xffe066];
 
 const ui = { view: 'overview', mode: 'color', source: 'all' };
 let app = null, starting = false, forceGL = new URLSearchParams(location.search).has('gl');
@@ -210,7 +210,7 @@ async function start(useGL) {
   const extras = new THREE.Group(), frusta = new THREE.Group();
   exportCams.forEach((cam, i) => { // 視錐台は見やすいよう手前 60m までで描く
     const short = cam.clone(); short.near = 1; short.far = 60; short.updateProjectionMatrix(); short.updateMatrixWorld(true);
-    const h = new THREE.CameraHelper(short); const c = new THREE.Color(FRUSTUM_COLORS[i]);
+    const h = new THREE.CameraHelper(short); const c = new THREE.Color(FRUSTUM_COLORS[i % FRUSTUM_COLORS.length]);
     h.setColors(c, c, c, c, c); frusta.add(h);
   });
   extras.add(frusta); scene.add(extras);
@@ -300,6 +300,15 @@ $('export').addEventListener('click', async () => {
   } finally { btn.disabled = false; }
 });
 
+async function saveToFolder() {
+  const files = await exportFiles(app.caps);
+  for (const [name, bytes] of Object.entries(files)) {
+    const res = await fetch(`/api/previz-export/${name}`, { method: 'POST', body: bytes });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存できませんでした（${res.status}）`);
+  }
+  return Object.keys(files).length;
+}
+
 // GUI（start.bat / npm run dev）から開いたときは、previz-export フォルダへ直接保存できる。
 fetch('/api/state').then((r) => (r.ok ? r.json() : null)).then((s) => {
   if (!s || !('views' in s)) return;
@@ -309,12 +318,8 @@ fetch('/api/state').then((r) => (r.ok ? r.json() : null)).then((s) => {
     if (!app || !app.caps) return;
     btn.disabled = true;
     try {
-      const files = await exportFiles(app.caps);
-      for (const [name, bytes] of Object.entries(files)) {
-        const res = await fetch(`/api/previz-export/${name}`, { method: 'POST', body: bytes });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存できませんでした（${res.status}）`);
-      }
-      note.textContent = `保存しました（${Object.keys(files).length} ファイル、${new Date().toLocaleTimeString()}）。`;
+      const count = await saveToFolder();
+      note.textContent = `保存しました（${count} ファイル、${new Date().toLocaleTimeString()}）。`;
     } catch (e) { note.textContent = e.message; } finally { btn.disabled = false; }
   });
 }).catch(() => {});
@@ -325,4 +330,23 @@ if (import.meta.env.VITE_NO_DOWNLOAD) {
   $('exportNote').textContent = 'このページは表示の確認用です。zip の書き出しは、リポジトリを手元で動かしたとき（npm run dev）に使えます。';
 }
 
-start(forceGL).catch((e) => { console.error(e); say('表示中に問題が起きました：' + e.message); });
+// GUI の「視点を足す」で足したカメラ（previz-export/extra_cameras.json）も、同じように書き出す。
+try {
+  const res = await fetch('/files/previz-export/extra_cameras.json', { cache: 'no-store' });
+  const extra = res.ok ? await res.json() : [];
+  for (const c of Array.isArray(extra) ? extra : []) {
+    if (!c || !/^[A-Za-z0-9]+$/.test(c.name || '') || EXPORT.cameras.some((x) => x.name === c.name)) continue;
+    EXPORT.cameras.push({ name: c.name, position: c.position, target: c.target });
+    const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(EXPORT.cameras.length - 1); b.textContent = c.name; b.setAttribute('aria-pressed', 'false');
+    $('view').append(b);
+  }
+} catch { /* GUI のサーバーが無いときは A・B だけ */ }
+
+await start(forceGL).catch((e) => { console.error(e); say('表示中に問題が起きました：' + e.message); });
+
+// ?autosave つきで開かれたら（GUI の「視点を足す」から）、保存まで済ませて親の画面に知らせる。
+if (new URLSearchParams(location.search).has('autosave')) {
+  let ok = false, error = '';
+  try { if (!app || !app.caps) throw new Error('プレビズを描けませんでした'); await saveToFolder(); ok = true; } catch (e) { error = e.message; }
+  window.parent.postMessage({ type: 'previz-saved', ok, error }, location.origin);
+}

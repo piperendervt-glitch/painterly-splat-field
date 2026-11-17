@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>視点を足す</title>
+<link rel="stylesheet" href="./ui.css">
+<style>
+body.tool{grid-template-columns:minmax(0,1fr) 360px}
+#work{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;padding:16px;min-height:0;overflow:auto}
+.pane{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0}
+.pane canvas{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:6px;display:block}
+#map{aspect-ratio:1/1;cursor:crosshair;touch-action:none}
+#shot{aspect-ratio:2/3;height:calc(100vh - 130px);min-height:300px;width:auto;max-width:100%;align-self:center}
+.legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto}
+.added{display:flex;flex-direction:column;gap:6px}
+.added .item{display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center}
+.added .item span{font-variant-numeric:tabular-nums}
+#frameHost{position:absolute;width:640px;height:480px;left:-9999px;top:0}
+@media (max-width:1100px){#work{grid-template-columns:1fr}}
+</style>
+</head>
+<body class="tool">
+<main id="work">
+  <section class="pane">
+    <h2>上から見た地図</h2>
+    <canvas id="map" width="720" height="720"></canvas>
+    <div class="legend">
+      <span><i style="background:#9ccf5a"></i>候補のカメラ（クリックで移動）</span>
+      <span><i style="background:#fff"></i>見る先（Shift＋クリック）</span>
+      <span><i style="background:#ff00ff"></i>穴の多い位置（探した結果）</span>
+    </div>
+  </section>
+  <section class="pane">
+    <h2 id="shotTitle">候補の視点から見た今の状態</h2>
+    <canvas id="shot" width="400" height="600"></canvas>
+    <p class="note" id="shotNote"></p>
+  </section>
+</main>
+<aside>
+  <header>
+    <h1>視点を足す</h1>
+    <p class="lead">まだ絵に描かれていない所（穴）が多く見える視点を足し、穴だけを描き足して、その分の粒を空間に加えます。</p>
+  </header>
+  <p class="note warn" id="problem" hidden></p>
+
+  <div class="group">
+    <h2>1. 視点を決める</h2>
+    <button type="button" class="plain" id="search">穴の多い視点を自動で探す</button>
+    <p class="note" id="searchNote">歩ける高さで、まわりの位置から形を見たときに、穴がいちばん多く見える所を計算で探します。</p>
+    <div class="label"><span>カメラの高さ</span><output id="oCamY"></output></div>
+    <input type="range" id="camY" min="1" max="40" step="0.1" value="1.7">
+    <div class="label"><span>見る先の高さ</span><output id="oTgtY"></output></div>
+    <input type="range" id="tgtY" min="0" max="80" step="0.5" value="15">
+    <div class="label">穴の表示</div>
+    <div class="seg" id="mode">
+      <button type="button" data-v="painted" aria-pressed="true">絵の色</button>
+      <button type="button" data-v="source" aria-pressed="false">どの視点の絵か</button>
+    </div>
+    <p class="note">マゼンタが穴（どの絵にも描かれていない面）、紫が空の穴です。</p>
+    <button type="button" class="main" id="add">この視点を足す</button>
+    <p class="note">プレビズをこの視点から書き出し直し、すでにある絵をこの視点へ写します。ChatGPT の利用枠は使いません。</p>
+  </div>
+
+  <div class="group">
+    <h2>2. 穴を埋める</h2>
+    <div class="added" id="added"><p class="note">足した視点はまだありません。</p></div>
+    <div id="fillBox" class="group" hidden>
+      <div class="label">見る絵</div>
+      <div class="seg" id="stage">
+        <button type="button" data-v="reproj" aria-pressed="true">埋める前</button>
+        <button type="button" data-v="painted" aria-pressed="false">埋めた後</button>
+        <button type="button" data-v="overlay" aria-pressed="false">重ねて確認</button>
+      </div>
+      <button type="button" class="main" id="fillLocal">ツール内で埋める（すぐ・利用枠なし）</button>
+      <p class="note">穴のまわりの色を、同じ面の中だけで内側へ広げます。新しい模様は作れないので、広い穴はのっぺりします。</p>
+      <button type="button" class="main" id="fillCodex">Codex で描き足す（きれい・利用枠を使う）</button>
+      <div class="row">
+        <button type="button" class="plain" id="fillDry">送る文だけ作る</button>
+        <button type="button" class="plain" id="stop" disabled>止める</button>
+      </div>
+      <p class="note">どちらも穴の所だけを描き、穴の外は 1 画素も変えません。やり直すと上書きします。</p>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="label"><span>進み具合</span><output id="status">–</output></div>
+    <pre id="log"></pre>
+    <p class="note">埋めた後は「粒の空間」のタブで「ファイルを読み直す」を押すと、足した分の粒が加わります（「視点別」の表示で色が分かれます）。</p>
+  </div>
+  <div id="frameHost"></div>
+</aside>
+<script type="module" src="./views.js"></script>
+</body>
+</html>

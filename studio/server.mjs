@@ -4,6 +4,9 @@
 //   GET  /files/paint-out/<名>       絵画化の結果
 //   POST /api/previz-export/<名>     プレビズ画面からの保存（png / cameras.json）
 //   POST /api/paint/run             paint/paint.mjs views を起動（{ views, style, dryRun, light }）
+//   POST /api/paint-out/<名>        「視点を足す」画面からの保存（写した絵・穴の印）
+//   POST /api/paint/fill            paint/paint.mjs fill を起動（{ view, style, dryRun }）。足した視点の穴だけ描く
+//   POST /api/view/forget           足した視点の絵を消す（{ view }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
 import { spawn } from 'node:child_process';
@@ -50,6 +53,9 @@ function state() {
     lit: stat(path.join(DIRS['previz-export'], `${v.name}_lit.png`)),
     painted: stat(path.join(DIRS['paint-out'], `${v.name}_painted.png`)),
     overlay: stat(path.join(DIRS['paint-out'], `${v.name}_overlay.png`)),
+    reproj: stat(path.join(DIRS['paint-out'], `${v.name}_reproj.png`)),
+    holes: stat(path.join(DIRS['paint-out'], `${v.name}_holes.png`)),
+    new_mask: stat(path.join(DIRS['paint-out'], `${v.name}_new.png`)),
     painted_flat: stat(path.join(DIRS['paint-out'], `${v.name}_painted_flat.png`)),
     overlay_flat: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_flat.png`)),
     painted_lit: stat(path.join(DIRS['paint-out'], `${v.name}_painted_lit.png`)),
@@ -64,6 +70,10 @@ function runPaint({ views, style, dryRun, light }) {
   if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
   if (light === 'flat' || light === 'previz') args.push('--light', light); // free（既定）は今までどおり
   if (dryRun) args.push('--dry-run');
+  startJob(args, dryRun);
+}
+function startJob(args, dryRun) {
+  if (process.env.PAINT_CODEX) args.push('--codex', process.env.PAINT_CODEX); // 確かめ用：にせの codex に差し替える
   Object.assign(job, { running: true, log: '', code: null, startedAt: Date.now(), dryRun: !!dryRun });
   const child = spawn(process.execPath, args, { cwd: path.join(ROOT, 'paint'), windowsHide: true });
   job.child = child;
@@ -71,6 +81,15 @@ function runPaint({ views, style, dryRun, light }) {
   child.stdout.on('data', add); child.stderr.on('data', add);
   child.on('error', (e) => { add(`起動できませんでした：${e.message}\n`); job.running = false; job.code = -1; job.child = null; });
   child.on('close', (code) => { job.running = false; job.code = code; job.child = null; });
+}
+// 足した視点の穴だけ描く。写した絵（<視点>_reproj.png）と穴の印（<視点>_holes.png）は画面が先に保存している。
+function runFill({ view, style, dryRun }) {
+  const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}.png`), pre = (name) => path.join(DIRS['previz-export'], `${view}_${name}.png`);
+  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', out('reproj'), '--mask', out('holes'), '--out', out('painted'),
+    '--previz', pre('color'), '--depth', pre('depth_view'), '--overlay', out('overlay')];
+  if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
+  if (dryRun) args.push('--dry-run');
+  startJob(args, dryRun);
 }
 function stopPaint() {
   const child = job.child; if (!child) return;
@@ -112,6 +131,30 @@ export async function handle(req, res, next) {
       if (!fs.existsSync(path.join(DIRS['previz-export'], 'cameras.json'))) return json(res, 400, { error: 'プレビズの書き出しがありません。先に「プレビズ」で保存してください。' });
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
       runPaint(body);
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/paint/fill' && req.method === 'POST') {
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[A-Za-z0-9]+$/.test(body.view || '')) return json(res, 400, { error: '視点の名前が使えません' });
+      for (const f of [path.join(DIRS['paint-out'], `${body.view}_reproj.png`), path.join(DIRS['paint-out'], `${body.view}_holes.png`), path.join(DIRS['previz-export'], `${body.view}_color.png`)]) {
+        if (!fs.existsSync(f)) return json(res, 400, { error: `${path.basename(f)} がありません。「視点を足す」からやり直してください。` });
+      }
+      runFill(body);
+      return json(res, 200, { ok: true });
+    }
+    if (p.startsWith('/api/paint-out/') && req.method === 'POST') {
+      const name = p.slice('/api/paint-out/'.length);
+      if (!/^[A-Za-z0-9_-]+\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
+      const body = await readBody(req);
+      fs.mkdirSync(DIRS['paint-out'], { recursive: true });
+      fs.writeFileSync(path.join(DIRS['paint-out'], name), body);
+      return json(res, 200, { ok: true, size: body.length });
+    }
+    if (p === '/api/view/forget' && req.method === 'POST') { // 足した視点の、写した絵・穴の印・描き足した絵を消す
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[A-Za-z0-9]+$/.test(body.view || '')) return json(res, 400, { error: '視点の名前が使えません' });
+      for (const kind of ['painted', 'overlay', 'reproj', 'holes', 'new']) fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_${kind}.png`), { force: true });
       return json(res, 200, { ok: true });
     }
     if (p === '/api/paint/stop' && req.method === 'POST') { stopPaint(); return json(res, 200, { ok: true }); }

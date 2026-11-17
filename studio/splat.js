@@ -57,6 +57,7 @@ async function loadData() {
       def: v, W, H, z, edge: edgeDistance(z, W, H), near, far,
       previz: await loadImage(`/files/previz-export/${v.color}`, W, H),
       painted: st.painted ? await loadImage(`/files/paint-out/${v.name}_painted.png`, W, H) : null,
+      onlyNew: st.new_mask ? await loadImage(`/files/paint-out/${v.name}_new.png`, W, H) : null, // 穴埋めで足した視点：白い画素だけ粒にする
       matrix: new THREE.Matrix4().set(...v.extrinsics.camera_to_world.flat()),
     });
   }
@@ -121,6 +122,7 @@ function splatsFromView(v, vi, stride, usePainted) {
   let k = 0;
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) {
     const i = y * W + x, sky = z[i] === 0, zz = sky ? SKY_Z : z[i];
+    if (v.onlyNew && v.onlyNew[i * 4] < 128) continue;
     p.set((x + 0.5 - cx) / fx * zz, -(y + 0.5 - cy) / fy * zz, -zz).applyMatrix4(v.matrix);
     col.position[k * 3] = p.x; col.position[k * 3 + 1] = p.y; col.position[k * 3 + 2] = p.z;
     col.size[k] = zz * stride / fy;

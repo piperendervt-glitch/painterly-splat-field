@@ -7,6 +7,7 @@
 //     出すもの：<視点>_painted.png（頼んだ大きさに合わせたもの）、<視点>_overlay.png（プレビズの輪郭を重ねた確かめ用）
 //
 //   node paint.mjs fill --image <絵> --mask <穴の印（白が穴）> --out <出すファイル> [--style "..."] [--dry-run]
+//                       [--previz <同じ視点のプレビズの色> --depth <その奥行きの絵> --overlay <確かめ用の絵>]
 //     穴をマゼンタで塗った絵を見せて「マゼンタの所だけ描いて」と頼み、できた絵の穴の所だけを元の絵に貼る。
 //     穴の外は 1 画素も変えない。
 //
@@ -47,13 +48,14 @@ function viewInstructions({ style, hasStyleRef }) {
   ].filter(Boolean).join('\n');
 }
 
-function fillInstructions({ style }) {
+function fillInstructions({ style, hasPreviz }) {
   return [
     `references/holes.png is ${style}. The bright magenta (#FF00FF) areas are holes with no paint yet.`,
     'Paint ONLY inside the magenta areas, continuing the surrounding scene naturally (same perspective, same light, same brush style).',
     'Everything outside the magenta areas must stay exactly as it is: same composition, same position of everything. Do not crop, zoom or shift the image.',
     'No magenta may remain in the result.',
-  ].join('\n');
+    hasPreviz ? 'previz.png is a plain 3D render of the same scene from the same camera, and depth.png is its depth map (white = near, black = far / sky). Inside the magenta areas, follow previz.png exactly for the position, size and silhouette of every object, and keep sky where depth.png is black. Use previz.png only for layout, not for colour or style.' : '',
+  ].filter(Boolean).join('\n');
 }
 
 async function runViews(o) {
@@ -108,12 +110,17 @@ async function runFill(o) {
   const holesFile = path.join(workDir, 'holes-input.png');
   writePng(holesFile, paintHoles(original, mask));
   const references = [{ name: 'holes.png', file: holesFile, note: 'painting with magenta holes to fill' }];
-  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: fillInstructions({ style }) });
+  const hasPreviz = typeof o.previz === 'string';
+  if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
+  if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
+  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: fillInstructions({ style, hasPreviz }) });
   console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}`);
   const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (!file) { console.log(`  → ${workDir}`); return; }
   const generated = resize(readPng(file), original.width, original.height);
-  writePng(o.out, composite(original, generated, mask));
+  const result = composite(original, generated, mask);
+  writePng(o.out, result);
+  if (hasPreviz && typeof o.overlay === 'string') writePng(o.overlay, overlay(result, resize(readPng(o.previz), original.width, original.height)));
   const drift = outsideChange(original, generated, mask);
   console.log(`  → ${o.out}（穴の外の変わり具合 ${drift.toFixed(1)}/255。${drift > 25 ? '大きい：Codex が絵全体を描き直したかも。継ぎ目を見てください' : '小さい：位置は合っていそう'}）`);
 }
