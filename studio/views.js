@@ -1,5 +1,5 @@
 // 視点を足す：穴の多い視点を探す → プレビズを書き出し直す → すでにある絵を新しい視点へ写す → 穴だけ埋める。
-import { loadViews, loadImage, sceneTriangles, analyze, warpInto, localFill, cameraBasis, VIEW_TINTS } from './viewdata.js';
+import { loadViews, loadImage, sceneTriangles, analyze, warpInto, localFill, VIEW_TINTS, LIGHTS } from './viewdata.js';
 
 const $ = (id) => document.getElementById(id);
 const api = async (url, body) => {
@@ -14,7 +14,8 @@ const problem = (text) => { $('problem').hidden = !text; $('problem').textConten
 const gl = new URLSearchParams(location.search).has('gl');
 
 const PREVIEW_W = 160, PREVIEW_H = 240, SEARCH_W = 40, SEARCH_H = 60;
-let D = null, meshes = null, busy = false, mode = 'painted', stage = 'reproj';
+let D = null, meshes = null, busy = false, mode = 'painted', stage = 'reproj', light = 'free';
+const sfx = () => LIGHTS[light].sfx;
 let cand = { position: [24, 1.7, -30], target: [0, 15, 0] }, selected = null, dots = [], mapT = null, timer = 0;
 
 const fovY = () => D.views[0].fov_y_deg;
@@ -22,9 +23,9 @@ const painted = () => D.views.filter((v) => v.painted);
 
 // ---- 読み込み ----
 async function reload() {
-  D = await loadViews();
+  D = await loadViews(light);
   meshes = meshes || sceneTriangles();
-  problem(painted().length ? '' : 'まだ絵画がありません。先に「絵画化」のタブで絵を作ってください（穴かどうかは、絵がある視点を基準に決めます）。');
+  problem(painted().length ? '' : `「${LIGHTS[light].name}」の絵画がまだありません。先に「絵画化」のタブで、この光の描き方の絵を作ってください（穴かどうかは、絵がある視点を基準に決めます）。`);
   if (selected && !D.views.some((v) => v.name === selected)) selected = null;
   renderAdded(); drawMap(); show();
 }
@@ -99,11 +100,17 @@ async function show() {
     window.__views = { analysis: a, cand, D };
     return;
   }
-  const v = D.views.find((x) => x.name === selected), st = v.st;
-  const kind = stage === 'painted' && !st.painted ? 'reproj' : stage === 'overlay' && !st.overlay ? (st.painted ? 'painted' : 'reproj') : stage;
+  const v = D.views.find((x) => x.name === selected), st = v.st, x = sfx(), has = (k) => !!st[`${k}${x}`];
+  if (!has('reproj')) { // この光の描き方では、まだ写していない
+    put(new Uint8ClampedArray(v.W * v.H * 4).fill(40), v.W, v.H);
+    $('shotTitle').textContent = `視点 ${v.name}：まだ写していません`;
+    $('shotNote').textContent = `「${LIGHTS[light].name}」では、この視点へまだ絵を写していません。「すでにある絵を写し直す」を押してください。`;
+    return;
+  }
+  const kind = stage === 'painted' && !has('painted') ? 'reproj' : stage === 'overlay' && !has('overlay') ? (has('painted') ? 'painted' : 'reproj') : stage;
   const title = `視点 ${v.name}：${{ reproj: '埋める前（マゼンタが穴）', painted: '埋めた後', overlay: '重ねて確認（シアンがプレビズの輪郭）' }[kind]}`;
-  const img = await loadImage(`/files/paint-out/${v.name}_${kind}.png`, v.W, v.H);
-  const holes = st.holes ? await loadImage(`/files/paint-out/${v.name}_holes.png`, v.W, v.H) : null;
+  const img = await loadImage(`/files/paint-out/${v.name}_${kind}${x}.png`, v.W, v.H);
+  const holes = has('holes') ? await loadImage(`/files/paint-out/${v.name}_holes${x}.png`, v.W, v.H) : null;
   if (seq !== showSeq) return;
   let holeCount = 0;
   if (holes) {
@@ -111,7 +118,7 @@ async function show() {
   }
   put(new Uint8ClampedArray(img), v.W, v.H);
   $('shotTitle').textContent = title;
-  $('shotNote').textContent = `穴は絵の ${(100 * holeCount / (v.W * v.H)).toFixed(1)}%。${st.painted ? '埋めた絵があります。' : 'まだ埋めていません。'}${stage !== kind ? '（選んだ絵はまだ無いので、ある絵を出しています）' : ''}`;
+  $('shotNote').textContent = `穴は絵の ${(100 * holeCount / (v.W * v.H)).toFixed(1)}%。${has('painted') ? '埋めた絵があります。' : 'まだ埋めていません。'}${stage !== kind ? '（選んだ絵はまだ無いので、ある絵を出しています）' : ''}`;
 }
 
 // ---- 足した視点の一覧 ----
@@ -120,9 +127,10 @@ function renderAdded() {
   if (!list.length) { box.innerHTML = '<p class="note">足した視点はまだありません。</p>'; return; }
   box.replaceChildren(...list.map((v) => {
     const row = document.createElement('div'); row.className = 'item';
-    const name = document.createElement('span'); name.textContent = `視点 ${v.name}（${v.st.painted ? '埋めた' : 'まだ穴あり'}）`;
+    const name = document.createElement('span'); const filled = !!v.st[`painted${sfx()}`];
+    name.textContent = `視点 ${v.name}（${filled ? '埋めた' : v.st[`reproj${sfx()}`] ? 'まだ穴あり' : 'まだ写していない'}）`;
     const see = document.createElement('button'); see.type = 'button'; see.className = 'plain'; see.textContent = selected === v.name ? '表示中' : '見る';
-    see.addEventListener('click', () => { selected = v.name; stage = v.st.painted ? 'painted' : 'reproj'; press($('stage'), stage); renderAdded(); show(); });
+    see.addEventListener('click', () => { selected = v.name; stage = filled ? 'painted' : 'reproj'; press($('stage'), stage); renderAdded(); show(); });
     const del = document.createElement('button'); del.type = 'button'; del.className = 'plain'; del.textContent = '取り消す';
     del.addEventListener('click', () => removeView(v.name));
     row.append(name, see, del); return row;
@@ -212,18 +220,39 @@ async function addView() {
     await saveExtra([...(await extraCameras()).filter((c) => c.name !== name), { name, position: round(cand.position), target: round(cand.target) }]);
     await reexport(); log('プレビズを書き出し直しました（色・奥行き・カメラ情報）。');
     say('絵を写しています');
-    D = await loadViews();
-    const v = D.views.find((x) => x.name === name); if (!v) throw new Error('書き出しに新しい視点が入っていません');
-    await new Promise((r) => setTimeout(r));
-    const w = warpInto(v, painted().filter((s) => s !== v));
-    await savePng(`${name}_reproj.png`, w.reproj, v.W, v.H);
-    await savePng(`${name}_holes.png`, w.holes, v.W, v.H);
-    await savePng(`${name}_new.png`, w.holes, v.W, v.H); // 粒にするのは穴だった画素だけ
-    log(`すでにある絵を写しました。穴は絵の ${(100 * w.holeCount / (v.W * v.H)).toFixed(1)}%。`);
+    let wroteNew = false;
+    for (const L of Object.keys(LIGHTS)) wroteNew = (await warpView(name, L, !wroteNew)) || wroteNew; // 絵のある描き方すべてについて写す
+    if (!wroteNew) throw new Error('写せる絵がありませんでした');
     selected = name; stage = 'reproj'; press($('stage'), stage);
     await reload(); say('穴を埋める方法を選んでください');
   } catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
   finally { busy = false; $('add').disabled = false; }
+}
+// 視点 name へ、光の描き方 L の絵を写す。写した絵・穴の印を保存する。絵が無ければ何もしない。
+async function warpView(name, L, writeNew) {
+  const data = await loadViews(L), v = data.views.find((x) => x.name === name), x = LIGHTS[L].sfx;
+  if (!v) throw new Error('書き出しに新しい視点が入っていません');
+  const sources = data.views.filter((s) => s.painted && s !== v && !(s.added && !s.st[`painted${x}`]));
+  if (!sources.length) return false;
+  await new Promise((r) => setTimeout(r));
+  const w = warpInto(v, sources);
+  await savePng(`${name}_reproj${x}.png`, w.reproj, v.W, v.H);
+  await savePng(`${name}_holes${x}.png`, w.holes, v.W, v.H);
+  if (writeNew) await savePng(`${name}_new.png`, w.holes, v.W, v.H); // 粒にするのは穴だった画素だけ
+  log(`「${LIGHTS[L].name}」の絵を写しました。穴は絵の ${(100 * w.holeCount / (v.W * v.H)).toFixed(1)}%。`);
+  return true;
+}
+async function rewarp() {
+  if (busy || !selected) return; busy = true;
+  try {
+    say('絵を写しています'); $('log').textContent = '';
+    const v = D.views.find((x) => x.name === selected);
+    // 埋めた絵が残っていると、それ自身が「すでにある絵」として写ってしまうので、先に消す
+    await fetch(`/api/paint-out/${selected}_painted${sfx()}.png`, { method: 'DELETE' });
+    if (!(await warpView(selected, light, !v.st.new_mask))) log(`「${LIGHTS[light].name}」の絵がまだありません。`);
+    stage = 'reproj'; press($('stage'), stage); await reload(); say('–');
+  } catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
+  finally { busy = false; }
 }
 async function removeView(name) {
   if (busy) return; busy = true;
@@ -243,12 +272,13 @@ async function fillLocal() {
   try {
     const v = D.views.find((x) => x.name === selected), t0 = performance.now();
     say('ツール内で埋めています');
-    const [reproj, holes] = await Promise.all([loadImage(`/files/paint-out/${v.name}_reproj.png`, v.W, v.H), loadImage(`/files/paint-out/${v.name}_holes.png`, v.W, v.H)]);
+    if (!v.st[`reproj${sfx()}`]) throw new Error('まだ絵を写していません。「すでにある絵を写し直す」を押してください。');
+    const [reproj, holes] = await Promise.all([loadImage(`/files/paint-out/${v.name}_reproj${sfx()}.png`, v.W, v.H), loadImage(`/files/paint-out/${v.name}_holes${sfx()}.png`, v.W, v.H)]);
     await new Promise((r) => setTimeout(r, 30));
     const f = localFill(v, reproj, holes, { meshes, sources: painted().filter((s) => s !== v) });
-    await savePng(`${v.name}_painted.png`, f.rgba, v.W, v.H);
+    await savePng(`${v.name}_painted${sfx()}.png`, f.rgba, v.W, v.H);
     const all = Math.max(1, f.spread + f.fromPalette);
-    log(`視点 ${v.name}：ツール内で埋めました（${((performance.now() - t0) / 1000).toFixed(1)} 秒）。穴のうち ${(100 * f.spread / all).toFixed(0)}% はまわりの色を広げ、${(100 * f.fromPalette / all).toFixed(0)}% は同じ形の平均の色で塗りました。`);
+    log(`視点 ${v.name}：ツール内で埋めました（${((performance.now() - t0) / 1000).toFixed(1)} 秒）。穴のうち ${(100 * f.spread / all).toFixed(0)}% はまわりの色を広げ、${(100 * f.fromPalette / all).toFixed(0)}% は${f.byLabels ? '同じ物体・種類の札の' : '同じ形の'}平均の色で塗りました。`);
     stage = 'painted'; press($('stage'), stage); await reload(); say('埋めました');
   } catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
   finally { busy = false; }
@@ -256,7 +286,7 @@ async function fillLocal() {
 let watching = false;
 async function fillCodex(dryRun) {
   if (busy || !selected) return;
-  try { await api('/api/paint/fill', { view: selected, dryRun }); watching = true; $('log').textContent = ''; poll(); }
+  try { await api('/api/paint/fill', { view: selected, dryRun, light }); watching = true; $('log').textContent = ''; poll(); }
   catch (e) { log(e.message); }
 }
 async function poll() {
@@ -282,6 +312,8 @@ $('camY').addEventListener('input', () => { cand.position[1] = Number($('camY').
 $('tgtY').addEventListener('input', () => { cand.target[1] = Number($('tgtY').value); selected = null; sliders(); renderAdded(); schedule(); });
 seg('mode', (v) => { mode = v; selected = null; renderAdded(); show(); });
 seg('stage', (v) => { stage = v; show(); });
+seg('light', (v) => { if (busy) return press($('light'), light); light = v; reload().catch((e) => problem(e.message)); });
+$('rewarp').addEventListener('click', rewarp);
 $('search').addEventListener('click', () => search().catch((e) => { log(e.message); busy = false; $('search').disabled = false; }));
 $('add').addEventListener('click', addView);
 $('fillLocal').addEventListener('click', fillLocal);
