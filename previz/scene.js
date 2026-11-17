@@ -1,7 +1,16 @@
 // プレビズの中身：地面・アーチ1つ・奥の塔。単位はメートル、+Y が上、カメラAは -Z の方向を向く。
 import * as THREE from 'three/webgpu';
+import { sunDirection } from '../shared/light.js';
 
 export const SKY = 0xb9c7cf;
+
+// 「影つきの絵」を描かせるときの太陽。方位は 0 = +Z（カメラAの背中側）、90 = +X。アーチの左奥から照らすので、影は手前の地面に落ちる。
+// 粒の光を付け替えるとき、この向きが「描いたときの光」の基準になる。
+export const PAINT_SUN = { azimuth: 205, elevation: 32 };
+
+// 形に札を付ける。type は shared/labels.js の種類の key、object は物体の名前（同じ名前の形は1つの物体になる）。
+// casts: false は影を落とさない形（平らな地面など）。グループに付けると、中の形すべてに効く。
+const label = (o, type, object, casts = true) => { o.userData.label = { type, object, casts }; return o; };
 
 export function buildScene() {
   const scene = new THREE.Scene();
@@ -9,7 +18,7 @@ export function buildScene() {
 
   scene.add(new THREE.HemisphereLight(0xdfe9f2, 0x59633f, 1.6));
   const sun = new THREE.DirectionalLight(0xfff0d0, 2.2);
-  sun.position.set(-60, 90, 40);
+  sun.position.fromArray(sunDirection(PAINT_SUN.azimuth, PAINT_SUN.elevation)).multiplyScalar(120);
   scene.add(sun);
 
   const stone = new THREE.MeshLambertMaterial({ color: 0x8d8a80 });
@@ -20,7 +29,7 @@ export function buildScene() {
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200), grass);
   ground.rotation.x = -Math.PI / 2;
   ground.name = 'ground';
-  scene.add(ground);
+  scene.add(label(ground, 'grass', 'ground', false));
 
   // アーチ：開口の幅14m、柱の幅5m、全高30m、厚み6m。原点に立つ。
   const open = 7, pillar = 5, springY = 16, top = 30, thick = 6;
@@ -38,7 +47,7 @@ export function buildScene() {
   archGeo.translate(0, 0, -thick / 2);
   const arch = new THREE.Mesh(archGeo, stone);
   arch.name = 'arch';
-  scene.add(arch);
+  scene.add(label(arch, 'stone', 'arch'));
 
   // 奥の塔：アーチの向こう 150m。
   const tower = new THREE.Group();
@@ -49,7 +58,7 @@ export function buildScene() {
   cap.position.y = 101;
   tower.add(body, cap);
   tower.position.set(0, 0, -150);
-  scene.add(tower);
+  scene.add(label(tower, 'stone', 'tower'));
 
   return scene;
 }
