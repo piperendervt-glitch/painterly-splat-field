@@ -13,8 +13,11 @@ export async function loadImage(url, w, h) {
   return g.getImageData(0, 0, w, h).data;
 }
 
-/** cameras.json と各視点の奥行き・絵画を読む。 */
-export async function loadViews() {
+export const LIGHTS = { free: { sfx: '', name: '自由（今まで）' }, flat: { sfx: '_flat', name: '光の少ない絵' }, previz: { sfx: '_lit', name: 'プレビズの光に従う絵' } };
+
+/** cameras.json と各視点の奥行き・絵画（light の描き方のもの）・札を読む。 */
+export async function loadViews(light = 'free') {
+  const sfx = LIGHTS[light].sfx;
   const [camsRes, stateRes] = await Promise.all([fetch('/files/previz-export/cameras.json', { cache: 'no-store' }), fetch('/api/state', { cache: 'no-store' })]);
   if (!camsRes.ok) throw new Error('プレビズの書き出しがまだありません。「プレビズ」のタブで「previz-export に保存」を押してください。');
   const cams = await camsRes.json(), state = await stateRes.json();
@@ -29,15 +32,24 @@ export async function loadViews() {
       const value = depthPx[i * 4] * 256 + depthPx[i * 4 + 1];
       z[i] = value ? 1 / (value / 65535 * (1 / near - 1 / far) + 1 / far) : 0;
     }
+    // 種類・物体の札（新しい書き出しにだけある）。ツール内の穴埋めで、色を選ぶ手がかりにする
+    let type = null, object = null;
+    if (def.type && def.object) {
+      try {
+        const [t, o] = await Promise.all([loadImage(`/files/previz-export/${def.type}`, W, H), loadImage(`/files/previz-export/${def.object}`, W, H)]);
+        type = new Uint8Array(W * H); object = new Uint16Array(W * H);
+        for (let i = 0; i < W * H; i++) { type[i] = t[i * 4]; object[i] = o[i * 4] * 256 + o[i * 4 + 1]; }
+      } catch { type = object = null; }
+    }
     views.push({
-      def, name: def.name, W, H, z, st,
-      added: !!st.new_mask || !!st.reproj, // 「視点を足す」で足した視点
-      painted: st.painted ? await loadImage(`/files/paint-out/${def.name}_painted.png`, W, H) : null,
+      def, name: def.name, W, H, z, st, type, object,
+      added: !!st.new_mask || !!st.reproj || !!st.reproj_flat || !!st.reproj_lit, // 「視点を足す」で足した視点
+      painted: st[`painted${sfx}`] ? await loadImage(`/files/paint-out/${def.name}_painted${sfx}.png`, W, H) : null,
       c2w: def.extrinsics.camera_to_world.flat(), w2c: def.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4
       ...def.intrinsics,
     });
   }
-  return { cams, state, views };
+  return { cams, state, views, light, sfx };
 }
 
 /** 位置と見る先から、カメラの向き（右・上・前）を作る。three.js の lookAt と同じで、傾きは付けない。 */
@@ -220,9 +232,12 @@ function worldAt(v, x, y, out) {
   out[0] = m[0] * xc + m[1] * yc + m[2] * zc + m[3]; out[1] = m[4] * xc + m[5] * yc + m[6] * zc + m[7]; out[2] = m[8] * xc + m[9] * yc + m[10] * zc + m[11];
   return true;
 }
-// 点がどの形の上にあるか（形の名前ごとの箱で判断）と、その中での高さの段。空は見上げる角度の段。
-function classify(boxes, isSurface, p) {
+// 画素がどの「色の仲間」か。札があれば「物体・高さの段」（無い物体は種類で代わりを探す）、
+// 札が無い古い書き出しでは、形の名前ごとの箱で判断する。空は見上げる角度の段。鍵は「仲間:段」。
+const STEP_Y = 4; // 高さの段の幅（m）
+function classify(boxes, v, x, y, isSurface, p) {
   if (!isSurface) { const e = p[1] / Math.hypot(p[0], p[1], p[2]); return `sky:${Math.max(0, Math.min(BINS - 1, Math.floor((e + 0.2) / 1.2 * BINS)))}`; }
+  if (v.object) { const i = y * v.W + x; return `t${v.type[i]}o${v.object[i]}:${Math.max(0, Math.floor(p[1] / STEP_Y))}`; }
   for (const b of boxes) {
     if (p[0] < b.min[0] - 0.3 || p[0] > b.max[0] + 0.3 || p[1] < b.min[1] - 0.3 || p[1] > b.max[1] + 0.3 || p[2] < b.min[2] - 0.3 || p[2] > b.max[2] + 0.3) continue;
     const t = (p[1] - b.min[1]) / Math.max(1e-6, b.max[1] - b.min[1]);
@@ -243,15 +258,19 @@ function nameBoxes(meshes) {
 function buildPalette(boxes, sources) {
   const sum = new Map(), p = [0, 0, 0];
   for (const s of sources) for (let y = 4; y < s.H; y += 8) for (let x = 4; x < s.W; x += 8) {
-    const key = classify(boxes, worldAt(s, x, y, p), p), o = (y * s.W + x) * 4;
+    const key = classify(boxes, s, x, y, worldAt(s, x, y, p), p), o = (y * s.W + x) * 4;
     const e = sum.get(key) || [0, 0, 0, 0]; e[0] += s.painted[o]; e[1] += s.painted[o + 1]; e[2] += s.painted[o + 2]; e[3]++; sum.set(key, e);
   }
   const lookup = (key) => {
     let e = sum.get(key);
-    if (!e) { // 同じ形のいちばん近い段、無ければ全体の平均
-      const [name, bin] = key.split(':'); let bestD = Infinity;
-      for (const [k, v] of sum) { const [n2, b2] = k.split(':'); const d = n2 === name ? Math.abs(b2 - bin) : Infinity; if (d < bestD) { bestD = d; e = v; } }
-      if (!e) { e = [0, 0, 0, 0]; for (const [k, v] of sum) if (k.startsWith('sky') === key.startsWith('sky')) { e[0] += v[0]; e[1] += v[1]; e[2] += v[2]; e[3] += v[3]; } }
+    if (!e) { // 同じ物体のいちばん近い段 → 同じ種類のいちばん近い段 → 全体の平均
+      const [name, bin] = key.split(':'), kind = name.replace(/o\d+$/, '');
+      for (const match of [(n2) => n2 === name, (n2) => kind !== name && n2.replace(/o\d+$/, '') === kind]) {
+        let bestD = Infinity;
+        for (const [k, val] of sum) { const [n2, b2] = k.split(':'); const d = match(n2) ? Math.abs(b2 - bin) : Infinity; if (d < bestD) { bestD = d; e = val; } }
+        if (e) break;
+      }
+      if (!e) { e = [0, 0, 0, 0]; for (const [k, val] of sum) if (k.startsWith('sky') === key.startsWith('sky')) { e[0] += val[0]; e[1] += val[1]; e[2] += val[2]; e[3] += val[3]; } }
       if (!e[3]) e = [128, 128, 128, 1];
       sum.set(key, e);
     }
@@ -264,11 +283,13 @@ function buildPalette(boxes, sources) {
  * ツール内の穴埋め（ChatGPT を呼ばない）。
  *  1. 穴のまわりの色を、同じ面の中だけで穴の内側へ広げる。「同じ面」は奥行きが連続していること
  *     （隣との距離の比が小さい、または両方とも空）で判断するので、空の色が柱に、柱の色が空ににじまない。
- *  2. どこからも届かない所（丸ごと見えていなかった面や空）は、すでにある絵の「同じ形・同じ高さの平均の色」で塗る。
+ *  2. どこからも届かない所（丸ごと見えていなかった面や空）は、すでにある絵の「同じ物体・同じ高さの平均の色」で塗る。
+ *     物体は書き出しの札（X_object.png）で見分け、その物体がどの絵にも無ければ同じ種類（X_type.png）の色を使う。
  *  3. 穴の中だけ、同じ面の隣どうしでならす。
  * 新しい模様は作れないので、広い穴はのっぺりした色になる。
  */
 export function localFill(v, reproj, holes, { meshes, sources, smoothPasses = 40 }) {
+  if (!(v.object && sources.every((s) => s.object))) { v = { ...v, object: null }; sources = sources.map((s) => ({ ...s, object: null })); } // 札は全部の視点にあるときだけ使う
   const { W, H, z } = v, n = W * H;
   const out = new Uint8ClampedArray(reproj), todo = new Uint8Array(n);
   const col = new Float32Array(n * 3);
@@ -296,7 +317,7 @@ export function localFill(v, reproj, holes, { meshes, sources, smoothPasses = 40
   let fromPalette = 0;
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x; if (!todo[i]) continue;
-    const e = palette(classify(boxes, worldAt(v, x, y, p), p));
+    const e = palette(classify(boxes, v, x, y, worldAt(v, x, y, p), p));
     col[i * 3] = e[0] / e[3]; col[i * 3 + 1] = e[1] / e[3]; col[i * 3 + 2] = e[2] / e[3]; fromPalette++;
   }
   // ならす（穴の中だけ、同じ面の隣とだけ平均を取る）
@@ -316,5 +337,5 @@ export function localFill(v, reproj, holes, { meshes, sources, smoothPasses = 40
     for (let k = 0; k < idx.length; k++) { const i = idx[k]; col[i * 3] = tmp[k * 3]; col[i * 3 + 1] = tmp[k * 3 + 1]; col[i * 3 + 2] = tmp[k * 3 + 2]; }
   }
   for (const i of idx) { out[i * 4] = col[i * 3]; out[i * 4 + 1] = col[i * 3 + 1]; out[i * 4 + 2] = col[i * 3 + 2]; }
-  return { rgba: out, spread: idx.length - fromPalette, fromPalette };
+  return { rgba: out, spread: idx.length - fromPalette, fromPalette, byLabels: !!v.object && sources.every((s) => s.object) };
 }

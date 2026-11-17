@@ -47,6 +47,16 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
   <p class="note warn" id="problem" hidden></p>
 
   <div class="group">
+    <div class="label">光の描き方（どの絵を基準にするか）</div>
+    <div class="seg" id="light">
+      <button type="button" data-v="free" aria-pressed="true">自由</button>
+      <button type="button" data-v="flat" aria-pressed="false">光の少ない絵</button>
+      <button type="button" data-v="previz" aria-pressed="false">光に従う絵</button>
+    </div>
+    <p class="note" id="lightNote">「絵画化」のタブで描いた絵のうち、どの描き方のものを写して穴を埋めるかを選びます。</p>
+  </div>
+
+  <div class="group">
     <h2>1. 視点を決める</h2>
     <button type="button" class="plain" id="search">穴の多い視点を自動で探す</button>
     <p class="note" id="searchNote">歩ける高さで、まわりの位置から形を見たときに、穴がいちばん多く見える所を計算で探します。</p>
@@ -74,8 +84,10 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
         <button type="button" data-v="painted" aria-pressed="false">埋めた後</button>
         <button type="button" data-v="overlay" aria-pressed="false">重ねて確認</button>
       </div>
+      <button type="button" class="plain" id="rewarp">すでにある絵を写し直す</button>
+      <p class="note">もとの視点の絵を描き直した後や、この光の描き方でまだ写していないときに押します。埋めた絵は消えます。</p>
       <button type="button" class="main" id="fillLocal">ツール内で埋める（すぐ・利用枠なし）</button>
-      <p class="note">穴のまわりの色を、同じ面の中だけで内側へ広げます。新しい模様は作れないので、広い穴はのっぺりします。</p>
+      <p class="note">穴のまわりの色を、同じ面の中だけで内側へ広げます。届かない面は、同じ物体（無ければ同じ種類）の色で塗ります。新しい模様は作れないので、広い穴はのっぺりします。</p>
       <button type="button" class="main" id="fillCodex">Codex で描き足す（きれい・利用枠を使う）</button>
       <div class="row">
         <button type="button" class="plain" id="fillDry">送る文だけ作る</button>
