@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>絵画化</title>
+<link rel="stylesheet" href="./ui.css">
+<style>
+body.tool{grid-template-columns:minmax(0,1fr) 340px}
+#views{overflow:auto;padding:20px;display:flex;flex-direction:column;gap:24px}
+.view h2{margin-bottom:8px}
+.shots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+figure{margin:0;display:flex;flex-direction:column;gap:6px}
+figcaption{color:var(--muted);font-size:12px}
+.shot{aspect-ratio:2/3;background:var(--panel);border:1px solid var(--line);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;overflow:hidden;text-align:center;padding:0}
+.shot img{width:100%;height:100%;object-fit:contain;display:block}
+pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;min-height:80px}
+.picks{display:flex;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body class="tool">
+<main id="views"><p class="note" id="empty">読み込んでいます…</p></main>
+<aside>
+  <header>
+    <h1>絵画化</h1>
+    <p class="lead">プレビズの絵を下絵に、Codex CLI（ChatGPT の月額プラン）で各視点の絵画を作ります。<code>paint/paint.mjs views</code> と同じものです。</p>
+  </header>
+
+  <div class="group">
+    <div class="label">描く視点</div>
+    <div class="picks" id="picks"></div>
+    <div id="lightBox" class="group" hidden>
+      <div class="label">光の描き方</div>
+      <div class="seg" id="light">
+        <button type="button" data-v="free" aria-pressed="true">自由（今まで）</button>
+        <button type="button" data-v="flat" aria-pressed="false">光の少ない絵</button>
+        <button type="button" data-v="previz" aria-pressed="false">プレビズの光に従う絵</button>
+      </div>
+      <p class="note">後で光を動かすための比較用。左の絵も、選んだ描き方のものに切り替わります。</p>
+    </div>
+    <div class="label">画風（英語。空欄なら既定の油彩）</div>
+    <textarea id="style" rows="3" placeholder="a loose, painterly oil painting with visible brush strokes, soft atmospheric perspective, warm late-afternoon light"></textarea>
+  </div>
+
+  <div class="group">
+    <button type="button" class="main" id="run">Codex で描く</button>
+    <div class="row">
+      <button type="button" class="plain" id="dry">送る文だけ作る</button>
+      <button type="button" class="plain" id="stop" disabled>止める</button>
+    </div>
+    <p class="note">「Codex で描く」は ChatGPT のプランの利用枠を使います（1 枚 30 秒〜数分、1 枚ずつ順番）。「送る文だけ作る」は Codex を呼ばず、利用枠は減りません。</p>
+    <p class="note warn" id="setup" hidden></p>
+  </div>
+
+  <div class="group">
+    <div class="label"><span>実行のようす</span><output id="status">–</output></div>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="group">
+    <p class="note"><strong>判断の目安</strong>：「重ねて確認」で、シアンの線（プレビズの輪郭）が絵の形の境目に乗っていれば、そのまま粒にできます。できた絵は「粒の空間」のタブで「ファイルを読み直す」を押すと反映されます。</p>
+  </div>
+</aside>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const api = async (url, body) => {
+  const res = await fetch(url, body === undefined ? { cache: 'no-store' } : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `失敗しました（${res.status}）`);
+  return data;
+};
+let shown = '', wasRunning = false, picksBuilt = false, light = 'free';
+const SUFFIX = { free: '', flat: '_flat', previz: '_lit' };
+
+function shot(caption, url) {
+  const f = document.createElement('figure'), box = document.createElement('div'), c = document.createElement('figcaption');
+  box.className = 'shot'; c.textContent = caption;
+  if (url) { const img = document.createElement('img'); img.src = url; img.alt = caption; box.append(img); } else box.textContent = 'まだありません';
+  f.append(box, c); return f;
+}
+async function refresh() {
+  const s = await api('/api/state');
+  const key = JSON.stringify(s) + light, sfx = SUFFIX[light];
+  $('lightBox').hidden = !s.views.some((v) => v.flat || v.lit); // 光の描き分けは、プレビズの書き出しに対応する絵があるときだけ
+  $('setup').hidden = s.paintReady;
+  $('setup').textContent = s.paintReady ? '' : 'paint フォルダの準備（npm install）がまだです。start.bat から起動し直すと自動で入ります。';
+  if (key === shown) return; shown = key;
+  const main = $('views'); main.replaceChildren();
+  if (!s.views.length) {
+    const p = document.createElement('p'); p.className = 'note';
+    p.textContent = 'プレビズの書き出しがまだありません。「プレビズ」のタブで「previz-export に保存」を押してください。';
+    main.append(p); return;
+  }
+  for (const v of s.views) {
+    const sec = document.createElement('section'); sec.className = 'view';
+    const h = document.createElement('h2'); h.textContent = `視点 ${v.name}`;
+    const row = document.createElement('div'); row.className = 'shots';
+    const refName = light === 'flat' && v.flat ? 'flat' : light === 'previz' && v.lit ? 'lit' : 'color', ref = v[refName];
+    const painted = v[`painted${sfx}`], over = v[`overlay${sfx}`];
+    row.append(
+      shot('プレビズ（下絵）', ref && `/files/previz-export/${v.name}_${refName}.png?t=${ref.mtime}`),
+      shot('絵画', painted && `/files/paint-out/${v.name}_painted${sfx}.png?t=${painted.mtime}`),
+      shot('重ねて確認（シアンがプレビズの輪郭）', over && `/files/paint-out/${v.name}_overlay${sfx}.png?t=${over.mtime}`),
+    );
+    sec.append(h, row); main.append(sec);
+  }
+  if (!picksBuilt) {
+    picksBuilt = true;
+    $('picks').replaceChildren(...s.views.map((v) => {
+      const l = document.createElement('label'); l.className = 'check';
+      const i = document.createElement('input'); i.type = 'checkbox'; i.checked = true; i.value = v.name;
+      const t = document.createElement('span'); t.textContent = v.name;
+      l.append(i, t); return l;
+    }));
+  }
+}
+async function poll() {
+  try {
+    const st = await api('/api/paint/status');
+    $('status').textContent = st.running ? `実行中 ${st.seconds} 秒` : st.code === null ? '–' : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`;
+    const log = $('log'); if (log.textContent !== st.log) { log.textContent = st.log; log.scrollTop = log.scrollHeight; }
+    $('run').disabled = $('dry').disabled = st.running; $('stop').disabled = !st.running;
+    if (st.running || wasRunning) await refresh();
+    wasRunning = st.running;
+  } catch (e) { $('status').textContent = 'サーバーに届きません'; }
+  setTimeout(poll, 1500);
+}
+async function run(dryRun) {
+  const views = [...$('picks').querySelectorAll('input:checked')].map((i) => i.value);
+  if (!views.length) { $('status').textContent = '視点を選んでください'; return; }
+  try { await api('/api/paint/run', { views, style: $('style').value, dryRun, light }); wasRunning = true; }
+  catch (e) { $('log').textContent = e.message; }
+}
+$('light').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  for (const x of $('light').children) x.setAttribute('aria-pressed', x === b ? 'true' : 'false');
+  light = b.dataset.v; refresh().catch(() => {});
+});
+$('run').addEventListener('click', () => run(false));
+$('dry').addEventListener('click', () => run(true));
+$('stop').addEventListener('click', () => api('/api/paint/stop', {}).catch(() => {}));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh().catch(() => {}); });
+window.addEventListener('focus', () => refresh().catch(() => {}));
+refresh().catch((e) => { $('empty').textContent = e.message; });
+poll();
+</script>
+</body>
+</html>

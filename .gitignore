@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-previz/
+# 試作ビューアの素材（参考の絵とその奥行き）。権利の都合で公開リポジトリには入れない。
+prototype/painting.jpg
+prototype/depth.png
+prototype/*.jpg
+prototype/*.png
+# プレビズの書き出し（GUI の「previz-export に保存」や zip の展開先）
+previz-export/

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>粒の絵画ビューア</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* 一つの暗い展示室。左に絵、右に細い操作卓。色は絵の苔と石から取る。 */
+:root{
+  color-scheme:dark;
+  --room:#0e120f;
+  --panel:#151a16;
+  --line:#2a332b;
+  --text:#dfe5da;
+  --muted:#8f9a8c;
+  --moss:#9ccf5a;
+  --font-display:"Shippori Mincho","Hiragino Mincho ProN","Yu Mincho",serif;
+  --font-body:"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic UI","Noto Sans JP",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--room);color:var(--text);font-family:var(--font-body);font-size:14px;line-height:1.6;
+  display:grid;grid-template-columns:minmax(0,1fr) 300px;overflow:hidden}
+#stage{position:relative;min-height:0;min-width:0;touch-action:none;cursor:grab}
+#stage.drag{cursor:grabbing}
+#stage canvas{display:block;width:100%;height:100%}
+#msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--muted);pointer-events:none}
+#hint{position:absolute;left:16px;bottom:14px;color:var(--muted);font-size:12px;pointer-events:none;text-shadow:0 1px 3px #000}
+aside{background:var(--panel);border-left:1px solid var(--line);padding:20px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:18px}
+h1{font-family:var(--font-display);font-weight:700;font-size:22px;margin:0;letter-spacing:.04em;text-wrap:balance}
+.lead{margin:6px 0 0;color:var(--muted);font-size:12.5px}
+.group{display:flex;flex-direction:column;gap:8px}
+.label{display:flex;justify-content:space-between;gap:8px;font-weight:500}
+.label output{color:var(--muted);font-variant-numeric:tabular-nums;font-weight:400}
+.note{color:var(--muted);font-size:12px;margin:0}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;color:var(--muted);padding:7px 4px;font:inherit;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--moss);color:#10140c;font-weight:700}
+input[type=range]{width:100%;accent-color:var(--moss);margin:0}
+.check{display:flex;align-items:center;gap:8px;cursor:pointer}
+.check input{accent-color:var(--moss);width:16px;height:16px;margin:0}
+button.plain{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer}
+button.plain:hover{border-color:var(--moss)}
+:focus-visible{outline:2px solid var(--moss);outline-offset:2px}
+dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+dt{color:var(--muted)}
+dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+@media (max-width:760px){
+  body{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) auto}
+  aside{border-left:0;border-top:1px solid var(--line);max-height:46%;padding:14px 16px}
+}
+</style>
+</head>
+<body>
+<main id="stage">
+  <div id="msg">絵を粒に変換しています…</div>
+  <div id="hint">ドラッグで覗き込む ・ ホイールで前後</div>
+</main>
+<aside>
+  <header>
+    <h1>粒の絵画ビューア</h1>
+    <p class="lead">1枚の絵の画素を、推定した奥行きに沿って1粒ずつ空間に置いています。</p>
+  </header>
+
+  <div class="group">
+    <div class="label"><span>表示</span></div>
+    <div class="seg" id="mode">
+      <button type="button" data-v="0" aria-pressed="true">絵の色</button>
+      <button type="button" data-v="1" aria-pressed="false">奥行き</button>
+    </div>
+    <p class="note">「奥行き」は推定した距離の色分けです。明るいほど手前。</p>
+  </div>
+
+  <div class="group">
+    <div class="label"><span>粒の細かさ</span></div>
+    <div class="seg" id="density">
+      <button type="button" data-v="420" aria-pressed="false">粗い</button>
+      <button type="button" data-v="640" aria-pressed="true">標準</button>
+      <button type="button" data-v="960" aria-pressed="false">細かい</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <label class="label" for="size"><span>粒の大きさ</span><output id="sizeOut"></output></label>
+    <input type="range" id="size" min="0.3" max="5" step="0.05" value="1.8">
+    <p class="note">小さくすると粒にほどけ、大きくすると筆が太くなります。</p>
+  </div>
+
+  <div class="group">
+    <label class="label" for="depth"><span>奥行きの強さ</span><output id="depthOut"></output></label>
+    <input type="range" id="depth" min="0" max="1" step="0.01" value="0.55">
+    <p class="note">手前と奥の距離の比です。強すぎると覗き込んだときに形が伸びます。</p>
+  </div>
+
+  <div class="group">
+    <label class="label" for="edge"><span>境界の粒を消す</span><output id="edgeOut"></output></label>
+    <input type="range" id="edge" min="0" max="1" step="0.01" value="0.45">
+    <p class="note">視点を動かしたとき、手前と奥の境目で尾を引く粒を消します。消すほど裏側の穴が見えます。</p>
+  </div>
+
+  <label class="check" for="sway"><input type="checkbox" id="sway" checked><span>自動でゆっくり揺らす</span></label>
+  <button type="button" class="plain" id="home">元の視点に戻す</button>
+
+  <dl>
+    <dt>粒の数</dt><dd id="sCount">–</dd>
+    <dt>描画方式</dt><dd id="sBackend">–</dd>
+    <dt>描画速度</dt><dd id="sFps">–</dd>
+  </dl>
+  <div class="group">
+    <button type="button" class="plain" id="swap">WebGL 2 で描き直す</button>
+    <p class="note">絵が出ない、または重いときに描画方式を替えられます。</p>
+  </div>
+</aside>
+
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { instancedBufferAttribute, uniform, uv, vec2, vec3, float, mix, step, exp, pow } from 'three/tsl';
+
+const $ = (id) => document.getElementById(id);
+const stage = $('stage'), msg = $('msg');
+const fail = (text) => { msg.textContent = text; msg.style.display = 'flex'; };
+
+const TAN = Math.tan(THREE.MathUtils.degToRad(27.5)); // 絵の縦の画角を55度と仮定
+const loadImage = (src) => new Promise((ok, ng) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ng(new Error(src)); i.src = src; });
+
+// ---- uniforms (スライダーで即時に変わる値) ----
+const uShift = uniform(0.1);     // 奥行き: z = (1+shift)/(d+shift)
+const uSize = uniform(1.8);      // 粒の大きさ(画素ピッチ比)
+const uPitch = uniform(0.001);   // 距離1での画素ピッチ
+const uAspect = uniform(0.707);  // 絵の横/縦
+const uEdge = uniform(0.3);      // 境界の閾値
+const uMode = uniform(0);        // 0=絵の色 1=奥行き
+
+let renderer, scene, camera, sprite = null;
+let imgEl, depthData, depthW, depthH, medianD = 0.2;
+
+function sampleDepth(u, v) { // u,v in 0..1, 16bit (R=上位, G=下位) を双線形で読む
+  const x = Math.min(depthW - 1.001, Math.max(0, u * depthW - 0.5)), y = Math.min(depthH - 1.001, Math.max(0, v * depthH - 0.5));
+  const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0;
+  const at = (xx, yy) => { const i = (yy * depthW + xx) * 4; return depthData[i] * 256 + depthData[i + 1]; };
+  return ((at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy) / 65535;
+}
+
+function build(gw) {
+  const gh = Math.round(gw * imgEl.naturalHeight / imgEl.naturalWidth), n = gw * gh;
+  const c = document.createElement('canvas'); c.width = gw; c.height = gh;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high'; ctx.drawImage(imgEl, 0, 0, gw, gh);
+  const px = ctx.getImageData(0, 0, gw, gh).data;
+
+  const d = new Float32Array(n), lg = new Float32Array(n);
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+    const i = y * gw + x; d[i] = sampleDepth((x + 0.5) / gw, (y + 0.5) / gh); lg[i] = Math.log(d[i] + 0.05);
+  }
+  // 遠い順に並べる(半透明の粒を奥から重ねるため)。16bit のバケツで数え上げ。
+  const B = 4096, cnt = new Uint32Array(B + 1);
+  for (let i = 0; i < n; i++) cnt[Math.min(B - 1, (d[i] * B) | 0) + 1]++;
+  for (let b = 0; b < B; b++) cnt[b + 1] += cnt[b];
+  medianD = (() => { let b = 0; while (cnt[b + 1] < n / 2) b++; return b / B; })();
+  const order = new Uint32Array(n), cur = cnt.slice(0, B);
+  for (let i = 0; i < n; i++) order[cur[Math.min(B - 1, (d[i] * B) | 0)]++] = i;
+
+  const a = new Float32Array(n * 4), col = new Float32Array(n * 3);
+  for (let k = 0; k < n; k++) {
+    const i = order[k], x = i % gw, y = (i / gw) | 0;
+    let e = 0; const l = lg[i];
+    if (x > 0) e = Math.max(e, Math.abs(l - lg[i - 1]));
+    if (x < gw - 1) e = Math.max(e, Math.abs(l - lg[i + 1]));
+    if (y > 0) e = Math.max(e, Math.abs(l - lg[i - gw]));
+    if (y < gh - 1) e = Math.max(e, Math.abs(l - lg[i + gw]));
+    a[k * 4] = ((x + 0.5) / gw) * 2 - 1; a[k * 4 + 1] = 1 - ((y + 0.5) / gh) * 2; a[k * 4 + 2] = d[i];
+    a[k * 4 + 3] = e * gw / 640; // 格子の細かさによらず同じ閾値で効くように
+    col[k * 3] = px[i * 4] / 255; col[k * 3 + 1] = px[i * 4 + 1] / 255; col[k * 3 + 2] = px[i * 4 + 2] / 255;
+  }
+
+  if (sprite) { scene.remove(sprite); sprite.material.dispose(); }
+  const A = instancedBufferAttribute(new THREE.InstancedBufferAttribute(a, 4));
+  const C = instancedBufferAttribute(new THREE.InstancedBufferAttribute(col, 3));
+  const z = float(1).add(uShift).div(A.z.add(uShift));
+  const m = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: false });
+  m.positionNode = vec3(A.x.mul(uAspect).mul(TAN).mul(z), A.y.mul(TAN).mul(z), z.negate());
+  const s = z.mul(uPitch).mul(uSize).mul(2);
+  m.scaleNode = vec2(s, s);
+  const t = pow(A.z, 0.45);
+  const ramp = mix(mix(vec3(0.05, 0.04, 0.16), vec3(0.62, 0.2, 0.42), t.mul(2).clamp()), vec3(1.0, 0.86, 0.45), t.mul(2).sub(1).clamp());
+  m.colorNode = mix(C, ramp, uMode);
+  const r = uv().sub(0.5).length();
+  m.opacityNode = exp(r.mul(r).mul(-18)).mul(step(A.w, uEdge));
+  sprite = new THREE.Sprite(m); sprite.count = n; sprite.frustumCulled = false;
+  scene.add(sprite);
+  uPitch.value = 2 * TAN / gh; uAspect.value = gw / gh;
+  $('sCount').textContent = n.toLocaleString('ja-JP') + ' 粒';
+}
+
+// ---- 視点 ----
+const view = { yaw: 0, pitch: 0, dolly: 1, tYaw: 0, tPitch: 0, tDolly: 1 };
+const LIM_Y = 0.32, LIM_P = 0.2;
+let edgeBase = 0.3;
+function placeCamera(time) {
+  const k = 0.12; view.yaw += (view.tYaw - view.yaw) * k; view.pitch += (view.tPitch - view.pitch) * k; view.dolly += (view.tDolly - view.dolly) * k;
+  let yaw = view.yaw, pitch = view.pitch;
+  if ($('sway').checked && !dragging) { yaw += 0.07 * Math.sin(time * 0.55); pitch += 0.025 * Math.sin(time * 0.38 + 1); }
+  // 元の視点では穴が出ないよう、視点が離れるほど境界の粒を消す
+  const off = Math.min(1, (Math.abs(yaw) + Math.abs(pitch) + Math.abs(1 - view.dolly) * 0.5) / 0.06);
+  uEdge.value = edgeBase / Math.max(1e-4, off * off * (3 - 2 * off));
+  const zp = (1 + uShift.value) / (medianD + uShift.value); // 絵の中ほどの距離を軸にして回る
+  const dist = zp * view.dolly;
+  camera.position.set(Math.sin(yaw) * Math.cos(pitch) * dist, Math.sin(pitch) * dist, -zp + Math.cos(yaw) * Math.cos(pitch) * dist);
+  camera.lookAt(0, 0, -zp);
+}
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight; if (!w || !h) return;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); renderer.setSize(w, h, false);
+  const ca = w / h, tanV = Math.max(TAN, TAN * uAspect.value / ca) * 1.03; // 絵全体が収まる画角
+  camera.aspect = ca; camera.fov = THREE.MathUtils.radToDeg(Math.atan(tanV)) * 2; camera.updateProjectionMatrix();
+}
+
+let dragging = false, last = null; const pts = new Map();
+stage.addEventListener('pointerdown', (e) => { stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, e); dragging = true; last = { x: e.clientX, y: e.clientY }; stage.classList.add('drag'); });
+stage.addEventListener('pointermove', (e) => {
+  if (!pts.has(e.pointerId)) return;
+  if (pts.size === 2) { // ピンチで前後
+    const o = [...pts.values()], before = Math.hypot(o[0].clientX - o[1].clientX, o[0].clientY - o[1].clientY);
+    pts.set(e.pointerId, e); const p = [...pts.values()], after = Math.hypot(p[0].clientX - p[1].clientX, p[0].clientY - p[1].clientY);
+    view.tDolly = Math.min(1.25, Math.max(0.35, view.tDolly * before / Math.max(1, after))); return;
+  }
+  pts.set(e.pointerId, e);
+  const s = 1.6 / Math.max(200, stage.clientHeight);
+  view.tYaw = Math.min(LIM_Y, Math.max(-LIM_Y, view.tYaw - (e.clientX - last.x) * s));
+  view.tPitch = Math.min(LIM_P, Math.max(-LIM_P, view.tPitch + (e.clientY - last.y) * s));
+  last = { x: e.clientX, y: e.clientY };
+});
+const up = (e) => { pts.delete(e.pointerId); if (!pts.size) { dragging = false; stage.classList.remove('drag'); } else { const p = [...pts.values()][0]; last = { x: p.clientX, y: p.clientY }; } };
+stage.addEventListener('pointerup', up); stage.addEventListener('pointercancel', up);
+stage.addEventListener('wheel', (e) => { e.preventDefault(); view.tDolly = Math.min(1.25, Math.max(0.35, view.tDolly * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+$('home').addEventListener('click', () => { view.tYaw = view.tPitch = 0; view.tDolly = 1; });
+
+// ---- 操作卓 ----
+function seg(id, fn) {
+  const el = $(id);
+  el.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return;
+    for (const x of el.children) x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); fn(Number(b.dataset.v)); });
+}
+function bind() {
+  seg('mode', (v) => { uMode.value = v; });
+  seg('density', (v) => { grid = v; if (renderer) build(v); });
+  const size = () => { uSize.value = Number($('size').value); $('sizeOut').textContent = '×' + uSize.value.toFixed(2); };
+  const depth = () => { const t = Number($('depth').value); uShift.value = 0.6 * Math.pow(0.02 / 0.6, t); $('depthOut').textContent = '奥は手前の ' + ((1 + uShift.value) / uShift.value).toFixed(0) + ' 倍'; };
+  const edge = () => { const t = Number($('edge').value); edgeBase = t <= 0 ? 1e9 : 0.6 * Math.pow(0.02 / 0.6, t); $('edgeOut').textContent = t <= 0 ? '消さない' : Math.round(t * 100) + '%'; };
+  $('size').addEventListener('input', size); $('depth').addEventListener('input', depth); $('edge').addEventListener('input', edge);
+  size(); depth(); edge();
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) $('sway').checked = false;
+}
+
+async function main() {
+  bind();
+  let depthImg;
+  try { [imgEl, depthImg] = await Promise.all([loadImage('painting.jpg'), loadImage('depth.png')]); }
+  catch (e) { return fail('絵のファイルを読み込めませんでした。prototype/ に painting.jpg と depth.png を置いてください（権利の都合でリポジトリには入れていません）。'); }
+  depthW = depthImg.naturalWidth; depthH = depthImg.naturalHeight;
+  const dc = document.createElement('canvas'); dc.width = depthW; dc.height = depthH;
+  const dctx = dc.getContext('2d'); dctx.drawImage(depthImg, 0, 0); depthData = dctx.getImageData(0, 0, depthW, depthH).data;
+
+  scene = new THREE.Scene(); camera = new THREE.PerspectiveCamera(55, 1, 0.05, 500);
+  await startRenderer(false);
+  new ResizeObserver(() => { if (renderer) resize(); }).observe(stage);
+  $('swap').addEventListener('click', () => startRenderer(!forceGL));
+  window.__ready = true;
+}
+
+let forceGL = false, grid = 640, starting = false;
+async function startRenderer(useGL) {
+  if (starting) return; starting = true;
+  if (renderer) { // 作り直す
+    renderer.setAnimationLoop(null);
+    if (sprite) { scene.remove(sprite); sprite.material.dispose(); sprite = null; }
+    renderer.domElement.remove(); renderer.dispose(); renderer = null;
+  }
+  try {
+    const r = new THREE.WebGPURenderer({ antialias: false, forceWebGL: useGL });
+    r.outputColorSpace = THREE.LinearSRGBColorSpace; // 絵の色をそのまま出す
+    await r.init(); renderer = r; forceGL = useGL;
+  } catch (e) { starting = false; return fail('このブラウザでは 3D 描画を開始できませんでした。Chrome か Edge の最新版で開いてください。'); }
+  renderer.setClearColor(0x0e120f, 1);
+  stage.prepend(renderer.domElement);
+  build(grid); resize();
+  msg.style.display = 'none';
+  const gpu = renderer.backend && renderer.backend.isWebGPUBackend;
+  $('sBackend').textContent = gpu ? 'WebGPU' : 'WebGL 2';
+  $('swap').textContent = gpu ? 'WebGL 2 で描き直す' : 'WebGPU で描き直す';
+  let frames = 0, t0 = performance.now();
+  renderer.setAnimationLoop((ms) => {
+    placeCamera(ms / 1000); renderer.render(scene, camera);
+    if (++frames >= 30) { const t1 = performance.now(); $('sFps').textContent = Math.round(frames * 1000 / (t1 - t0)) + ' fps'; frames = 0; t0 = t1; }
+  });
+  starting = false;
+}
+main().catch((e) => { console.error(e); fail('表示中に問題が起きました：' + e.message); });
+</script>
+</body>
+</html>
