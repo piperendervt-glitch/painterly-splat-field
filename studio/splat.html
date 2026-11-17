@@ -56,6 +56,16 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="orbit" aria-pressed="true">回して見る</button>
       <button type="button" data-v="walk" aria-pressed="false">歩く</button>
     </div>
+    <div class="group" id="walkBox" hidden>
+      <label class="check" for="collide"><input type="checkbox" id="collide" checked><span>当たり判定（切ると壁をすり抜けて飛べる）</span></label>
+      <label class="check" for="third"><input type="checkbox" id="third"><span>後ろから見る（自分の体を見る）</span></label>
+      <div class="label"><span>目の高さ</span><output id="oEye"></output></div>
+      <input type="range" id="eye" min="0.6" max="3" step="0.05" value="1.7">
+      <div class="label"><span>歩く速さ</span><output id="oSpeed"></output></div>
+      <input type="range" id="speed" min="1" max="12" step="0.5" value="4.5">
+      <p class="note">走る（Shift）は歩く速さの約 2.7 倍。当たりはプレビズの形そのもので、目の高さ 1.7 m は書き出しカメラと同じ高さです。</p>
+    </div>
+    <label class="check" for="shapes"><input type="checkbox" id="shapes"><span>当たりの形を表示（緑 = 立てる床、橙 = 壁、赤 = いま触れている所）</span></label>
     <div class="label">視点を移す</div>
     <div class="row" id="jump">
       <button type="button" class="plain" data-v="overview">俯瞰</button>
@@ -142,6 +152,7 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <dt>並べ直し</dt><dd id="sSort">–</dd>
     <dt>影の計算</dt><dd id="sSun">–</dd>
     <dt>いまの位置</dt><dd id="sPos">–</dd>
+    <dt>足元</dt><dd id="sFoot">–</dd>
   </dl>
   <div class="group">
     <button type="button" class="plain" id="swap">WebGL 2 で描き直す</button>

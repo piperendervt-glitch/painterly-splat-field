@@ -7,12 +7,12 @@ import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, hexToRgb, objectColor } from '../shared/labels.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESETS, sunDirection } from '../shared/light.js';
+import { createWalk } from './walk.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage'), msg = $('msg');
 const say = (text) => { msg.textContent = text; msg.style.display = text ? 'flex' : 'none'; };
 
-const EYE = 1.7;              // 歩くときの目の高さ（m）
 const SKY_Z = 1200;           // 空の粒を置く距離（m）
 const EDGE_MAX = 7;           // 境界からの距離をここまで数える（画素）
 const EDGE_LOG = 0.1;         // 隣との距離の比がこれ（対数）を超えたら境界
@@ -367,7 +367,7 @@ function makeMaterials(a) {
 async function start(useGL) {
   if (starting) return; starting = true;
   say('準備しています…');
-  const keep = app ? { pos: app.camera.position.clone(), quat: app.camera.quaternion.clone(), target: app.controls.target.clone() } : null;
+  const keep = app ? { pos: app.camera.position.clone(), quat: app.camera.quaternion.clone(), target: app.controls.target.clone(), feet: app.walk.wk.feet.slice() } : null;
   if (app) { app.renderer.setAnimationLoop(null); app.controls.dispose(); app.renderer.domElement.remove(); app.renderer.dispose(); app = null; }
 
   try { if (!data) { data = await loadData(); setupViewButtons(); } }
@@ -401,6 +401,8 @@ async function start(useGL) {
   a.wire = new THREE.Group();
   const wireMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.5, depthTest: false });
   a.previz = buildScene(); a.labels = labelScene(a.previz); // 太陽を動かしたときの影の計算にも使う
+  a.walk = createWalk(scene, a.labels.solids, a.labels.objects); // 歩くときの当たり判定（プレビズの形そのもの）
+  a.walk.setEye(Number($('eye').value)); a.walk.setSpeed(Number($('speed').value)); a.walk.wk.noclip = !$('collide').checked;
   a.previz.traverse((o) => { if (o.isMesh && o.name !== 'ground') { const m = new THREE.Mesh(o.geometry, wireMat); o.updateWorldMatrix(true, false); m.applyMatrix4(o.matrixWorld); m.renderOrder = 2; a.wire.add(m); } });
   a.frusta = new THREE.Group();
   data.views.forEach((v, i) => {
@@ -413,6 +415,7 @@ async function start(useGL) {
 
   if (keep) { camera.position.copy(keep.pos); camera.quaternion.copy(keep.quat); controls.target.copy(keep.target); syncAngles(); }
   else jump('0');
+  if (keep && keep.feet) a.walk.place(...keep.feet); else placeAtCamera();
 
   if (ui.order !== 'sort') { sortAndFill(new THREE.Vector3().setFromMatrixPosition(data.views[0].matrix)); a.sortEye.set(Infinity, 0, 0); }
   applyUi();
@@ -437,6 +440,7 @@ async function start(useGL) {
     if (++frames >= 30) {
       $('sFps').textContent = Math.round(frames * 1000 / (now - t0)) + ' fps'; frames = 0; t0 = now;
       const p = camera.position; $('sPos').textContent = `${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)} m`;
+      $('sFoot').textContent = a.walk.status();
     }
   });
   starting = false;
@@ -456,8 +460,12 @@ function applyUi() {
   a.wire.visible = $('wire').checked; a.frusta.visible = $('frusta').checked;
   a.sprite.material = ui.order === 'opaque' ? a.mats.hard : a.mats.soft;
   a.controls.enabled = ui.nav === 'orbit';
+  a.walk.shapes.visible = $('shapes').checked;
+  a.walk.me.visible = ui.nav === 'walk' ? $('third').checked : $('shapes').checked; // 自分の体は、後ろから見るときと、回して見るときに当たりの形を出しているとき
+  $('walkBox').hidden = ui.nav !== 'walk';
   $('hint').textContent = ui.nav === 'walk'
-    ? '画面をクリックで視線を動かす（Esc で解除）・ W A S D か矢印で歩く ・ Shift で速く'
+    ? (a.walk.wk.noclip ? '画面をクリックで視線を動かす（Esc で解除）・ W A S D で飛ぶ ・ E で上 ・ Q で下 ・ Shift で速く'
+      : '画面をクリックで視線を動かす（Esc で解除）・ W A S D か矢印で歩く ・ Shift で走る ・ Space で跳ぶ')
     : 'ドラッグで回す ・ ホイールで前後 ・ 右ドラッグで横に動く';
 }
 
@@ -479,9 +487,14 @@ function jump(v) {
   }
   syncAngles();
 }
+// 歩く人を、いまのカメラの真下の床に置く
+function placeAtCamera() {
+  const a = app, c = a.camera.position;
+  a.walk.place(c.x, c.y - a.walk.wk.p.eye, c.z);
+}
 function setNav(v) {
   const a = app; ui.nav = v; if (!a) return;
-  if (v === 'walk') { syncAngles(); a.camera.position.y = EYE; }
+  if (v === 'walk') { syncAngles(); placeAtCamera(); }
   else {
     if (document.pointerLockElement) document.exitPointerLock();
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(a.camera.quaternion);
@@ -491,18 +504,24 @@ function setNav(v) {
 }
 
 const keys = new Set();
+const THIRD_BACK = 4, THIRD_UP = 0.6; // 後ろから見るときのカメラの位置（m）
+let jumpQueued = false;
 function walkStep(dt) {
   const a = app;
   a.camera.quaternion.setFromEuler(new THREE.Euler(a.pitch, a.yaw, 0, 'YXZ'));
   const f = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
   const r = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
-  if (f || r) {
-    const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 20 : 6) * dt / Math.hypot(f, r);
-    const sin = Math.sin(a.yaw), cos = Math.cos(a.yaw);
-    a.camera.position.x += (-sin * f + cos * r) * speed;
-    a.camera.position.z += (-cos * f - sin * r) * speed;
+  a.walk.update(dt, {
+    forward: f, right: r, yaw: a.yaw, run: keys.has('ShiftLeft') || keys.has('ShiftRight'),
+    jump: jumpQueued, up: keys.has('KeyE') || keys.has('Space'), down: keys.has('KeyQ'),
+  });
+  jumpQueued = false;
+  const wk = a.walk.wk;
+  a.camera.position.set(wk.feet[0], wk.eyeY, wk.feet[2]);
+  if ($('third').checked) { // 後ろから見る：自分の体と当たりの様子を確かめる用
+    const back = new THREE.Vector3(0, 0, 1).applyQuaternion(a.camera.quaternion);
+    a.camera.position.addScaledVector(back, THIRD_BACK).y += THIRD_UP;
   }
-  a.camera.position.y = EYE;
 }
 function look(dx, dy) {
   const a = app; if (!a || ui.nav !== 'walk') return;
@@ -513,12 +532,19 @@ let dragging = false;
 stage.addEventListener('pointerdown', (e) => {
   if (ui.nav !== 'walk' || e.target.tagName !== 'CANVAS') return;
   dragging = true;
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); // Space でボタンが押されないように
   const req = e.target.requestPointerLock && e.target.requestPointerLock();
   if (req && req.catch) req.catch(() => {}); // 使えない場合はドラッグで見回す
 });
 window.addEventListener('pointerup', () => { dragging = false; });
 window.addEventListener('mousemove', (e) => { if (document.pointerLockElement || dragging) look(e.movementX, e.movementY); });
-window.addEventListener('keydown', (e) => { if (ui.nav === 'walk' && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) { keys.add(e.code); if (e.code.startsWith('Arrow')) e.preventDefault(); } });
+window.addEventListener('keydown', (e) => {
+  const t = e.target; // 文字を打つ欄では歩かない。チェックやつまみに触った後でも、すぐ歩けるようにする
+  if (ui.nav !== 'walk' || t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && !/^(checkbox|range|radio|color)$/.test(t.type))) return;
+  keys.add(e.code);
+  if (e.code === 'Space' && !e.repeat) jumpQueued = true;
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener('blur', () => keys.clear());
 
@@ -605,9 +631,20 @@ seg('order', (v) => {
   if (v === 'fixed') { sortAndFill(new THREE.Vector3().setFromMatrixPosition(data.views[0].matrix)); }
   app.sortEye.set(Infinity, 0, 0); applyUi();
 });
-$('jump').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { jump(b.dataset.v); if (ui.nav === 'walk') app.camera.position.y = EYE; } });
+$('jump').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { jump(b.dataset.v); if (ui.nav === 'walk') placeAtCamera(); } });
 for (const id of ['size', 'edge']) $(id).addEventListener('input', applyUi);
-for (const id of ['holes', 'wire', 'frusta', 'sky']) $(id).addEventListener('change', applyUi);
+for (const id of ['holes', 'wire', 'frusta', 'sky', 'shapes', 'third']) $(id).addEventListener('change', applyUi);
+// 歩き方の操作
+function showWalk() { $('oEye').textContent = `${Number($('eye').value).toFixed(2)} m`; $('oSpeed').textContent = `${Number($('speed').value).toFixed(1)} m/s`; }
+$('eye').addEventListener('input', () => { showWalk(); if (app) app.walk.setEye(Number($('eye').value)); });
+$('speed').addEventListener('input', () => { showWalk(); if (app) app.walk.setSpeed(Number($('speed').value)); });
+$('collide').addEventListener('change', () => {
+  if (!app) return;
+  const wk = app.walk.wk; wk.noclip = !$('collide').checked;
+  if (!wk.noclip) { const c = wk.feet; app.walk.place(c[0], c[1], c[2]); } // 当たりを戻したら、真下の床へ降ろす
+  applyUi();
+});
+showWalk();
 $('reload').addEventListener('click', () => { data = null; rebuild(); });
 $('swap').addEventListener('click', () => start(!forceGL).catch(fail));
 new ResizeObserver(layout).observe(stage);
