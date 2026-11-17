@@ -3,7 +3,7 @@
 //   GET  /files/previz-export/<名>   プレビズの書き出し
 //   GET  /files/paint-out/<名>       絵画化の結果
 //   POST /api/previz-export/<名>     プレビズ画面からの保存（png / cameras.json）
-//   POST /api/paint/run             paint/paint.mjs views を起動（{ views, style, dryRun }）
+//   POST /api/paint/run             paint/paint.mjs views を起動（{ views, style, dryRun, light }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
 import { spawn } from 'node:child_process';
@@ -46,16 +46,23 @@ function state() {
     name: v.name,
     color: stat(path.join(DIRS['previz-export'], v.color)),
     depth: stat(path.join(DIRS['previz-export'], v.depth)),
+    flat: stat(path.join(DIRS['previz-export'], `${v.name}_flat.png`)),
+    lit: stat(path.join(DIRS['previz-export'], `${v.name}_lit.png`)),
     painted: stat(path.join(DIRS['paint-out'], `${v.name}_painted.png`)),
     overlay: stat(path.join(DIRS['paint-out'], `${v.name}_overlay.png`)),
+    painted_flat: stat(path.join(DIRS['paint-out'], `${v.name}_painted_flat.png`)),
+    overlay_flat: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_flat.png`)),
+    painted_lit: stat(path.join(DIRS['paint-out'], `${v.name}_painted_lit.png`)),
+    overlay_lit: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_lit.png`)),
   }));
   return out;
 }
 
-function runPaint({ views, style, dryRun }) {
+function runPaint({ views, style, dryRun, light }) {
   const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'views', '--in', DIRS['previz-export'], '--out', DIRS['paint-out']];
   if (Array.isArray(views) && views.length) args.push('--views', views.filter((v) => /^[A-Za-z0-9_-]+$/.test(v)).join(','));
   if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
+  if (light === 'flat' || light === 'previz') args.push('--light', light); // free（既定）は今までどおり
   if (dryRun) args.push('--dry-run');
   Object.assign(job, { running: true, log: '', code: null, startedAt: Date.now(), dryRun: !!dryRun });
   const child = spawn(process.execPath, args, { cwd: path.join(ROOT, 'paint'), windowsHide: true });
