@@ -77,7 +77,7 @@ async function loadData() {
     // 粒の色のもと（ある物だけ）
     const colors = {};
     for (const [key, src] of Object.entries(SOURCES)) {
-      if (src.file) colors[key] = key === 'painted' && !st.painted ? null : await tryImage(src.file(v.name), W, H);
+      if (src.file) colors[key] = key in st && !st[key] ? null : await tryImage(src.file(v.name), W, H); // /api/state が「無い」と言う絵は読みに行かない
       else colors[key] = v[src.key] ? await tryImage(`/files/previz-export/${v[src.key]}`, W, H) : null;
     }
     if (!colors.previz) throw new Error(`/files/previz-export/${v.color} を読めませんでした`);
@@ -438,7 +438,9 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump };
+  window.__splat = { app: a, cloud, data, ui, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy,
+    // 確かめ用：表示 mode での全粒の色（リニア）を返す
+    colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
   window.__ready = true;
 }
 
