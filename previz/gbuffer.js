@@ -135,7 +135,7 @@ const sunTargets = new Map();
  * 平行な光なので、形とその影は地図の同じ場所に写る。だから地図は影を落とす形が収まる広さだけあればよい。
  * 太陽が地平線より下なら null（全部が影）。戻り値は shared/light.js の visibilityAt() にそのまま渡せる。
  */
-export async function renderSunMap(renderer, scene, labels, dir, { size = 2048, margin = 3 } = {}) {
+export async function renderSunMap(renderer, scene, labels, dir, { size = 2048, margin = 3, depth: wantDepth = true, packed: wantPacked = false } = {}) {
   if (dir[1] <= 0.01) return null;
   const casters = labels.solids.filter((s) => s.casts);
   if (!casters.length) return { size: 1, depth: new Float32Array([Infinity]), m: new THREE.Matrix4().elements, left: -1, right: 1, bottom: -1, top: 1 };
@@ -183,9 +183,18 @@ export async function renderSunMap(renderer, scene, labels, dir, { size = 2048, 
     }
   }
   const flip = score[1] > score[0];
-  const depth = new Float32Array(size * size);
-  for (let y = 0; y < size; y++) { const sy = flip ? size - 1 - y : y; for (let x = 0; x < size; x++) depth[y * size + x] = at(x, sy); }
-  return { size, depth, m, left: -half, right: half, bottom: -half, top: half, texel: 2 * half / size, flip, score };
+  // depth は CPU で比べる用（m。何も無い所は Infinity）。packed は描くときに引く用（読み戻した RGBA のまま、行だけ上から順に直したもの。
+  // 奥行き = (R * 256 + G) / 65534 * range、65535 は何も無い所）。
+  let depth = null, packed = null;
+  if (wantDepth) {
+    depth = new Float32Array(size * size);
+    for (let y = 0; y < size; y++) { const sy = flip ? size - 1 - y : y; for (let x = 0; x < size; x++) depth[y * size + x] = at(x, sy); }
+  }
+  if (wantPacked) {
+    packed = new Uint8Array(size * size * 4);
+    for (let y = 0; y < size; y++) { const sy = flip ? size - 1 - y : y; packed.set(px.subarray(sy * size * 4, (sy + 1) * size * 4), y * size * 4); }
+  }
+  return { size, depth, packed, range, m, left: -half, right: half, bottom: -half, top: half, texel: 2 * half / size, flip, score };
 }
 
 /** 点が日なたか（0〜1）。n は面の向き。奥行きの刻みの粗さ lift（m）ぶん、面から浮かせて調べる（自分の影を拾わないため）。 */
