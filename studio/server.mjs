@@ -135,7 +135,7 @@ function fillFiles(view, light) {
   const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}${sfx}.png`), pre = (name) => path.join(DIRS['previz-export'], `${view}_${name}.png`);
   return { image: out('reproj'), mask: out('holes'), out: out('painted'), overlay: out('overlay'), previz: pre(ref), depth: pre('depth_view') };
 }
-function runFill({ view, style, dryRun, light, noPreviz, hint }) {
+function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, refine, refineModel }) {
   const f = fillFiles(view, light);
   const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', f.image, '--mask', f.mask, '--out', f.out];
   if (!noPreviz) args.push('--previz', f.previz, '--depth', f.depth, '--overlay', f.overlay); // 絵 1 枚から作った場面には、穴の中の形の見本が無い
@@ -143,6 +143,20 @@ function runFill({ view, style, dryRun, light, noPreviz, hint }) {
   if (light === 'flat' || light === 'previz') args.push('--light', light);
   if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
   if (dryRun) args.push('--dry-run');
+  if (engine === 'local') { // 手元の PC の画像生成モデルで描く（利用枠を使わない）。呼ぶコマンドは環境変数 PSF_INPAINT、無ければ既定
+    if (process.env.PSF_INPAINT) args.push('--local', process.env.PSF_INPAINT); else args.push('--local');
+    if (typeof model === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(model)) args.push('--local-model', model);
+  }
+  if (engine === 'nvs') { // 別視点の絵を生成するモデルに、この視点の絵を作ってもらう。呼ぶコマンドは環境変数 PSF_NVS、無ければ既定
+    if (process.env.PSF_NVS) args.push('--nvs', process.env.PSF_NVS); else args.push('--nvs');
+    args.push('--export-dir', DIRS['previz-export'], '--view', view);
+    if (typeof model === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(model)) args.push('--nvs-model', model);
+    if (refine !== undefined && refine !== null && refine !== false) { // 仕上げ：穴の中を PC の画像生成モデルで描き直す（強さ 0〜1）
+      args.push('--refine', String(Math.min(1, Math.max(0.05, Number(refine) || 0.45))));
+      if (process.env.PSF_INPAINT) args.push('--local', process.env.PSF_INPAINT);
+      if (typeof refineModel === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(refineModel)) args.push('--local-model', refineModel);
+    }
+  }
   startJob(args, dryRun);
 }
 // 空の天球の穴を描く。空の絵（sky_face<向き><光>.png）と穴の印（…_holes.png）は「粒の空間」の画面が先に保存している。

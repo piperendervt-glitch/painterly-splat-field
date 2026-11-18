@@ -387,18 +387,28 @@ async function fillLocalCore(name) {
 let watching = false, watchName = '';
 // 絵 1 枚の場面で Codex に頼むときの追加：形の見本（プレビズ）は無し、画風は場面の物、人を増やさない指示
 const fillExtra = () => (painting ? { noPreviz: true, style: dream.fillStyle(D.cams), hint: dream.FILL_HINT } : {});
-async function fillCodex(dryRun) {
+// 描き手：nvs = 別視点の絵を生成するモデル（もとの絵とカメラから、その視点の絵を作る。利用枠なし）、
+//         model = 手元の PC の画像生成モデル（穴をまわりから描く。利用枠なし）、codex = ChatGPT（Codex、利用枠を使う）
+const ENGINES = { nvs: { name: '別視点の生成モデル' }, model: { name: 'PC の生成モデル' }, codex: { name: 'Codex' } };
+const engineBody = (engine) => {
+  const m = $('modelName').value.trim(), nm = $('nvsName').value.trim();
+  if (engine === 'model') return { engine: 'local', ...(m ? { model: m } : {}) };
+  if (engine === 'nvs') return { engine: 'nvs', ...(nm ? { model: nm } : {}), ...($('refineOn').checked ? { refine: Number($('refineStrength').value), ...(m ? { refineModel: m } : {}) } : {}) };
+  return {};
+};
+let watchEngine = 'codex';
+async function fillCodex(dryRun, engine = 'codex') {
   if (busy || !selected) return;
-  try { await api('/api/paint/fill', { view: selected, dryRun, light, ...fillExtra() }); watching = true; watchName = selected; $('log').textContent = ''; poll(); }
+  try { await api('/api/paint/fill', { view: selected, dryRun, light, ...fillExtra(), ...engineBody(engine) }); watching = true; watchName = selected; watchEngine = engine; $('log').textContent = ''; poll(); }
   catch (e) { log(e.message); }
 }
 async function poll() {
   if (!watching) return;
   try {
     const st = await api('/api/paint/status');
-    say(st.running ? `Codex で描いています ${st.seconds} 秒` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
+    say(st.running ? `${ENGINES[watchEngine].name}で描いています ${st.seconds} 秒` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
     $('log').textContent = st.log; $('stop').disabled = !st.running;
-    $('fillCodex').disabled = $('fillDry').disabled = $('fillLocal').disabled = st.running;
+    $('fillCodex').disabled = $('fillModel').disabled = $('fillNvs').disabled = $('fillDry').disabled = $('fillLocal').disabled = st.running;
     if (!st.running) {
       watching = false;
       if (st.code === 0 && !st.dryRun) {
@@ -412,7 +422,7 @@ async function poll() {
 }
 
 // ---- 連続で進める：1 歩ずつ角度を進めて「視点を足す → 穴を埋める」を繰り返す。止めるまで続く（回数の上限は無い） ----
-const auto = { running: false, stop: false, steps: 0, codex: 0, lines: [], kind: 'orbit', dir: 'right', fill: 'codex' };
+const auto = { running: false, stop: false, steps: 0, codex: 0, model: 0, nvs: 0, lines: [], kind: 'orbit', dir: 'right', fill: 'codex' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const autoLog = (text) => { auto.lines.push(text); const el = $('autoLog'); el.textContent = auto.lines.join('\n'); el.scrollTop = el.scrollHeight; };
 const fovX = () => 2 * Math.atan(Math.tan(fovY() * Math.PI / 360) * D.views[0].W / D.views[0].H) * 180 / Math.PI;
@@ -430,7 +440,7 @@ function showAuto() {
     : auto.kind === 'pan'
     ? `絵の横の画角は ${fx.toFixed(0)}°。1 歩がこれより大きいと、前の絵と重ならず、画風と位置を合わせる手がかりが無くなります。${deg >= fx ? 'いまの角度では重なりません。' : `いまの角度では、絵の ${Math.round(100 * (1 - deg / fx))}% ほどが前の絵と重なります。`}`
     : '見る先（白い印）を中心に、同じ高さ・同じ距離で回ります。1 歩を大きくすると枚数は減りますが、前の絵に斜めから浅く写っていた面は穴と数えないので、粗い色のまま残りやすくなります。';
-  $('autoCount').textContent = auto.running || auto.steps ? `これまで ${auto.steps} 歩。Codex を ${auto.codex} 回呼びました。` : '';
+  $('autoCount').textContent = auto.running || auto.steps ? `これまで ${auto.steps} 歩。別視点の生成モデルを ${auto.nvs} 回、PC の生成モデルを ${auto.model} 回、Codex を ${auto.codex} 回呼びました。` : '';
 }
 // 候補の視点を deg 度ぶん進める（上から見て時計回りが正）。orbit = 見る先のまわりを回る、pan = その場で向きを変える
 function turnCandidate(deg, kind) {
@@ -439,12 +449,12 @@ function turnCandidate(deg, kind) {
   else { const dx = px - tx, dz = pz - tz; cand = { position: [tx + dx * c - dz * s, py, tz + dx * s + dz * c], target: [tx, ty, tz] }; }
 }
 // Codex で 1 枚描いてもらい、終わるまで待つ。返すのは /api/paint/status の結果
-async function codexFillWait(name) {
-  await api('/api/paint/fill', { view: name, dryRun: false, light, ...fillExtra() });
+async function codexFillWait(name, engine = 'codex') {
+  await api('/api/paint/fill', { view: name, dryRun: false, light, ...fillExtra(), ...engineBody(engine) });
   for (;;) {
     await sleep(1500);
     let st; try { st = await api('/api/paint/status'); } catch { say('サーバーに届きません'); continue; }
-    say(st.running ? `Codex で描いています ${st.seconds} 秒（視点 ${name}）` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
+    say(st.running ? `${ENGINES[engine].name}で描いています ${st.seconds} 秒（視点 ${name}）` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
     $('log').textContent = st.log;
     if (!st.running) return st;
   }
@@ -455,12 +465,12 @@ async function autoRun() {
   }
   if (busy) return;
   if (!painted().length) return problem('まだ絵画がありません。先に「絵画化」のタブで絵を作ってください。');
-  Object.assign(auto, { running: true, stop: false, steps: 0, codex: 0, lines: [] }); busy = true; $('add').disabled = true; $('log').textContent = ''; showAuto();
+  Object.assign(auto, { running: true, stop: false, steps: 0, codex: 0, model: 0, nvs: 0, lines: [] }); busy = true; $('add').disabled = true; $('log').textContent = ''; showAuto();
   let last = '';
   try {
     while (!auto.stop) {
       // 角度・向き・埋め方は 1 歩ごとに読む（進めている途中で変えられる）
-      const deg = Number($('autoStep').value), useCodex = auto.fill === 'codex';
+      const deg = Number($('autoStep').value), engine = ENGINES[auto.fill] ? auto.fill : null;
       turnCandidate(auto.dir === 'right' ? deg : -deg, auto.kind);
       selected = null; sliders(); drawMap(); if (v3) v3.setCandidate(cand);
       autoLog(`${auto.steps + 1} 歩目：${auto.dir === 'right' ? '右' : '左'}へ ${deg}°（${auto.kind === 'pan' ? 'その場で向きを変える' : '見る先のまわりを回る'}）`);
@@ -470,12 +480,12 @@ async function autoRun() {
       autoLog(`  視点 ${name} を足しました。穴は絵の ${(100 * holes / pixels).toFixed(1)}%。`);
       if (auto.stop) break;
       if (holes === 0) autoLog('  穴が無いので、描き足さずに次へ進みます。');
-      else if (useCodex) {
-        auto.codex++; showAuto();
-        const st = await codexFillWait(name);
+      else if (engine) {
+        auto[engine]++; showAuto();
+        const st = await codexFillWait(name, engine);
         if (auto.stop) break;
-        if (st.code !== 0) throw new Error(`Codex が止まりました（終了コード ${st.code}）。下の「進み具合」に Codex の出力があります`);
-        autoLog(`  Codex で描き足しました。`);
+        if (st.code !== 0) throw new Error(`${ENGINES[engine].name}が止まりました（終了コード ${st.code}）。下の「進み具合」に出力があります`);
+        autoLog(`  ${ENGINES[engine].name}で描き足しました。`);
         if (painting) { await reload(); autoLog((await refineDreamDepth(name)) ? '  埋めた絵の奥行きを推定して、すでにある面に合わせました。' : '  穴の奥行きは仮の値のままです（進み具合の欄を見てください）。'); }
       } else { await fillLocalCore(name); autoLog('  ツール内で埋めました。'); }
       last = ''; auto.steps++; showAuto();
@@ -483,7 +493,7 @@ async function autoRun() {
     }
   } catch (e) { autoLog(`止まりました：${e.message}`); }
   if (last) autoLog(`視点 ${last} は穴が残ったままです。「2. 穴を埋める」で埋めるか、取り消してください。`);
-  autoLog(`終わりました。${auto.steps} 歩進み、Codex を ${auto.codex} 回呼びました。`);
+  autoLog(`終わりました。${auto.steps} 歩進み、別視点の生成モデルを ${auto.nvs} 回、PC の生成モデルを ${auto.model} 回、Codex を ${auto.codex} 回呼びました。`);
   auto.running = false; auto.stop = false; busy = false; $('add').disabled = false; showAuto(); say('–');
   await reload().catch(() => {});
 }
@@ -525,6 +535,9 @@ $('autoStep').addEventListener('input', showAuto);
 for (const key of ['kind', 'dir', 'fill']) seg(`auto${key[0].toUpperCase()}${key.slice(1)}`, (v) => { auto[key] = v; showAuto(); });
 $('fillLocal').addEventListener('click', fillLocal);
 $('fillCodex').addEventListener('click', () => fillCodex(false));
+$('fillModel').addEventListener('click', () => fillCodex(false, 'model'));
+$('fillNvs').addEventListener('click', () => fillCodex(false, 'nvs'));
+$('refineStrength').addEventListener('input', () => { $('oRefine').textContent = Number($('refineStrength').value).toFixed(2); });
 $('fillDry').addEventListener('click', () => fillCodex(true));
 $('stop').addEventListener('click', () => api('/api/paint/stop', {}).catch(() => {}));
 window.addEventListener('focus', () => { if (!busy && !watching) reload().catch(() => {}); });

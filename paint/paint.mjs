@@ -27,10 +27,14 @@
 //     座標は、カメラの真下の地面を原点、+x = 絵の右、+y = 上、+z = 奥（m）。「粒の空間」の「AI に形の配置を書かせる」が使う。
 //
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
+// fill だけ：--local [コマンド] で、Codex の代わりに手元の PC の画像生成モデルで描く（--local-model <名前>、--seed <数>。既定の待ち時間は 3600 秒）
+//            --nvs [コマンド] --export-dir <previz-export> --view <視点> で、別視点の絵を生成するモデルの絵を穴に使う（--nvs-model <名前>、--refine [強さ] で仕上げ）
 // --dry-run は Codex を呼ばず、作業フォルダに送る文（prompt.txt）と条件の絵だけを作る。利用枠は減らない。
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildPrompt, generate, askJson } from './codex.mjs';
+import { localInpaint, defaultCommand } from './localinpaint.mjs';
+import { nvsJob, nvsGenerate, defaultNvsCommand } from './nvs.mjs';
 import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange } from './image.mjs';
 
 const DEFAULT_STYLE = 'a loose, painterly oil painting with visible brush strokes, soft atmospheric perspective, warm late-afternoon light';
@@ -212,15 +216,40 @@ async function runFill(o) {
   if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
   if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
   const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: ground ? groundInstructions({ style, hasStyleRef }) : sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines, hint: typeof o.hint === 'string' ? o.hint : '' }) });
-  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}`);
-  const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
+  // --local：Codex の代わりに、手元の PC の画像生成モデルで穴を描く（利用枠を使わない。paint/localinpaint.mjs）
+  // --nvs  ：別視点の絵を生成するモデルに、この視点から見た絵を作ってもらい、穴に使う（paint/nvs.mjs）。--export-dir と --view が要る
+  // --refine [強さ]：--nvs の絵は粗いので、穴の中を PC の画像生成モデルで描き直して、絵の細かさを戻す（強さ 0〜1、既定 0.45）
+  const cmdOf = (v, fallback) => (v ? (typeof v === 'string' && v.trim() ? v.trim() : fallback()) : '');
+  const nvs = cmdOf(o.nvs, defaultNvsCommand), local = cmdOf(o.local, defaultCommand), refine = nvs && o.refine !== undefined;
+  const hint = typeof o.hint === 'string' ? o.hint : '', seed = o.seed !== undefined && o.seed !== true && Number.isFinite(Number(o.seed)) ? Number(o.seed) : undefined;
+  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
+  let file;
+  if ((nvs || local) && !o['dry-run']) {
+    fs.mkdirSync(path.join(workDir, 'references'), { recursive: true });
+    fs.copyFileSync(holesFile, path.join(workDir, 'references', 'holes.png'));
+    const base = { style, hint, width: original.width, height: original.height, ...(seed !== undefined ? { seed } : {}) };
+    const localModel = typeof o['local-model'] === 'string' && o['local-model'].trim() ? { model: o['local-model'].trim() } : {};
+    if (nvs) {
+      if (typeof o['export-dir'] !== 'string' || typeof o.view !== 'string') throw new Error('--nvs には --export-dir <previz-export> と --view <視点の名前> が要ります');
+      const job = nvsJob({ exportDir: o['export-dir'], paintDir: path.dirname(path.resolve(o.out)), view: o.view, holesFile, workDir, style, hint, model: typeof o['nvs-model'] === 'string' ? o['nvs-model'].trim() : '', seed });
+      file = await nvsGenerate({ command: nvs, workDir, job, timeoutSeconds: Number(o.timeout) || 7200 });
+      if (refine) { // 生成した絵を穴にはめた絵から、穴の中だけを描き直す
+        const init = path.join(workDir, 'nvs-composite.png');
+        writePng(init, composite(original, resize(readPng(file), original.width, original.height), mask));
+        fs.copyFileSync(file, path.join(workDir, 'nvs-raw.png'));
+        const strength = Number.isFinite(Number(o.refine)) && o.refine !== true ? Math.min(1, Math.max(0.05, Number(o.refine))) : 0.45;
+        console.log(`  絵の細かさを戻す仕上げ（強さ ${strength}）を PC の生成モデルでしています`);
+        file = await localInpaint({ command: cmdOf(o.local || true, defaultCommand), workDir, holesFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600, outName: 'refined.png' });
+      }
+    } else file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel }, timeoutSeconds: Number(o.timeout) || 3600 });
+  } else file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (!file) { console.log(`  → ${workDir}`); return; }
   const generated = resize(readPng(file), original.width, original.height);
   const result = composite(original, generated, mask);
   writePng(o.out, result);
   if (hasPreviz && typeof o.overlay === 'string') writePng(o.overlay, overlay(result, resize(readPng(o.previz), original.width, original.height)));
   const drift = outsideChange(original, generated, mask);
-  console.log(`  → ${o.out}（穴の外の変わり具合 ${drift.toFixed(1)}/255。${drift > 25 ? '大きい：Codex が絵全体を描き直したかも。継ぎ目を見てください' : '小さい：位置は合っていそう'}）`);
+  console.log(`  → ${o.out}（穴の外の変わり具合 ${drift.toFixed(1)}/255。${drift > 25 ? '大きい：絵全体が描き直されたかも。継ぎ目を見てください' : '小さい：位置は合っていそう'}）`);
 }
 
 // ---- 形の配置（箱と円柱の一覧）を書いてもらう ----
