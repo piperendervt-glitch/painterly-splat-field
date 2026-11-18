@@ -391,6 +391,9 @@ fetch('/api/state').then((r) => (r.ok ? r.json() : null)).then((s) => {
     if (!app || !app.caps) return;
     btn.disabled = true;
     try {
+      // この画面を開いた後に「視点を足す」でカメラが増減していたら、古い一覧のまま保存すると足した視点が消える。
+      // そのときは画面を読み直してから保存する。
+      if ((await extraNames()) !== loadedExtras) { sessionStorage.setItem(SAVE_AFTER_RELOAD, '1'); note.textContent = '足した視点を読み込み直してから保存します…'; location.reload(); return; }
       const count = await saveToFolder();
       note.textContent = `保存しました（${count} ファイル、${new Date().toLocaleTimeString()}）。`;
     } catch (e) { note.textContent = e.message; } finally { btn.disabled = false; }
@@ -404,11 +407,18 @@ if (import.meta.env.VITE_NO_DOWNLOAD) {
 }
 
 // GUI の「視点を足す」で足したカメラ（previz-export/extra_cameras.json）も、同じように書き出す。
+const SAVE_AFTER_RELOAD = 'previz-save-after-reload';
+const validExtra = (c) => c && /^[A-Za-z0-9]+$/.test(c.name || '');
+async function extraNames() { // いまの extra_cameras.json の中身（比べる用の文字列）。読めなければ空
+  try { const r = await fetch('/files/previz-export/extra_cameras.json', { cache: 'no-store' }); const list = r.ok ? await r.json() : []; return JSON.stringify((Array.isArray(list) ? list : []).filter(validExtra)); }
+  catch { return '[]'; }
+}
+const loadedExtras = await extraNames();
 try {
   const res = await fetch('/files/previz-export/extra_cameras.json', { cache: 'no-store' });
   const extra = res.ok ? await res.json() : [];
   for (const c of Array.isArray(extra) ? extra : []) {
-    if (!c || !/^[A-Za-z0-9]+$/.test(c.name || '') || EXPORT.cameras.some((x) => x.name === c.name)) continue;
+    if (!validExtra(c) || EXPORT.cameras.some((x) => x.name === c.name)) continue;
     EXPORT.cameras.push({ name: c.name, position: c.position, target: c.target });
     const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(EXPORT.cameras.length - 1); b.textContent = c.name; b.setAttribute('aria-pressed', 'false');
     $('view').append(b);
@@ -416,6 +426,14 @@ try {
 } catch { /* GUI のサーバーが無いときは A・B だけ */ }
 
 await start(forceGL).catch((e) => { console.error(e); say('表示中に問題が起きました：' + e.message); });
+
+// 保存の前に読み直した場合は、ここで保存する。
+if (sessionStorage.getItem(SAVE_AFTER_RELOAD)) {
+  sessionStorage.removeItem(SAVE_AFTER_RELOAD);
+  const note = $('saveNote');
+  try { if (!app || !app.caps) throw new Error('プレビズを描けませんでした'); const count = await saveToFolder(); note.hidden = false; note.textContent = `足した視点も含めて保存しました（${count} ファイル、${new Date().toLocaleTimeString()}）。`; }
+  catch (e) { note.hidden = false; note.textContent = e.message; }
+}
 
 // ?autosave つきで開かれたら（GUI の「視点を足す」から）、保存まで済ませて親の画面に知らせる。
 if (new URLSearchParams(location.search).has('autosave')) {

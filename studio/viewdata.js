@@ -54,12 +54,15 @@ export async function loadViews(light = 'free') {
 
 /** 位置と見る先から、カメラの向き（右・上・前）を作る。three.js の lookAt と同じで、傾きは付けない。 */
 export function cameraBasis(position, target) {
-  const f = new THREE.Vector3().fromArray(target).sub(new THREE.Vector3().fromArray(position)).normalize();
-  const r = new THREE.Vector3().crossVectors(f, new THREE.Vector3(0, 1, 0));
-  if (r.lengthSq() < 1e-8) r.set(1, 0, 0);
-  r.normalize();
-  const u = new THREE.Vector3().crossVectors(r, f);
-  return { r: r.toArray(), u: u.toArray(), f: f.toArray() };
+  // three.js の Matrix4.lookAt と同じ手順（真上・真下を向くときの扱いも同じにして、書き出しと向きを合わせる）
+  const z = new THREE.Vector3().fromArray(position).sub(new THREE.Vector3().fromArray(target));
+  if (z.lengthSq() === 0) z.z = 1;
+  z.normalize();
+  const up = new THREE.Vector3(0, 1, 0), x = new THREE.Vector3().crossVectors(up, z);
+  if (x.lengthSq() === 0) { z.z += 0.0001; z.normalize(); x.crossVectors(up, z); }
+  x.normalize();
+  const y = new THREE.Vector3().crossVectors(z, x);
+  return { r: x.toArray(), u: y.toArray(), f: z.negate().toArray() };
 }
 
 /** プレビズの形を三角形の並びにする（ワールド座標）。形ごとに範囲と外接の箱も持つ。 */
