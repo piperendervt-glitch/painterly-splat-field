@@ -381,3 +381,44 @@ export function paintedIn(o, x, y, z) {
   }
   return false;
 }
+
+// ---- AI が描いた背景の絵（手前の物を消した絵）を、背後の層の色に使う ----
+
+/**
+ * 「手前の物を消した背景の絵」を AI に頼むための絵を作る。
+ *   back  backLayer の結果（絵と同じ大きさ）、rgba  元の絵、grow  層のます（物とその縁）から何画素ひろげて描いてもらうか
+ * 返すもの：
+ *   mask   穴の印（RGBA。白 = 描いてもらう所）
+ *   guide  穴を計算で埋めた絵（RGBA。どこに何の背景が来るかの目安）
+ *   holes  穴の割合（0〜1）
+ */
+export function plateRequest(back, rgba, W, H, grow = 6) {
+  const n = W * H, d = new Uint8Array(n).fill(255);
+  for (let i = 0; i < n; i++) if (back.kind[i]) d[i] = 0;
+  spread(d, W, H);
+  const mask = new Uint8ClampedArray(n * 4), guide = new Uint8ClampedArray(rgba);
+  let holes = 0;
+  for (let i = 0; i < n; i++) {
+    const hole = d[i] <= grow; if (hole) holes++;
+    mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = hole ? 255 : 0; mask[i * 4 + 3] = guide[i * 4 + 3] = 255;
+    if (back.kind[i]) { guide[i * 4] = back.rgb[i * 3]; guide[i * 4 + 1] = back.rgb[i * 3 + 1]; guide[i * 4 + 2] = back.rgb[i * 3 + 2]; }
+  }
+  return { mask, guide, holes: holes / n };
+}
+
+/**
+ * 背後の層の色を、AI が描いた背景の絵に差し替えたものを返す（元の層は変えない）。
+ *   plate  AI が描いた背景の絵（RGBA）、mask  そのときの穴の印（RGBA。白 = AI が描いた所）
+ *   pixel  層のます → 絵の画素（SHARP のます目のとき）。無ければ同じ番号
+ * 差し替えるのは、層のます（kind ≠ 0）のうち、穴の印が白い所だけ。used = 差し替えた数。
+ */
+export function withPlate(back, plate, mask, pixel = null) {
+  const rgb = new Uint8ClampedArray(back.rgb), n = back.kind.length;
+  let used = 0;
+  for (let s = 0; s < n; s++) {
+    if (!back.kind[s]) continue;
+    const i = pixel ? pixel[s] : s; if (i < 0 || mask[i * 4] < 128) continue;
+    rgb[s * 3] = plate[i * 4]; rgb[s * 3 + 1] = plate[i * 4 + 1]; rgb[s * 3 + 2] = plate[i * 4 + 2]; used++;
+  }
+  return { ...back, rgb, used };
+}

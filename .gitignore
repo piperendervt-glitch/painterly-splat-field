@@ -13,3 +13,6 @@ painting/models/
 scenes/*/previz-export/*_overlay.png
 # SHARP の粒（研究目的のみのモデルの出力で、大きい）。sharp/README.md
 *_sharp.ply
+# 絵から作った場面で、絵画化や穴埋めを試したときの作業フォルダと結果（paint/paint.mjs）
+scenes/*/paint-out/work/
+scenes/*/paint-out/*_plate*.png

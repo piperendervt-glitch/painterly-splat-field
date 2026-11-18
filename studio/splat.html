@@ -80,6 +80,17 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <input type="range" id="halo" min="0" max="12" step="1" value="3">
     <p class="note" id="layerInfo" style="white-space: pre-line"></p>
     <p class="note">背後の層は、手前の物（種類の札が人・木・石壁など）を取り除いた「背景だけの絵と奥行き」を計算で作ったものです。奥行きは同じ行の左右の背景からつなぎ、色は左右の背景の色に、近くの背景の筆あとを写して重ねます。新しい物は描けないので、隠れていた人や物は出てきません。確かめ方：表示の「層」で背後の層が黄色になります。「使う視点」の「（背後の層）だけ」で、その粒だけを見られます。「穴を目立たせる」を入れて横へ動き、このチェックを入れたり外したりして、物の後ろのマゼンタが減るかを見てください。</p>
+    <div id="plateBox">
+      <div class="label">背後の層を AI に描いてもらう（Codex）</div>
+      <label class="check" for="plateUse"><input type="checkbox" id="plateUse" checked disabled><span>AI が描いた背景を、背後の層の色に使う</span></label>
+      <p class="note" id="platePlan"></p>
+      <button type="button" class="main" id="platePaint">手前の物を消した背景を AI に描いてもらう</button>
+      <button type="button" class="plain" id="plateStopBtn" hidden>止める</button>
+      <button type="button" class="plain" id="plateDry">文と絵だけ用意する（利用枠を使わない）</button>
+      <button type="button" class="plain" id="plateForget">AI が描いた背景を消す</button>
+      <p class="note" id="plateLog" hidden style="white-space:pre-wrap"></p>
+      <p class="note">視点ごとに 1 枚、いまの色のもとの絵から、手前の物（人・木・石壁など）とその縁をマゼンタの穴にした絵を見せ、「物の後ろにある背景だけ」を描いてもらいます。できた絵（paint-out の「視点_plate_色のもと.png」）は次からは読むだけです。背後の層の粒の位置は計算のまま、色だけがこの絵になります。上のチェックを外すと計算の色に戻るので、押し比べてください。足した視点（穴埋めの視点）には頼みません。</p>
+    </div>
   </div>
 
   <div class="group">
