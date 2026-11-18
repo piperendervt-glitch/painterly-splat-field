@@ -83,6 +83,40 @@ export function explain(code, stderr, stdout) {
  * references: [{ name, file, note }]。返すのはできた絵のファイルの場所。
  */
 export async function generate({ workDir, prompt, references, command = 'codex', timeoutSeconds = 600, dryRun = false }) {
+  const ran = await exec({ workDir, prompt, references, command, timeoutSeconds, dryRun });
+  if (!ran) return null;
+  const { code, stdout, stderr, started } = ran;
+  const named = path.join(workDir, 'result.png');
+  let found = fs.existsSync(named) ? named : (await imagesIn(workDir, started - 2000, false))[0];
+  if (!found) {
+    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    found = (await imagesIn(path.join(home, 'generated_images'), started - 2000, true))[0];
+  }
+  if (!found) {
+    if (code !== 0 || /usage_limit_reached|Missing bearer/i.test(stderr + stdout)) throw new Error(explain(code, stderr, stdout));
+    throw new Error(`Codex は終わりましたが、絵が見つかりません。記録：${workDir}`);
+  }
+  return found;
+}
+
+/**
+ * 絵ではなく、JSON のファイルを 1 つ書いてもらう（形の配置など）。workDir に resultName ができる。
+ * references: [{ name, file, note }]（絵でも文でもよい）。返すのは読み込んだ中身。dryRun なら null。
+ */
+export async function askJson({ workDir, prompt, references, resultName = 'result.json', command = 'codex', timeoutSeconds = 600, dryRun = false }) {
+  const ran = await exec({ workDir, prompt, references, command, timeoutSeconds, dryRun });
+  if (!ran) return null;
+  const { code, stdout, stderr } = ran, file = path.join(workDir, resultName);
+  if (!fs.existsSync(file)) {
+    if (code !== 0 || /usage_limit_reached|Missing bearer/i.test(stderr + stdout)) throw new Error(explain(code, stderr, stdout));
+    throw new Error(`Codex は終わりましたが、${resultName} が見つかりません。記録：${workDir}`);
+  }
+  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').replace(/^\s*```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  try { return JSON.parse(text); } catch (e) { throw new Error(`${resultName} が JSON として読めません（${e.message}）。記録：${workDir}`); }
+}
+
+// Codex を 1 回動かす。作業フォルダに prompt.txt・references/・codex-output.txt が残る。dryRun なら用意だけして null
+async function exec({ workDir, prompt, references, command = 'codex', timeoutSeconds = 600, dryRun = false }) {
   const refDir = path.join(workDir, 'references');
   await fsp.mkdir(refDir, { recursive: true });
   for (const r of references) await fsp.copyFile(r.file, path.join(refDir, r.name));
@@ -113,15 +147,5 @@ export async function generate({ workDir, prompt, references, command = 'codex',
   process.stdout.write('\n');
   await fsp.writeFile(path.join(workDir, 'codex-output.txt'), `exit ${code}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`).catch(() => {});
 
-  const named = path.join(workDir, 'result.png');
-  let found = fs.existsSync(named) ? named : (await imagesIn(workDir, started - 2000, false))[0];
-  if (!found) {
-    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-    found = (await imagesIn(path.join(home, 'generated_images'), started - 2000, true))[0];
-  }
-  if (!found) {
-    if (code !== 0 || /usage_limit_reached|Missing bearer/i.test(stderr + stdout)) throw new Error(explain(code, stderr, stdout));
-    throw new Error(`Codex は終わりましたが、絵が見つかりません。記録：${workDir}`);
-  }
-  return found;
+  return { code, stdout, stderr, started };
 }

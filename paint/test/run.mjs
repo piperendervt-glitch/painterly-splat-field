@@ -112,4 +112,25 @@ assert.doesNotMatch(groundPrompt, /SKY ONLY/);
 assert.ok(fs.existsSync(path.join(groundWork, 'references', 'guide.png')) && fs.existsSync(path.join(groundWork, 'references', 'style.png')), '目安の絵か画風の見本が渡っていない');
 assert.ok(fs.existsSync(ground), '周囲の地面の絵ができていない');
 console.log('ok fill --ground：地面だけを頼み、目安の絵と画風の見本を渡す');
+// layout：形の配置（箱と円柱の一覧）を書いてもらう。絵は作らない。直しの回は、今の配置・重ねた絵・見比べの文を渡す
+const layoutOut = path.join(tmp, 'fill', 'layout_ai.json'), brief = path.join(tmp, 'brief.txt'), report = path.join(tmp, 'report.txt');
+fs.writeFileSync(brief, 'Image 96 x 64 pixels. Camera height 1.7 m.\n');
+fs.writeFileSync(report, '1 left_leg : 40% of this shape lands on sky.\n');
+run('layout', '--image', path.join(inDir, 'A_color.png'), '--depth', path.join(inDir, 'A_depth_view.png'), '--brief', brief, '--out', layoutOut, '--codex', fake);
+const lay1 = JSON.parse(fs.readFileSync(layoutOut, 'utf8'));
+assert.deepEqual(lay1.objects.map((b) => b.name), ['left_leg', 'right_leg', 'tower'], '形の名前の整え方か、読めない形の捨て方がおかしい');
+assert.equal(lay1.objects[1].yaw_deg, 0);
+assert.equal(lay1.objects[2].shape, 'cylinder');
+const layWork = () => path.join(tmp, 'fill', 'work', fs.readdirSync(path.join(tmp, 'fill', 'work')).filter((d) => d.startsWith('layout-')).sort().pop());
+assert.match(fs.readFileSync(path.join(layWork(), 'fake-saw-prompt.txt'), 'utf8'), /Camera height 1\.7 m/);
+assert.doesNotMatch(fs.readFileSync(path.join(layWork(), 'fake-saw-prompt.txt'), 'utf8'), /correction round/);
+await new Promise((r) => setTimeout(r, 1100)); // 作業フォルダの名前は秒まで
+run('layout', '--image', path.join(inDir, 'A_color.png'), '--brief', brief, '--prev', layoutOut, '--overlay', path.join(inDir, 'A_color.png'), '--report', report, '--out', layoutOut, '--codex', fake);
+const lay2 = JSON.parse(fs.readFileSync(layoutOut, 'utf8')), prompt2 = fs.readFileSync(path.join(layWork(), 'fake-saw-prompt.txt'), 'utf8');
+assert.equal(lay2.objects.length, 4);
+assert.equal(lay2.objects[0].center[2], 47);
+assert.match(prompt2, /correction round/);
+assert.match(prompt2, /40% of this shape lands on sky/);
+assert.ok(fs.existsSync(path.join(layWork(), 'references', 'overlay.png')) && fs.existsSync(path.join(layWork(), 'references', 'layout.json')), '直しの回に、重ねた絵か今の配置が渡っていない');
+console.log('ok layout：形の配置を書いてもらい、直しの回は今の配置・重ねた絵・見比べの文を渡す');
 fs.rmSync(tmp, { recursive: true, force: true });

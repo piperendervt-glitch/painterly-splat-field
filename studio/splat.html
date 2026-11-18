@@ -120,10 +120,22 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="auto" aria-pressed="true">自動</button>
       <button type="button" data-v="previz" aria-pressed="false">プレビズの形</button>
       <button type="button" data-v="estimate" aria-pressed="false">絵から推定した形</button>
+      <button type="button" data-v="ai" aria-pressed="false" disabled>AI が書いた形</button>
     </div>
     <p class="note">「絵から推定した形」は、手前の物を消した背景の奥行きをメッシュにした面（地面・水・遠景）と、物体ごとの箱です。「自動」は、プレビズのある場面ではプレビズの形、絵から作った場面では推定した形を使います。下の「当たりの形を表示」で形が見えます。プレビズのある場面で「絵から推定した形」にして「プレビズの形を線で重ねる」を入れると、推定と本物を見比べられます。</p>
     <button type="button" class="plain" id="estimateExport">推定した形を書き出す（OBJ）</button>
     <p class="note" id="estimateNote"></p>
+    <div class="label">AI に形の配置を書かせる（Codex）</div>
+    <p class="note" id="layoutPlan"></p>
+    <label class="check" for="layoutFixes"><span>見比べて直す回数</span> <select id="layoutFixes"><option value="0">0 回</option><option value="1">1 回</option><option value="2" selected>2 回</option><option value="3">3 回</option></select></label>
+    <button type="button" class="main" id="layoutRun">形の配置を AI に書いてもらう</button>
+    <button type="button" class="plain" id="layoutMore" disabled>もう 1 回、見比べて直してもらう（Codex 1 回）</button>
+    <button type="button" class="plain" id="layoutStopBtn" hidden>止める</button>
+    <button type="button" class="plain" id="layoutDry">文と絵だけ用意する（Codex は呼ばない）</button>
+    <button type="button" class="plain" id="layoutForget" disabled>AI が書いた配置を忘れる</button>
+    <p class="note" id="layoutLog" hidden style="white-space:pre-wrap"></p>
+    <p class="note" id="layoutInfo"></p>
+    <p class="note">絵と奥行きの絵、カメラと奥行きの表を ChatGPT（Codex）に見せて、場面の物を箱と円柱の一覧に書いてもらいます。「見比べて直す」回は、その形を絵に線で重ねた絵と、奥行き・物の輪郭との見比べの結果を見せて、書き直してもらいます。いちばん合った回を残します。結果は paint-out の layout_ai.json、重ねた絵は layout_overlay.png です。背景の面は「絵から推定した形」のものを使います。</p>
     <label class="check" for="shapes"><input type="checkbox" id="shapes"><span>当たりの形を表示（緑 = 立てる床、橙 = 壁、赤 = いま触れている所）</span></label>
     <div class="label">視点を移す</div>
     <div class="row" id="jump">

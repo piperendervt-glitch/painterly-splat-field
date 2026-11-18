@@ -6,6 +6,7 @@
 //   POST /api/paint/run             paint/paint.mjs views を起動（{ views, style, dryRun, light }）
 //   POST /api/paint-out/<名>        「視点を足す」画面からの保存（写した絵・穴の印）
 //   POST /api/paint/fill            paint/paint.mjs fill を起動（{ view, style, dryRun, light }）。足した視点の穴だけ描く
+//   POST /api/paint/layout          paint/paint.mjs layout を起動（{ brief, report, refine, dryRun }）。形の配置（箱と円柱の一覧）を layout_ai.json に書いてもらう
 //   POST /api/paint/sky             paint/paint.mjs fill --sky を起動（{ face, sfx, light, styleRef, dryRun }）。空の天球の穴だけ描く
 //   POST /api/paint/plate           paint/paint.mjs fill --plate を起動（{ view, src, dryRun }）。手前の物を消した背景の絵（背後の層の色）を描く
 //   POST /api/sharp/plate           sharp/psf_sharp.py --plate を起動（{ view, src }）。背景の絵を SHARP に通して、奥行き用の粒を作る
@@ -53,6 +54,7 @@ function state() {
   try { cams = JSON.parse(fs.readFileSync(camFile, 'utf8')); } catch { return out; }
   out.previz = stat(camFile);
   out.ground_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`ground_ai${sfx}`, stat(path.join(DIRS['paint-out'], `ground_ai${sfx}.png`))])); // AI が描いた周囲の地面
+  out.layout_ai = stat(path.join(DIRS['paint-out'], 'layout_ai.json')); // AI が書いた形の配置
   out.sky_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`sky_ai${sfx}`, stat(path.join(DIRS['paint-out'], `sky_ai${sfx}.png`))])); // AI が描いた空（天球の層）
   out.views = (cams.views || []).map((v) => ({
     name: v.name,
@@ -214,6 +216,20 @@ export async function handle(req, res, next) {
       runSky(body);
       return json(res, 200, { ok: true });
     }
+    if (p === '/api/paint/layout' && req.method === 'POST') { // 形の配置を書いてもらう。絵（layout_picture.png、layout_depth.png、直しの回は layout_overlay.png）は画面が先に保存している
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 2e6)).toString('utf8') || '{}');
+      const f = (name) => path.join(DIRS['paint-out'], name), refine = !!body.refine;
+      if (typeof body.brief !== 'string' || !body.brief.trim()) return json(res, 400, { error: 'カメラの説明の文がありません' });
+      for (const name of refine ? ['layout_picture.png', 'layout_overlay.png', 'layout_ai.json'] : ['layout_picture.png']) if (!fs.existsSync(f(name))) return json(res, 400, { error: `${name} がありません` });
+      fs.writeFileSync(f('layout_brief.txt'), body.brief.slice(0, 20000));
+      const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'layout', '--image', f('layout_picture.png'), '--brief', f('layout_brief.txt'), '--out', f('layout_ai.json')];
+      if (fs.existsSync(f('layout_depth.png'))) args.push('--depth', f('layout_depth.png'));
+      if (refine) { fs.writeFileSync(f('layout_report.txt'), String(body.report || '').slice(0, 20000)); args.push('--prev', f('layout_ai.json'), '--overlay', f('layout_overlay.png'), '--report', f('layout_report.txt')); }
+      if (body.dryRun) args.push('--dry-run');
+      startJob(args, body.dryRun);
+      return json(res, 200, { ok: true });
+    }
     if (p === '/api/paint/plate' && req.method === 'POST') {
       if (job.running) return json(res, 409, { error: 'いま実行中です' });
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
@@ -236,6 +252,7 @@ export async function handle(req, res, next) {
       const name = p.slice('/api/paint-out/'.length);
       if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
       if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); fs.rmSync(path.join(DIRS['paint-out'], name.replace('.png', '_sharp.ply')), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
+      if (name === 'layout_ai.json') { for (const n of ['layout_ai.json', 'layout_best.json', 'layout_brief.txt', 'layout_report.txt', 'layout_picture.png', 'layout_depth.png', 'layout_overlay.png']) fs.rmSync(path.join(DIRS['paint-out'], n), { force: true }); return json(res, 200, { ok: true }); } // AI が書いた形の配置
       if (/^(sky|ground)_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
       if (!/^[A-Za-z0-9]+_painted(_flat|_lit)?\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
       if (!fs.existsSync(path.join(DIRS['paint-out'], name.replace('_painted', '_reproj')))) return json(res, 400, { error: '足した視点の絵だけ消せます' }); // もとの視点の絵は消さない
@@ -245,7 +262,7 @@ export async function handle(req, res, next) {
     }
     if (p.startsWith('/api/paint-out/') && req.method === 'POST') {
       const name = p.slice('/api/paint-out/'.length);
-      if (!/^[A-Za-z0-9_-]+\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
+      if (!/^[A-Za-z0-9_-]+\.png$/.test(name) && name !== 'layout_ai.json') return json(res, 400, { error: 'ファイル名が使えません' }); // layout_ai.json は、いちばん合った回の配置を書き戻すため
       const body = await readBody(req);
       fs.mkdirSync(DIRS['paint-out'], { recursive: true });
       fs.writeFileSync(path.join(DIRS['paint-out'], name), body);

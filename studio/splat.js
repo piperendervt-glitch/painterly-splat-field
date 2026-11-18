@@ -12,6 +12,7 @@ import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../
 import { createWalk } from './walk.js';
 import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
+import { layoutFrame, worldShapes, shapeEdges, project as projectTo, rasterLayout, compareLayout, briefText } from './layoutai.js';
 import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, sampleMap, skyDistance, skyNoise, withAi } from './skydome.js';
 
 const $ = (id) => document.getElementById(id);
@@ -149,7 +150,7 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, painting: views.some((v) => v.painting) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, painting: views.some((v) => v.painting) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -931,10 +932,145 @@ async function forgetGround() {
   rebuild();
 }
 
+// ---- AI に形の配置を書かせる（Codex。絵は作らず、文だけ。studio/layoutai.js） ----
+// 絵・奥行きの絵・カメラと奥行きの表を見せて、箱と円柱の一覧（layout_ai.json）を書いてもらう。
+// 「見比べて直す」回は、今の配置を絵に線で重ねた絵と、奥行き・物の輪郭との見比べの文を見せて、書き直してもらう。いちばん合った回の配置を残す。
+const layoutAi = { loaded: false, layout: null }; // layout = { objects, view, scores: [{ score, covered, precise, n }], best }
+async function loadLayoutAi() {
+  if (layoutAi.loaded) return layoutAi.layout;
+  layoutAi.loaded = true;
+  if (data.layoutAiFile) { try { const r = await fetch('/files/paint-out/layout_ai.json', { cache: 'no-store' }); layoutAi.layout = r.ok ? await r.json() : null; } catch { layoutAi.layout = null; } }
+  if (layoutAi.layout && !Array.isArray(layoutAi.layout.objects)) layoutAi.layout = null;
+  return layoutAi.layout;
+}
+const STONE_TYPE = typeByKey('stone').id;
+function layoutContext() {
+  const v = centerView(), baseY = data.baseY !== undefined ? data.baseY : (data.baseY = estimateModel().baseY);
+  let thing = null;
+  if (v.hasTypes) { thing = new Uint8Array(v.W * v.H); for (let i = 0; i < thing.length; i++) { const t = v.type[i]; thing[i] = !v.z[i] || !FRONT[t] ? 0 : (TYPE_BY_ID.get(t) || {}).solid === 'none' ? 2 : 1; } }
+  return { v, frame: layoutFrame(v.c2w, baseY), view: { W: v.W, H: v.H, z: v.z, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics }, thing, object: v.hasTypes ? v.object : null, baseY };
+}
+// 当たりの形にする：背景の面は推定のもの、物は AI が書いた箱と円柱
+function layoutModel() {
+  const cx = layoutContext(), est = estimateModel();
+  return { grounds: est.grounds, baseY: est.baseY, boxes: worldShapes(layoutAi.layout, cx.frame).map((s, i) => ({ ...s, typeId: STONE_TYPE, objectId: 1000 + i })) };
+}
+function scoreLayout(layout, cx) {
+  const shapes = worldShapes(layout, cx.frame), cmp = compareLayout(shapes, rasterLayout(shapes, cx.view), cx.view, { thing: cx.thing, object: cx.object });
+  return { shapes, cmp, row: { score: cmp.score, covered: cmp.covered, precise: cmp.precise, n: shapes.length } };
+}
+const LAYOUT_COLORS = ['#ff3b30', '#34c759', '#0a84ff', '#ffd60a', '#ff2d92', '#30d5c8', '#ff9f0a', '#bf5af2'];
+// 絵に、今の配置を線で重ねる（形ごとに色と番号）
+function layoutOverlay(cx, shapes, px) {
+  const { W, H } = cx.view, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), a = [0, 0, 0], b = [0, 0, 0], NEAR = 0.1;
+  g.putImageData(new ImageData(px instanceof Uint8ClampedArray ? px : new Uint8ClampedArray(px.buffer, px.byteOffset, px.length), W, H), 0, 0);
+  g.lineJoin = 'round'; g.font = `bold ${Math.round(W / 34)}px sans-serif`; g.textBaseline = 'top';
+  shapes.forEach((s, k) => {
+    const color = LAYOUT_COLORS[k % LAYOUT_COLORS.length];
+    let x0 = Infinity, y0 = Infinity;
+    for (const pass of [0, 1]) { // 先に黒いふち、次に色
+      g.strokeStyle = pass ? color : 'rgba(0,0,0,0.75)'; g.lineWidth = pass ? Math.max(2, W / 400) : Math.max(4, W / 200);
+      g.beginPath();
+      for (const [p, q] of shapeEdges(s)) {
+        projectTo(cx.view, p, a); projectTo(cx.view, q, b);
+        if (a[2] <= NEAR && b[2] <= NEAR) continue;
+        let P = p, Q = q;
+        if (a[2] <= NEAR || b[2] <= NEAR) { // カメラの後ろへ回る辺は、手前の面で切る
+          const t = (NEAR * 1.01 - a[2]) / (b[2] - a[2]), m = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t];
+          if (a[2] <= NEAR) P = m; else Q = m;
+          projectTo(cx.view, P, a); projectTo(cx.view, Q, b);
+        }
+        g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]);
+        if (a[0] >= 0 && a[0] < W && a[1] >= 0 && a[1] < H && (a[1] < y0 || (a[1] === y0 && a[0] < x0))) { x0 = a[0]; y0 = a[1]; }
+      }
+      g.stroke();
+    }
+    if (x0 === Infinity) return;
+    const label = String(k + 1), tw = g.measureText(label).width + 8, th = Math.round(W / 34) + 6, lx = Math.max(0, Math.min(W - tw, x0)), ly = Math.max(0, Math.min(H - th, y0 - th));
+    g.fillStyle = 'rgba(0,0,0,0.8)'; g.fillRect(lx, ly, tw, th); g.fillStyle = color; g.fillText(label, lx + 4, ly + 3);
+  });
+  return new Promise((ok) => c.toBlob(ok, 'image/png'));
+}
+// AI に見せる奥行きの絵：近い = 白、遠い = 黒に近い灰色、空 = まっ黒
+function layoutDepthImage(v) {
+  const n = v.W * v.H, out = new Uint8ClampedArray(n * 4);
+  let lo = Infinity, hi = 0; for (let i = 0; i < n; i++) { const z = v.z[i]; if (z) { if (z < lo) lo = z; if (z > hi) hi = z; } }
+  const k = hi > lo ? 1 / Math.log(hi / lo) : 0;
+  for (let i = 0; i < n; i++) { const z = v.z[i], g = z ? 40 + 215 * (1 - Math.log(z / lo) * k) : 0; out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = g; out[i * 4 + 3] = 255; }
+  return out;
+}
+function showLayoutAi() {
+  if (!data || layoutJob) return;
+  const L = layoutAi.layout, fixes = Number($('layoutFixes').value), pc = (x) => `${Math.round(100 * x)}%`;
+  $('layoutPlan').textContent = `押すと、Codex を ${1 + fixes} 回呼びます（最初に書く 1 回${fixes ? ` + 見比べて直す ${fixes} 回` : ''}。絵は作らず文だけで、1 回 1〜3 分）。ChatGPT の利用枠を使います。`;
+  $('layoutMore').disabled = !L; $('layoutForget').disabled = !L;
+  const aiBtn = document.querySelector('#walkShape button[data-v=ai]'); if (aiBtn) aiBtn.disabled = !L;
+  if (!L) { $('layoutInfo').textContent = 'AI が書いた配置はまだありません。'; return; }
+  const cx = layoutContext(), now = scoreLayout(L, cx).row, hist = (L.scores || []).map((r, i) => `${i ? `直し ${i}` : '最初'} ${pc(r.score)}`).join(' → ');
+  $('layoutInfo').textContent = `AI が書いた配置：形 ${L.objects.length} 個。${cx.thing ? `絵の物の輪郭との重なり ${pc(now.score)}（物の画素の ${pc(now.covered)} を覆い、形の画素の ${pc(now.precise)} が物の上）` : `奥行きの合う割合 ${pc(now.score)}`}。${hist ? `回ごと：${hist}。いちばん合った回を残しています。` : ''}当たりの形の「AI が書いた形」で使えます。重ねた絵は paint-out の layout_overlay.png。`;
+}
+let layoutJob = false, layoutStop = false;
+const LAYOUT_BUTTONS = ['layoutRun', 'layoutMore', 'layoutDry', 'layoutForget'];
+async function runLayoutAi({ fresh, fixes, dryRun }) {
+  if (layoutJob || !app || !data) return;
+  if (!fresh && !layoutAi.layout) return;
+  const log = (t) => { $('layoutLog').hidden = false; $('layoutLog').textContent = t; };
+  layoutJob = true; layoutStop = false; for (const id of LAYOUT_BUTTONS) $(id).disabled = true; $('layoutStopBtn').hidden = false;
+  let done = 0, changed = false;
+  try {
+    const cx = layoutContext(), px = colorOf(cx.v, ui.colorSrc).px, brief = briefText(cx.view, cx.frame), total = (fresh ? 1 : 0) + fixes;
+    await api('/api/paint-out/layout_picture.png', await pngBlob(px, cx.view.W, cx.view.H));
+    await api('/api/paint-out/layout_depth.png', await pngBlob(layoutDepthImage(cx.v), cx.view.W, cx.view.H));
+    let cur = fresh ? null : { objects: layoutAi.layout.objects }, scores = fresh ? [] : (layoutAi.layout.scores || []).slice(), best = fresh ? null : { layout: cur, score: scoreLayout(cur, cx).row.score, at: layoutAi.layout.best || 0 };
+    if (!fresh) await api('/api/paint-out/layout_ai.json', new Blob([JSON.stringify(cur, null, 1)], { type: 'application/json' })); // 直しのもとは、点数の記録を外した配置だけ
+    for (let r = 0; r < total && !layoutStop; r++) {
+      const refine = !(fresh && r === 0), head = `${refine ? `見比べて直す（${fresh ? r : r + 1} / ${fixes}）` : '最初の配置を書く'}：`;
+      let report = '';
+      if (refine) {
+        if (!cur) break; // 文と絵だけ用意したときは、直しのもとになる配置が無い
+        const now = scoreLayout(cur, cx);
+        await api('/api/paint-out/layout_overlay.png', await layoutOverlay(cx, now.shapes, px));
+        report = now.cmp.text;
+      }
+      log(head + (dryRun ? '文と絵を用意しています' : 'Codex が書いています（1〜3 分）'));
+      await api('/api/paint/layout', { brief, report, refine, dryRun });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (layoutStop) await api('/api/paint/stop'); else log(`${head}Codex が書いています（${st.seconds} 秒）`); }
+      if (layoutStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
+      done++;
+      if (dryRun) break;
+      cur = await (await fetch('/files/paint-out/layout_ai.json', { cache: 'no-store' })).json();
+      const row = scoreLayout(cur, cx).row;
+      scores.push(row); changed = true;
+      if (!best || row.score >= best.score) best = { layout: cur, score: row.score, at: scores.length - 1 };
+    }
+    if (changed && best) { // いちばん合った回の配置を、点数の記録と一緒に残す。最後の配置を重ねた絵も作り直す
+      const final = { objects: best.layout.objects, view: cx.v.def.name, scores, best: best.at };
+      await api('/api/paint-out/layout_ai.json', new Blob([JSON.stringify(final, null, 1)], { type: 'application/json' }));
+      await api('/api/paint-out/layout_overlay.png', await layoutOverlay(cx, scoreLayout(final, cx).shapes, px));
+      layoutAi.layout = final; layoutAi.loaded = true; data.layoutAiFile = true;
+    } else if (!fresh && layoutAi.layout) await api('/api/paint-out/layout_ai.json', new Blob([JSON.stringify(layoutAi.layout, null, 1)], { type: 'application/json' })); // 止めたときや、用意だけのとき：もとの記録に戻す
+    log(layoutStop ? '止めました。' : dryRun ? '文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。' : `Codex を ${done} 回呼びました。`);
+  } catch (e) { console.error(e); log(`止まりました：${e.message}`); }
+  finally {
+    layoutJob = false; for (const id of LAYOUT_BUTTONS) $(id).disabled = false; $('layoutStopBtn').hidden = true;
+    if (changed && ui.walkShape === 'ai') rebuild(); else showLayoutAi();
+  }
+}
+async function forgetLayoutAi() {
+  if (layoutJob || !data) return;
+  try { await api('/api/paint-out/layout_ai.json', null, 'DELETE'); } catch (e) { $('layoutLog').hidden = false; $('layoutLog').textContent = e.message; return; }
+  layoutAi.layout = null; data.layoutAiFile = false; $('layoutLog').hidden = true;
+  if (ui.walkShape === 'ai') { ui.walkShape = 'auto'; press($('walkShape'), 'auto'); rebuild(); } else showLayoutAi();
+}
+
 // ---- 絵と奥行きから推定したプレビズのモデル（studio/estimate.js） ----
 // 背景の面（手前の物を消した後ろの奥行きのメッシュ）と、手前の物を囲む箱。歩くときの当たりの形と、OBJ の書き出しに使う。
 const GROUND_TYPE = typeByKey('grass').id;
-const estimateOn = () => (ui.walkShape === 'auto' ? !!(data && data.painting) : ui.walkShape === 'estimate');
+// 当たりの形のもと：previz = プレビズの形、estimate = 絵から推定した形、ai = AI が書いた形（背景の面は推定のものを使う）
+const shapeMode = () => (ui.walkShape === 'auto' ? (data && data.painting ? 'estimate' : 'previz') : ui.walkShape === 'ai' && !layoutAi.layout ? 'estimate' : ui.walkShape);
 function estimateModel() {
   const objName = new Map(((data.cams.labels && data.cams.labels.objects) || []).map((o) => [o.id, o.name]));
   const grounds = [], seen = [];
@@ -972,7 +1108,7 @@ function estimateSolids(model) {
   const base = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200)); base.rotation.x = -Math.PI / 2; base.position.y = model.baseY - 0.02;
   solids.push({ mesh: base, typeId: GROUND_TYPE, objectId: 0 });
   for (const b of model.boxes) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(b.half[0] * 2, b.half[1] * 2, b.half[2] * 2));
+    const mesh = new THREE.Mesh(b.shape === 'cylinder' ? new THREE.CylinderGeometry(b.half[0], b.half[0], b.half[1] * 2, 16) : new THREE.BoxGeometry(b.half[0] * 2, b.half[1] * 2, b.half[2] * 2));
     mesh.position.fromArray(b.center); mesh.rotation.y = b.yaw;
     solids.push({ mesh, typeId: b.typeId, objectId: b.objectId });
   }
@@ -1099,6 +1235,7 @@ async function start(useGL) {
   stage.prepend(renderer.domElement);
 
   if (ui.surround) await groundAiLayer(); // 周囲の地面：AI が描いた層があれば先に読む
+  await loadLayoutAi();                    // AI が書いた形の配置があれば読む
   cloud = buildCloud();
   const n = cloud.n;
   const scene = new THREE.Scene();
@@ -1121,8 +1258,9 @@ async function start(useGL) {
   const wireMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.5, depthTest: false });
   a.previz = buildScene(); a.labels = labelScene(a.previz); // 太陽を動かしたときの影の計算にも使う
   // 歩くときの当たり判定：プレビズの形そのものか、絵と奥行きから推定したモデル（プレビズの無い場面）
-  a.estimate = estimateOn() ? estimateModel() : null;
-  a.walk = createWalk(scene, a.estimate ? estimateSolids(a.estimate) : a.labels.solids, a.estimate ? [{ id: 0, name: '推定した背景の面' }, ...((data.cams.labels && data.cams.labels.objects) || [])] : a.labels.objects);
+  const mode = shapeMode();
+  a.estimate = mode === 'estimate' ? estimateModel() : mode === 'ai' ? layoutModel() : null;
+  a.walk = createWalk(scene, a.estimate ? estimateSolids(a.estimate) : a.labels.solids, a.estimate ? [{ id: 0, name: '推定した背景の面' }, ...(mode === 'ai' ? a.estimate.boxes.map((b) => ({ id: b.objectId, name: b.name })) : (data.cams.labels && data.cams.labels.objects) || [])] : a.labels.objects);
   a.walk.setEye(Number($('eye').value)); a.walk.setSpeed(Number($('speed').value)); a.walk.wk.noclip = !$('collide').checked;
   a.previz.traverse((o) => { if (o.isMesh && o.name !== 'ground') { const m = new THREE.Mesh(o.geometry, wireMat); o.updateWorldMatrix(true, false); m.applyMatrix4(o.matrixWorld); m.renderOrder = 2; a.wire.add(m); } });
   a.frusta = new THREE.Group();
@@ -1155,7 +1293,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo(); showLayerInfo(); showSurround();
+  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -1478,6 +1616,12 @@ $('groundDry').addEventListener('click', () => paintGround(true));
 $('groundStopBtn').addEventListener('click', () => { groundStop = true; });
 $('groundForget').addEventListener('click', forgetGround);
 $('estimateExport').addEventListener('click', exportEstimate);
+$('layoutRun').addEventListener('click', () => runLayoutAi({ fresh: true, fixes: Number($('layoutFixes').value), dryRun: false }));
+$('layoutMore').addEventListener('click', () => runLayoutAi({ fresh: false, fixes: 1, dryRun: false }));
+$('layoutDry').addEventListener('click', () => runLayoutAi({ fresh: !layoutAi.layout, fixes: layoutAi.layout ? 1 : 0, dryRun: true }));
+$('layoutStopBtn').addEventListener('click', () => { layoutStop = true; });
+$('layoutForget').addEventListener('click', forgetLayoutAi);
+$('layoutFixes').addEventListener('change', showLayoutAi);
 seg('backDepth', (v) => { ui.backDepth = v; rebuild(); });
 showLayerUi();
 seg('order', (v) => {

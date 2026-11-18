@@ -8,6 +8,14 @@ process.stdin.on('end', () => {
   if (process.argv[2] !== 'exec') process.exit(3);
   if (process.env.OPENAI_API_KEY) { console.error('OPENAI_API_KEY が渡された'); process.exit(4); }
   fs.writeFileSync('fake-saw-prompt.txt', prompt);
+  if (/write a file named layout\.json/.test(prompt)) { // 形の配置：最初は箱 2 つと円柱 1 つ。直しの回は、今の配置を少し動かして 1 つ足す
+    const prev = fs.existsSync('references/layout.json') ? JSON.parse(fs.readFileSync('references/layout.json', 'utf8')) : null;
+    const objects = prev ? [...prev.objects.map((b) => ({ ...b, center: [b.center[0], b.center[1], b.center[2] + 1] })), { name: 'added', shape: 'box', center: [-6, 0.5, 20], size: [1, 1, 1], yaw_deg: 30 }]
+      : [{ name: 'Left Leg', shape: 'box', center: [-9, 15, 46], size: [6, 30, 6], yaw_deg: 0 }, { name: 'right_leg', shape: 'box', center: [9, 15, 46], size: [6, 30, 6] }, { name: 'tower', shape: 'cylinder', center: [0, 30, 120], radius: 6, height: 60 }, { name: 'broken', shape: 'box', center: [0, 'x', 1] }];
+    fs.writeFileSync('layout.json', '```json\n' + JSON.stringify({ objects }) + '\n```\n');
+    console.log('done');
+    return;
+  }
   const src = fs.existsSync('references/holes.png') ? 'references/holes.png' : 'references/previz.png';
   const img = readPng(src);
   for (let i = 0; i < img.data.length; i += 4) {
