@@ -14,6 +14,7 @@
 //                       [--previz <同じ視点のプレビズの絵> --depth <その奥行きの絵> --overlay <確かめ用の絵>] [--light free|flat|previz]
 //     穴をマゼンタで塗った絵を見せて「マゼンタの所だけ描いて」と頼み、できた絵の穴の所だけを元の絵に貼る。
 //     穴の外は 1 画素も変えない。
+//     --sky を付けると、空だけの絵（空の天球の一部）として頼む：地面や物を描かせない。--style-ref <絵> は画風の見本（同じ場面の絵）。
 //
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
 // --dry-run は Codex を呼ばず、作業フォルダに送る文（prompt.txt）と条件の絵だけを作る。利用枠は減らない。
@@ -91,6 +92,20 @@ function fillInstructions({ style, hasPreviz, lightLines = [] }) {
   ].filter(Boolean).join('\n');
 }
 
+// 空の天球の穴を描いてもらうときの文。絵は空だけ（30° 見上げた広い画角）。下の方は地平線より下なので、もやにする。
+function skyInstructions({ style, hasStyleRef, lightLines = [] }) {
+  return [
+    `references/holes.png is one part of a painted sky backdrop (a sky dome for a 3D scene), painted as ${style}. It looks up at about 30 degrees with a very wide lens, so the top of the image is straight overhead and the lower part is at and below the horizon.`,
+    'The bright magenta (#FF00FF) areas are holes with no paint yet. Paint ONLY inside the magenta areas, continuing the existing sky naturally: the same sky colours at the same height, the same kind and scale of clouds, the same light and the same brush style.',
+    'This image is SKY ONLY. Do not paint ground, sea, hills, mountains, trees, buildings, birds, people, the sun disc, the moon, stars, text or a frame. Nothing but sky, clouds and haze.',
+    'Near the bottom edge, let the sky fade into plain soft horizon haze, with no horizon line and no objects.',
+    'Everything outside the magenta areas must stay exactly as it is. Do not crop, zoom or shift the image. No magenta may remain in the result.',
+    'guide.png shows the same image with the holes filled by a blurry automatic guess. Use it only as a rough guide for the overall colour at each height; paint real clouds and brush texture instead of its blur.',
+    hasStyleRef ? 'style.png is a painting of the scene that this sky belongs to. Match the colours, clouds and brushwork of its sky. Do not copy its ground or objects.' : '',
+    ...lightLines.filter((l) => l.startsWith('Sky:')),
+  ].filter(Boolean).join('\n');
+}
+
 async function runViews(o) {
   if (!o.in || !o.out) throw new Error('使い方：node paint.mjs views --in <プレビズの書き出し> --out <出す所> [--views A,B]');
   const cams = JSON.parse(fs.readFileSync(path.join(o.in, 'cameras.json'), 'utf8'));
@@ -151,10 +166,13 @@ async function runFill(o) {
   const holesFile = path.join(workDir, 'holes-input.png');
   writePng(holesFile, paintHoles(original, mask));
   const references = [{ name: 'holes.png', file: holesFile, note: 'painting with magenta holes to fill' }];
-  const hasPreviz = typeof o.previz === 'string';
+  const sky = !!o.sky, hasStyleRef = sky && typeof o['style-ref'] === 'string';
+  if (sky) references.push({ name: 'guide.png', file: o.image, note: 'the same image with the holes filled by a blurry automatic guess (rough colour guide only)' });
+  if (hasStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: 'painting of the scene this sky belongs to (style and sky colours to match)' });
+  const hasPreviz = !sky && typeof o.previz === 'string';
   if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
   if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
-  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
+  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
   console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}`);
   const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (!file) { console.log(`  → ${workDir}`); return; }
