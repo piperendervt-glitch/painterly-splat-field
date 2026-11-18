@@ -16,7 +16,7 @@
 
 | 方法 | 手間 | 注意 |
 |---|---|---|
-| Hugging Face の Space（ironjr/LucidDreamer） | ブラウザだけ。絵を入れて文を書き、Run。ply を保存 | いまも動いているかは未確認。混んでいると待つ |
+| Hugging Face の Space（ironjr/LucidDreamer） | ブラウザだけ。絵を入れて文を書き、Run。ply を保存 | 2026-11-18 に確認したところ、起動エラーで止まっている（古い部品の読み込みに失敗）。今は使えない |
 | Colab（camenduru/**LucidDreamer-Gaussian**-colab） | Google アカウントでノートを実行すると、同じ画面が立ち上がる | 名前の似た camenduru/LucidDreamer-colab は別の研究（文から物体を作る同名の手法）なので使わない。無料枠の GPU で足りるかは未確認 |
 | 手元の Windows | conda の Python 3.9、torch 2.0.1、CUDA 11.8、Visual Studio の C++ ビルドツール。モデルは約 15 GB | SHARP 用の環境（Python 3.12）とは別に作る。GPU が RTX 50 番台だと、この古い torch は動かない |
 
