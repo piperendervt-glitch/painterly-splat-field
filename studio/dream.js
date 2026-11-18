@@ -32,6 +32,7 @@ export function warp(target, sources, { step = 1 } = {}) {
   const { W, H } = target, n = W * H;
   const inv = new Float32Array(n), src = new Int16Array(n).fill(-1), U = new Float32Array(n), V = new Float32Array(n), sky = new Uint8Array(n);
   const limit = 2.5 * step + 1.5; // 段の面は、これより伸びたら捨てる（画素）
+  const wide = 6 * step + 2;      // ゆるい坂の面（同じ物の中で奥行きが少しずつ変わる所）は、ここまで伸びたら捨てる
   sources.forEach((s, si) => {
     const M = mul(target.w2c, s.c2w), gw = Math.floor((s.W - 1) / step) + 1, gh = Math.floor((s.H - 1) / step) + 1, g = gw * gh;
     const tx = new Float32Array(g), ty = new Float32Array(g), ti = new Float32Array(g), lz = new Float32Array(g), ok = new Uint8Array(g), use = new Uint8Array(g), lab = new Int32Array(g);
@@ -49,7 +50,8 @@ export function warp(target, sources, { step = 1 } = {}) {
       const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
       if (!(area > 1e-9)) return; // 裏返った面・つぶれた面（もとの視点では、この並びで area が正）
       const x0f = Math.min(ax, bx, cx), x1f = Math.max(ax, bx, cx), y0f = Math.min(ay, by, cy), y1f = Math.max(ay, by, cy);
-      if (loose && (x1f - x0f > limit || y1f - y0f > limit)) return;
+      if (loose === 1 && (x1f - x0f > limit || y1f - y0f > limit)) return;
+      if (loose === 0 && (x1f - x0f > wide || y1f - y0f > wide)) return;
       const x0 = Math.max(0, Math.ceil(x0f)), x1 = Math.min(W - 1, Math.floor(x1f)), y0 = Math.max(0, Math.ceil(y0f)), y1 = Math.min(H - 1, Math.floor(y1f));
       if (x0 > x1 || y0 > y1) return;
       const ia = ti[a], ib = ti[b], ic = ti[c], k = 1 / area;
@@ -67,8 +69,9 @@ export function warp(target, sources, { step = 1 } = {}) {
       const a = gy * gw + gx, b = a + 1, c = a + gw, d = c + 1;
       if (!(ok[a] && ok[b] && ok[c] && ok[d]) || !(use[a] || use[b] || use[c] || use[d])) continue;
       const lo = Math.min(lz[a], lz[b], lz[c], lz[d]), ratio = Math.max(lz[a], lz[b], lz[c], lz[d]) - lo;
-      const loose = ratio > 0.3 || (ratio > 0.04 && !(lab[a] === lab[b] && lab[a] === lab[c] && lab[a] === lab[d]));
-      tri(a, c, b, loose); tri(b, c, d, loose); // 画面では y が下向きなので、この並びで area が正
+      // 1 = 段の面、0 = ゆるい坂の面、-1 = ほぼ平らに続く面（寄って大きく伸びても捨てない）
+      const loose = ratio > 0.3 || (ratio > 0.04 && !(lab[a] === lab[b] && lab[a] === lab[c] && lab[a] === lab[d])) ? 1 : ratio > 0.02 * step ? 0 : -1;
+      tri(a, b, c, loose); tri(b, d, c, loose); // 画面では y が下向きなので、この並びで area が正
     }
   });
   // 何も写らなかった所：その向きが、どれかの視点で空なら、空だと分かる
