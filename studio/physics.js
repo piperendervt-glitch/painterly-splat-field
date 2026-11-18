@@ -119,16 +119,17 @@ export async function createPhysics({ ground, objects, gravity = 9.81, player = 
       return b && !b.removed ? { id: b.id, dist: t } : null;
     },
     /** 持つ（目の前 dist m の所へ引き寄せ続ける）。id = null で放す。放すときに throwVel を与えられる */
-    grab(id, dist = 2.5) { const b = bodies.get(id); if (!b || b.removed) return false; wake(b); hold.b = b; hold.dist = Math.max(1, dist); b.body.wakeUp(); return true; },
+    grab(id, dist = 2.5) { const b = bodies.get(id); if (!b || b.removed) return false; wake(b); hold.b = b; hold.dist = Math.max(1, dist); b.body.lockRotations(true, true); b.body.wakeUp(); return true; }, // 持っている間は回さない（向きを保つ）
     wake: (id) => { const b = bodies.get(id); if (b) wake(b); },
     release(throwVel = null) {
       const b = hold.b; hold.b = null; if (!b) return;
+      b.body.lockRotations(false, true);
       if (throwVel) b.body.setLinvel({ x: throwVel[0], y: throwVel[1], z: throwVel[2] }, true);
     },
     holding: () => (hold.b ? hold.b.id : null),
     setHoldTarget(eye, dir) { for (let k = 0; k < 3; k++) hold.target[k] = eye[k] + dir[k] * hold.dist; },
     scrollHold(d) { hold.dist = Math.max(1, Math.min(12, hold.dist + d)); },
-    remove(id) { const b = bodies.get(id); if (!b) return; if (hold.b === b) hold.b = null; b.removed = true; b.body.setEnabled(false); },
+    remove(id) { const b = bodies.get(id); if (!b) return; if (hold.b === b) { hold.b = null; b.body.lockRotations(false, false); } b.removed = true; b.body.setEnabled(false); },
     /** 1 つ（または全部）を、置いたときの所へ戻す */
     reset(id = null) {
       for (const b of id === null ? bodies.values() : [bodies.get(id)].filter(Boolean)) {
@@ -137,7 +138,7 @@ export async function createPhysics({ ground, objects, gravity = 9.81, player = 
         b.body.setTranslation({ x: b.rest[0], y: b.rest[1], z: b.rest[2] }, false); b.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, false);
         b.body.setNextKinematicTranslation({ x: b.rest[0], y: b.rest[1], z: b.rest[2] }); b.body.setNextKinematicRotation({ x: 0, y: 0, z: 0, w: 1 });
       }
-      if (id === null || (hold.b && hold.b.id === id)) hold.b = null;
+      if (hold.b && (id === null || hold.b.id === id)) { hold.b.body.lockRotations(false, false); hold.b = null; }
     },
     /** 時間を進める */
     step(dt) {
