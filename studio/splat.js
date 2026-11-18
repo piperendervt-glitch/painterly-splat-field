@@ -1,21 +1,24 @@
 // 粒の空間：書き出した奥行き・カメラ情報と、絵（絵画 or プレビズの色）から、1画素を1粒として3D空間に置いて見る。
 // 置き方は cameras.json の projection のとおり。プレビズの形そのものは使わない（線で重ねる確かめ用を除く）。
 import * as THREE from 'three/webgpu';
-import { instancedBufferAttribute, uniform, uv, vec2, float, step, exp, mix, max, abs, fract } from 'three/tsl';
+import { instancedBufferAttribute, uniform, uv, vec2, vec3, float, step, exp, mix, max, abs, fract, varying } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
-import { TYPES, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
+import { TYPES, SKY_TYPE, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
 import { parsePly, checkSharp, sharpScale, splatsFromSharp } from './sharp.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
+import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, skyDistance, withAi } from './skydome.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage'), msg = $('msg');
 const say = (text) => { msg.textContent = text; msg.style.display = text ? 'flex' : 'none'; };
 
-const SKY_Z = 1200;           // 空の粒を置く距離（m）
+const SKY_Z = 1200;           // 空の置き方が「遠くの壁」のときに、空の粒を置く距離（m）
+const SKY_R = 3000;           // 天球の半径（m）。天球はいつもカメラを中心に置くので、空は無限に遠く見える
+const SKY_SIZE = 1.4;         // 天球の粒は、すき間から背景が透けないよう少し大きく描く
 const EDGE_MAX = 7;           // 境界からの距離をここまで数える（画素）
 const EDGE_LOG = 0.1;         // 隣との距離の比がこれ（対数）を超えたら境界
 const VIEW_TINTS = [[1, 0.64, 0.23], [0.31, 0.82, 1], [0.78, 0.55, 1], [0.6, 0.9, 0.4]];
@@ -26,23 +29,24 @@ const LABEL_EDGE_MAX = 12;    // 種類・物体の境目からの距離をこ�
 // 粒の色のもと。painted* は絵画化の結果、ほかはプレビズの下絵。fallback は、その絵が無い視点で代わりに使うもの。
 // light は「その絵がどんな光で描かれたか」の見立て（光を付け替えるときの基準）。
 const SOURCES = {
-  painted: { file: (n) => `/files/paint-out/${n}_painted.png`, fallback: 'previz', light: 'flat', name: '最初の絵' },
-  painted_flat: { file: (n) => `/files/paint-out/${n}_painted_flat.png`, fallback: 'flat', light: 'flat', name: '光の少ない絵' },
-  painted_lit: { file: (n) => `/files/paint-out/${n}_painted_lit.png`, fallback: 'lit', light: 'lit', name: '影つきの絵' },
-  previz: { key: 'color', fallback: null, light: 'flat', name: 'プレビズの色' },
-  flat: { key: 'flat', fallback: 'previz', light: 'flat', name: '下絵（光なし）' },
-  lit: { key: 'lit', fallback: 'previz', light: 'lit', name: '下絵（影つき）' },
+  painted: { file: (n) => `/files/paint-out/${n}_painted.png`, fallback: 'previz', light: 'flat', name: '最初の絵', sfx: '', paint: 'free' },
+  painted_flat: { file: (n) => `/files/paint-out/${n}_painted_flat.png`, fallback: 'flat', light: 'flat', name: '光の少ない絵', sfx: '_flat', paint: 'flat' },
+  painted_lit: { file: (n) => `/files/paint-out/${n}_painted_lit.png`, fallback: 'lit', light: 'lit', name: '影つきの絵', sfx: '_lit', paint: 'previz' },
+  previz: { key: 'color', fallback: null, light: 'flat', name: 'プレビズの色', sfx: '', paint: 'free' },
+  flat: { key: 'flat', fallback: 'previz', light: 'flat', name: '下絵（光なし）', sfx: '_flat', paint: 'flat' },
+  lit: { key: 'lit', fallback: 'previz', light: 'lit', name: '下絵（影つき）', sfx: '_lit', paint: 'previz' },
 };
+// sfx は、AI が描いた空の絵（paint/out/sky_ai<sfx>.png）の名前の後ろ。paint は、空を描いてもらうときの光の描かせ方（paint.mjs の --light）。
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, skyMode: 'dome', skyStep: 0.2 };
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
 
 // 実在の絵から作った場面（painting/build.mjs）の種類の名前を、shared/labels.js の種類へ読み替える
 const PAINT_TYPE_KEYS = { sky: 'sky', ground: 'grass', water: 'water', figure: 'figure', far: 'far', tree: 'leaves' };
 // いまの光。方位・高さは度。色は sRGB の #rrggbb。bands は明暗の段階の数（0 = なめらか）。maxGain は明るくする上限（倍）。
 const light = { azimuth: PAINT_SUN.azimuth, elevation: PAINT_SUN.elevation, sun: LIT_LIGHT.sun, sunColor: '#ffffff', sky: LIT_LIGHT.ambient, skyColor: '#ffffff', bands: 0, maxGain: 4 };
-const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1);
+const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1), uDome = uniform(1);
 
 // 動きと光（風・草よけ・足跡・光の付け替え）をシェーダーで付ける部品。足跡は作り直しても残るよう、ここで1つだけ持つ。
 const fx = createFx();
@@ -53,6 +57,7 @@ let app = null, data = null, cloud = null, starting = false;
 const query = new URLSearchParams(location.search);
 let forceGL = query.has('gl');
 if (['1', '2', '4', '8'].includes(query.get('stride'))) ui.stride = Number(query.get('stride')); // 例：splat.html?stride=4 で粗く始める
+if (Number(query.get('skystep')) >= 0.1) ui.skyStep = Number(query.get('skystep'));                 // 例：splat.html?skystep=1 で天球を粗く始める
 
 function fail(e) { console.error(e); starting = false; say('表示中に問題が起きました：' + e.message); }
 
@@ -104,6 +109,8 @@ async function loadData() {
       for (const t of (cams.labels && cams.labels.types) || []) remap[t.id] = PAINT_TYPE_KEYS[t.name] ? typeByKey(PAINT_TYPE_KEYS[t.name]).id : 0;
       for (let i = 0; i < W * H; i++) { type[i] = remap[lab.type[i * 4]]; object[i] = lab.object[i * 4] + lab.object[i * 4 + 1] * 256; }
     } else if (hasTypes) for (let i = 0; i < W * H; i++) { type[i] = lab.type[i * 4]; object[i] = lab.object[i * 4] * 256 + lab.object[i * 4 + 1]; }
+    const isSky = new Uint8Array(W * H); // 空の画素：奥行きが無く、札があれば種類も空
+    for (let i = 0; i < W * H; i++) isSky[i] = z[i] === 0 && (!hasTypes || type[i] === SKY_TYPE) ? 1 : 0;
     // SHARP の粒（sharp/psf_sharp.py の書き出し）。無ければ null
     let sharp = null;
     if (st.sharp) {
@@ -111,14 +118,14 @@ async function loadData() {
       if (res.ok) { sharp = parsePly(await res.arrayBuffer()); checkSharp(sharp); }
     }
     views.push({
-      def: v, W, H, z, edge: edgeDistance(z, W, H), near, far,
+      def: v, W, H, z, edge: edgeDistance(z, W, H), near, far, isSky, skyDist: skyDistance(isSky, W, H),
       colors, hasTypes, hasLabels, type, object, normalPx: hasLabels ? lab.normal : null, sunPx: hasLabels ? lab.sun : null,
       labelEdge: hasTypes ? labelEdgeDistance(type, object, W, H) : null, sharp,
       onlyNew: st.new_mask ? await loadImage(`/files/paint-out/${v.name}_new.png`, W, H) : null, // 穴埋めで足した視点：白い画素だけ粒にする
       matrix: new THREE.Matrix4().set(...v.extrinsics.camera_to_world.flat()),
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0 };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -189,6 +196,7 @@ export const COLUMNS = {
   labelEdge: { type: Uint8Array, size: 1, default: LABEL_EDGE_MAX }, // 札の境目からの距離（画素）
   lift: { type: Float32Array, size: 1, default: 0.05 },  // 影を調べるときに面から浮かせる量（m）。奥行きの刻みの粗さ
   opacity: { type: Uint8Array, size: 1, default: 255 },  // 不透明さ（0〜255）。奥行きから置いた粒は 255、SHARP の粒は SHARP の値
+  skyFrom: { type: Uint8Array, size: 1, default: 0 },    // 天球の粒の出どころ（0 = 天球の粒ではない、1 = 絵、2 = AI が描いた空、3 = ツール内で埋めた空）
 };
 const TYPE_BY_ID = new Map(TYPES.map((t) => [t.id, t]));
 export function makeCloud(capacity) {
@@ -218,6 +226,7 @@ function splatsFromView(v, vi, stride, src) {
   let k = 0;
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) {
     const i = y * W + x, sky = z[i] === 0, zz = sky ? SKY_Z : z[i];
+    if (sky && ui.skyMode !== 'wall') continue; // 空は天球（下の「空の天球」）が受け持つ
     if (v.onlyNew && v.onlyNew[i * 4] < 128) continue;
     p.set((x + 0.5 - cx) / fx * zz, -(y + 0.5 - cy) / fy * zz, -zz).applyMatrix4(v.matrix);
     col.position[k * 3] = p.x; col.position[k * 3 + 1] = p.y; col.position[k * 3 + 2] = p.z;
@@ -310,6 +319,7 @@ const DISPLAY = {
   sway: (c, i, out) => { const l = luma(c, i) * 0.35, k = c.sway[i] / 255; out[0] = l * (1 - k) + 0.1 * k; out[1] = l * (1 - k) + k; out[2] = l * (1 - k) + 0.75 * k; }, // 揺れる粒
   depth: (c, i, out) => gray(out, LIN[c.depthGray[i]]),                                               // 奥行き
   view: (c, i, out) => {                                                                              // 視点別
+    if (c.skyFrom[i] > 1) return gray(out, 0.05 + 0.3 * luma(c, i)); // 絵から来ていない空（埋めた所）は灰色
     const t = VIEW_TINTS[c.view[i] % VIEW_TINTS.length], l = 0.25 + 0.75 * luma(c, i);
     out[0] = LIN[t[0] * 255 | 0] * l; out[1] = LIN[t[1] * 255 | 0] * l; out[2] = LIN[t[2] * 255 | 0] * l;
   },
@@ -330,6 +340,14 @@ const DISPLAY = {
     const k = 1 - Math.min(1, c.labelEdge[i] / 6); // 境目に近いほど赤く
     out[0] = out[0] * (1 - k) + k; out[1] *= 1 - k; out[2] *= 1 - k;
   },
+};
+// 空の出どころ：天球の粒を、絵から来た所（視点の色）・AI が描いた所（緑）・ツール内で埋めた所（赤紫）に色分けする。空でない粒は暗い灰色
+const SKY_FROM_TINT = [null, null, [0.25, 0.9, 0.35], [0.95, 0.2, 0.75]];
+DISPLAY.skySrc = (c, i, out) => {
+  const from = c.skyFrom[i], l = 0.25 + 0.75 * luma(c, i);
+  if (!from) return gray(out, 0.02 + 0.1 * luma(c, i));
+  const t = from === 1 ? VIEW_TINTS[c.view[i] % VIEW_TINTS.length] : SKY_FROM_TINT[from];
+  out[0] = LIN[t[0] * 255 | 0] * l; out[1] = LIN[t[1] * 255 | 0] * l; out[2] = LIN[t[2] * 255 | 0] * l;
 };
 const NEEDS_LABELS = new Set(['relit', 'sway', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge']);
 const TYPE_MODES = new Set(['type', 'typeMix', 'object', 'labelEdge']); // 種類と物体の札だけで出せる表示（実在の絵の場面でも使える）
@@ -448,6 +466,156 @@ function makeMaterials(a) {
   return { soft, hard };
 }
 
+// ---- 空の天球 ----
+// 空の画素は粒の雲に入れず、向きだけで 1 枚の空の地図にまとめてから、カメラを中心にした球の内側に粒として並べる（studio/skydome.js）。
+// 並べ直しは要らない（重なりが無いので）。別の Sprite として、ほかの粒より先に描く。
+const sky = { dome: null, cloud: null, maps: new Map(), fillKey: '', fill: null, counts: [0, 0, 0, 0], busy: false, again: false };
+const skySfx = () => SOURCES[ui.colorSrc].sfx;
+// いまの色のもと用の「AI が描いた空」を読む（あれば）。1 回読んだら覚えておく
+async function skyAiLayer() {
+  const sfx = skySfx();
+  if (!(sfx in data.skyAi)) {
+    const px = data.skyAiFiles[`sky_ai${sfx}`] ? await tryImage(`/files/paint-out/sky_ai${sfx}.png`, AI_W, AI_H) : null;
+    data.skyAi[sfx] = px ? { W: AI_W, H: AI_H, rgba: px } : null;
+  }
+  return data.skyAi[sfx];
+}
+// 絵の地図。source = 'all' か視点の番号。色のもと・使う視点・輪郭からの幅が同じなら作り直さない
+function skyMap(source = ui.source) {
+  const margin = Number($('skyMargin').value), width = ui.skyStep <= 0.15 ? 3072 : 2048, key = `${ui.colorSrc}|${source}|${margin}|${width}`;
+  if (sky.maps.has(key)) return sky.maps.get(key);
+  const views = data.views.map((v, vi) => ({ v, vi })).filter(({ vi }) => source === 'all' || Number(source) === vi)
+    .map(({ v, vi }) => ({ W: v.W, H: v.H, ...v.def.intrinsics, m: v.matrix.elements, dist: v.skyDist, px: colorOf(v, ui.colorSrc).px, fresh: v.onlyNew ? v.freshMask || (v.freshMask = Uint8Array.from({ length: v.W * v.H }, (_, i) => (v.onlyNew[i * 4] >= 128 ? 1 : 0))) : null, vi }));
+  const map = buildSkyMap(views, { width, margin });
+  for (let i = 0; i < map.src.length; i++) if (map.src[i]) map.src[i] = views[map.src[i] - 1].vi + 1; // 並びの番号 → 視点の番号
+  map.key = key;
+  if (sky.maps.size >= 3) sky.maps.delete(sky.maps.keys().next().value); // 覚えておくのは 3 枚まで
+  sky.maps.set(key, map);
+  return map;
+}
+function makeSkySprite(a) {
+  if (a.sky) { a.scene.remove(a.sky.sprite); a.sky.sprite.material.dispose(); }
+  const dome = sky.dome && sky.dome.step === ui.skyStep ? sky.dome : (sky.dome = domeDirections(ui.skyStep)), n = dome.n;
+  const attrA = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4), attrB = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+  const P = instancedBufferAttribute(attrA), B = instancedBufferAttribute(attrB), u = fx.u;
+  const mat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: false });
+  const s = P.w.mul(uSize).mul(uDome).mul(SKY_SIZE), r = uv().sub(0.5).length();
+  mat.positionNode = P.xyz; mat.scaleNode = vec2(s, s);
+  // 空は太陽の計算をせず、空の光の色と強さだけを掛ける（studio/fx.js の空の粒と同じ）
+  mat.colorNode = varying(mix(mix(B.xyz, B.xyz.mul(u.skyGain), step(0.5, u.show)), vec3(0.3), step(1.5, u.show)));
+  mat.opacityNode = exp(r.mul(r).mul(-18));
+  const sprite = new THREE.Sprite(mat);
+  sprite.count = n; sprite.frustumCulled = false; sprite.renderOrder = 0;
+  a.scene.add(sprite);
+  a.sky = { sprite, attrA, attrB, n };
+  sky.cloud = makeCloud(n); sky.cloud.n = n;
+}
+// 天球の粒の色を、いまの表示の種類で描画用の値へ写す
+function sendSky() {
+  const a = app, c = sky.cloud; if (!a || !a.sky || !c || ui.skyMode !== 'dome') return;
+  const { n, attrA, attrB } = a.sky, A = attrA.array, B = attrB.array, dir = sky.dome.dir, size = SKY_R * ui.skyStep * Math.PI / 180;
+  prepareLight();
+  const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    A[o] = dir[i * 3] * SKY_R; A[o + 1] = dir[i * 3 + 1] * SKY_R; A[o + 2] = dir[i * 3 + 2] * SKY_R; A[o + 3] = c.skyFrom[i] ? size : 0; // 穴は描かない
+    display(c, i, rgb);
+    B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2];
+  }
+  attrA.needsUpdate = attrB.needsUpdate = true;
+}
+// 空を作り直す：絵の地図 → AI の層を重ねる → 残りをツール内で埋める → 粒の色
+async function refreshSky() {
+  if (sky.busy) { sky.again = true; return; }
+  sky.busy = true;
+  try {
+    do {
+      sky.again = false;
+      const a = app; if (!a || ui.skyMode !== 'dome') break;
+      const t0 = performance.now();
+      if (!a.sky || !sky.dome || sky.dome.step !== ui.skyStep) makeSkySprite(a);
+      const ai = $('skyAi').checked ? await skyAiLayer() : null;
+      if (a !== app) break;
+      const map = skyMap(), fillKey = `${map.key}|${ai ? skySfx() + data.skyAiVersion : '-'}`;
+      if ($('skyFill').checked && sky.fillKey !== fillKey) { sky.fill = fillSky(withAi(map, ai)); sky.fillKey = fillKey; }
+      const out = colorDome(sky.dome, { map, ai, fill: $('skyFill').checked ? sky.fill : null, mottle: Number($('skyMottle').value) });
+      const c = sky.cloud;
+      c.color.set(out.color); c.skyFrom.set(out.from); c.sky.fill(1);
+      for (let i = 0; i < c.n; i++) c.view[i] = out.view[i] ? out.view[i] - 1 : 0;
+      sky.counts = out.counts;
+      sendSky();
+      const pct = (k) => `${Math.round(100 * out.counts[k] / c.n)}%`;
+      $('sSky').textContent = `${(c.n / 10000).toFixed(1)} 万粒（絵 ${pct(1)}・AI ${pct(2)}・ツール内 ${pct(3)}・穴 ${pct(0)}）${Math.round(performance.now() - t0)} ms`;
+      $('skyAi').disabled = !data.skyAiFiles[`sky_ai${skySfx()}`];
+    } while (sky.again);
+  } catch (e) { console.error(e); $('sSky').textContent = '作れませんでした：' + e.message; } finally { sky.busy = false; }
+}
+
+// ---- AI（Codex）に空の穴を描いてもらう ----
+// 上半分を覆う 4 つの向きを順に見て、穴のある向きだけ頼む。描けた分はすぐ空の層に貼るので、次の向きは前の続きから描かれる。
+const api = async (url, body, method = 'POST') => {
+  const res = await fetch(url, { method, headers: body instanceof Blob ? {} : { 'Content-Type': 'application/json' }, body: body instanceof Blob ? body : JSON.stringify(body || {}) });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out.error || `${url} が失敗しました`);
+  return out;
+};
+function pngBlob(rgba, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').putImageData(new ImageData(rgba instanceof Uint8ClampedArray ? rgba : new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length), w, h), 0, 0);
+  return new Promise((ok) => c.toBlob(ok, 'image/png'));
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let skyJob = false, skyStop = false;
+const HOLE_MIN = 0.01; // 穴がこの割合より少ない向きは頼まない
+async function paintSky(dryRun) {
+  if (skyJob || !app || !data) return;
+  const log = (t) => { $('skyLog').hidden = false; $('skyLog').textContent = t; };
+  skyJob = true; skyStop = false; $('skyPaint').disabled = $('skyDry').disabled = $('skyForget').disabled = true; $('skyStopBtn').hidden = false;
+  try {
+    const sfx = skySfx(), map = skyMap('all'), src = SOURCES[ui.colorSrc];
+    const old = await skyAiLayer(), ai = { W: AI_W, H: AI_H, rgba: old ? new Uint8ClampedArray(old.rgba) : new Uint8ClampedArray(AI_W * AI_H * 4) };
+    // 画風の見本：いまの色のもとの、最初の視点の絵（絵画があるときだけ）
+    const first = data.views[0], styleRef = src.file && first.colors[ui.colorSrc] ? `${first.def.name}_painted${sfx}` : null;
+    let done = 0;
+    for (let k = 0; k < FACE.count && !skyStop; k++) {
+      const known = withAi(map, ai), face = renderFace(k, known, fillSky(known)), name = faceCamera(k).name;
+      if (face.holes < HOLE_MIN) continue;
+      log(`${name}：穴 ${Math.round(face.holes * 100)}%。${dryRun ? '文と絵を用意しています' : 'Codex が描いています（30 秒〜数分）'}`);
+      await api(`/api/paint-out/sky_face${k}${sfx}.png`, await pngBlob(face.image, FACE.w, FACE.h));
+      await api(`/api/paint-out/sky_face${k}${sfx}_holes.png`, await pngBlob(face.mask, FACE.w, FACE.h));
+      await api('/api/paint/sky', { face: k, sfx, light: src.paint, styleRef, dryRun });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (skyStop) await api('/api/paint/stop'); else log(`${name}：穴 ${Math.round(face.holes * 100)}%。Codex が描いています（${st.seconds} 秒）`); }
+      if (skyStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
+      done++;
+      if (dryRun) continue;
+      const painted = await loadImage(`/files/paint-out/sky_face${k}${sfx}_painted.png`, FACE.w, FACE.h);
+      pasteFace(ai, k, painted, face.mask);
+      await api(`/api/paint-out/sky_ai${sfx}.png`, await pngBlob(ai.rgba, AI_W, AI_H));
+      data.skyAi[sfx] = ai; data.skyAiFiles[`sky_ai${sfx}`] = true; data.skyAiVersion++;
+      $('skyAi').disabled = false; $('skyAi').checked = true;
+      await refreshSky(); // 描けた向きから順に、画面の空に出す
+    }
+    log(skyStop ? '止めました。' : !done ? '穴のある向きがありません（空はもう全部埋まっています）。' : dryRun ? `${done} 枚ぶんの文と絵を paint/out/work/ に用意しました（Codex は呼んでいません）。` : `${done} 枚描いてもらい、空に貼りました。`);
+  } catch (e) { console.error(e); log('止まりました：' + e.message); }
+  finally { skyJob = false; $('skyPaint').disabled = $('skyDry').disabled = $('skyForget').disabled = false; $('skyStopBtn').hidden = true; showSkyPlan(); }
+}
+// 「AI に描いてもらう」を押す前に、いま何枚ぶん頼むことになるかを書く
+function showSkyPlan() {
+  if (!data || !app || skyJob) return;
+  const map = skyMap('all'), ai = data.skyAi[skySfx()] || null, known = withAi(map, ai);
+  let n = 0; for (let k = 0; k < FACE.count; k++) if (faceHoles(k, known) >= HOLE_MIN) n++;
+  $('skyPlan').textContent = n ? `いま穴のある向きは ${n} / ${FACE.count}。押すと ChatGPT の利用枠を ${n} 枚ぶん使います（1 枚 1〜2 分）。` : '空は全部埋まっています。押しても Codex は呼びません。';
+}
+async function forgetSky() {
+  if (skyJob || !data) return;
+  const sfx = skySfx();
+  try { await api(`/api/paint-out/sky_ai${sfx}.png`, null, 'DELETE'); } catch (e) { $('skyLog').hidden = false; $('skyLog').textContent = e.message; return; }
+  data.skyAi[sfx] = null; data.skyAiFiles[`sky_ai${sfx}`] = false; data.skyAiVersion++;
+  await refreshSky(); showSkyPlan();
+}
+
 // ---- 起動（描画方式・粒の細かさ・色のもとを替えるたびに作り直す） ----
 async function start(useGL) {
   if (starting) return; starting = true;
@@ -505,11 +673,13 @@ async function start(useGL) {
   if (keep && keep.feet) a.walk.place(...keep.feet); else placeAtCamera();
 
   sendSource(); requestSort();
+  sky.maps.clear(); sky.fillKey = '';
   fx.u.zFromSize.value = data.views[0].def.intrinsics.fy / ui.stride;
   fx.u.zStep.value = (1 / data.cams.depth.near - 1 / data.cams.depth.far) / 65535;
   if (!keep) fx.clearFootprints(camera.position.x, camera.position.z);
   applyUi(); applyLight();
   await updateSun();
+  await refreshSky(); showSkyPlan();
 
   const gpu = !!(renderer.backend && renderer.backend.isWebGPUBackend);
   $('sBackend').textContent = gpu ? 'WebGPU' : 'WebGL 2';
@@ -527,6 +697,7 @@ async function start(useGL) {
     const now = performance.now(), dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (ui.nav === 'walk') walkStep(dt); else controls.update();
     tick(dt, now);
+    if (a.sky) a.sky.sprite.position.copy(camera.position); // 天球はいつもカメラが中心（空は歩いても動かない）
     if (ui.order === 'sort' && !a.sorter.busy && camera.position.distanceToSquared(a.sortEye) > 0.09) requestSort(); // 0.3 m 動いたら、前の並べ直しが終わっていれば次を頼む
     renderer.render(scene, camera);
     if (++frames >= 30) {
@@ -536,7 +707,7 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
+  window.__splat = { app: a, cloud, data, ui, sky, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
     setMode,
     // 確かめ用：表示 mode での全粒の色（リニア）を返す
     colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
@@ -580,7 +751,10 @@ function applyUi() {
   const a = app; if (!a) return;
   uSize.value = Number($('size').value); $('oSize').textContent = `${uSize.value.toFixed(2)} 倍`;
   uEdge.value = Number($('edge').value); $('oEdge').textContent = uEdge.value ? `${uEdge.value} 画素` : '消さない';
-  uSky.value = $('sky').checked ? 1 : 0;
+  uSky.value = ui.skyMode === 'wall' ? 1 : 0; uDome.value = ui.skyMode === 'dome' ? 1 : 0;
+  if (a.sky) a.sky.sprite.visible = ui.skyMode === 'dome';
+  $('skyBox').hidden = ui.skyMode !== 'dome';
+  $('oSkyMargin').textContent = `${$('skyMargin').value} 画素`; $('oSkyMottle').textContent = `${Number($('skyMottle').value).toFixed(1)} 倍`;
   uView.value = ui.source === 'all' ? -1 : Number(ui.source);
   a.scene.background = new THREE.Color($('holes').checked ? BG_HOLES : BG);
   a.wire.visible = $('wire').checked; a.frusta.visible = $('frusta').checked;
@@ -749,7 +923,7 @@ function setColorSrc(v, andRebuild = true) {
   ui.paintLight = SOURCES[v].light; press($('paintLight'), ui.paintLight); applyLight(); // その絵が描かれたときの光の見立て
   if (andRebuild) rebuild();
 }
-const refill = () => { if (app) { sendSource(); requestSort(); } };
+const refill = () => { if (app) { sendSource(); requestSort(); sendSky(); } };
 // 表示を切り替える。色の作り方が同じ表示どうし（絵のままの色 ⇔ 光を変えた後 など）は、シェーダーの切り替えだけで済ませる
 function setMode(v) { const same = DISPLAY[v] === DISPLAY[ui.mode]; ui.mode = v; applyUi(); if (!same) refill(); }
 const rebuild = () => { press($('stride'), ui.stride); start(forceGL).catch(fail); };
@@ -801,7 +975,7 @@ $('dayLength').addEventListener('input', () => { clock.dayLength = Number($('day
 seg('paintLight', (v) => { ui.paintLight = v; applyLight(); });
 
 for (const id of ['colorSrc', 'colorSrc2']) $(id).addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) setColorSrc(b.dataset.v); });
-seg('source', (v) => { ui.source = v; applyUi(); });
+seg('source', (v) => { ui.source = v; applyUi(); refreshSky(); });
 seg('nav', setNav);
 seg('mode', setMode);
 seg('stride', (v) => { ui.stride = Number(v); rebuild(); });
@@ -813,7 +987,7 @@ seg('order', (v) => {
 });
 $('jump').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { jump(b.dataset.v); if (ui.nav === 'walk') placeAtCamera(); } });
 for (const id of ['size', 'edge', 'windK', 'windSpeed', 'windDir', 'partR']) $(id).addEventListener('input', applyUi);
-for (const id of ['holes', 'wire', 'frusta', 'sky', 'shapes', 'third', 'windOn', 'partOn', 'footOn', 'footShow']) $(id).addEventListener('change', applyUi);
+for (const id of ['holes', 'wire', 'frusta', 'shapes', 'third', 'windOn', 'partOn', 'footOn', 'footShow']) $(id).addEventListener('change', applyUi);
 $('footClear').addEventListener('click', () => { if (app) fx.clearFootprints(app.camera.position.x, app.camera.position.z); });
 // 歩き方の操作
 function showWalk() { $('oEye').textContent = `${Number($('eye').value).toFixed(2)} m`; $('oSpeed').textContent = `${Number($('speed').value).toFixed(1)} m/s`; }
@@ -826,10 +1000,20 @@ $('collide').addEventListener('change', () => {
   applyUi();
 });
 showWalk();
+// 空の操作
+seg('skyMode', (v) => { const was = ui.skyMode; ui.skyMode = v; if ((was === 'wall') !== (v === 'wall')) rebuild(); else { applyUi(); refreshSky(); } }); // 「遠くの壁」との行き来は、粒の雲を作り直す
+seg('skyStep', (v) => { ui.skyStep = Number(v); refreshSky(); });
+for (const id of ['skyFill', 'skyAi']) $(id).addEventListener('change', () => refreshSky());
+for (const id of ['skyMargin', 'skyMottle']) { $(id).addEventListener('input', applyUi); $(id).addEventListener('change', () => { refreshSky(); if (id === 'skyMargin') showSkyPlan(); }); }
+$('skyPaint').addEventListener('click', () => paintSky(false));
+$('skyDry').addEventListener('click', () => paintSky(true));
+$('skyStopBtn').addEventListener('click', () => { skyStop = true; });
+$('skyForget').addEventListener('click', forgetSky);
 $('reload').addEventListener('click', () => { data = null; rebuild(); });
 $('swap').addEventListener('click', () => start(!forceGL).catch(fail));
 new ResizeObserver(layout).observe(stage);
 
 press($('stride'), ui.stride);
+press($('skyStep'), ui.skyStep);
 showLight();
 start(forceGL).catch(fail);

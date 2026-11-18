@@ -133,7 +133,7 @@ export function splatsFromSharp(ply, v, vi, { keep = 1, scale = 1, inv, cam, typ
     if (u < 0 || w < 0 || u >= W || w >= H) { stats.outside++; }
     else {
       let i = w * W + u;
-      if (z[i] === 0) col.sky[k] = 1;       // 映した画素が空なら空の粒（「空も粒にする」で出し入れ）
+      if (z[i] === 0) col.sky[k] = 1;       // 映した画素が空なら空の粒（空の置き方が「遠くの壁」のときだけ出す。「天球」のときは天球が受け持つ）
       else if (!match(i, d)) {
         stats.behind++;
         let found = -1;

@@ -102,12 +102,45 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="sun0" aria-pressed="false">日なた（元）</button>
       <button type="button" data-v="sunNow" aria-pressed="false">日なた（今）</button>
       <button type="button" data-v="sway" aria-pressed="false">揺れる粒</button>
+      <button type="button" data-v="skySrc" aria-pressed="false">空の出どころ</button>
     </div>
-    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。</p>
+    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。「空の出どころ」は、天球の粒を、絵から来た所（視点の色）・AI が描いた所（緑）・ツール内で埋めた所（赤紫）に色分けします。</p>
     <label class="check" for="holes"><input type="checkbox" id="holes"><span>穴を目立たせる（背景をマゼンタに）</span></label>
     <label class="check" for="wire"><input type="checkbox" id="wire"><span>プレビズの形を線で重ねる</span></label>
     <label class="check" for="frusta"><input type="checkbox" id="frusta"><span>カメラの視錐台を表示</span></label>
-    <label class="check" for="sky"><input type="checkbox" id="sky" checked><span>空も粒にする（遠くの壁に置く）</span></label>
+  </div>
+
+  <div class="group">
+    <h2>空</h2>
+    <div class="seg" id="skyMode">
+      <button type="button" data-v="dome" aria-pressed="true">天球</button>
+      <button type="button" data-v="wall" aria-pressed="false">遠くの壁</button>
+      <button type="button" data-v="off" aria-pressed="false">出さない</button>
+    </div>
+    <p class="note">「天球」は、各視点の絵の空を向きだけで 1 枚にまとめ、自分を中心にした大きな球の内側に並べます。視点どうしの重なりは混ぜるので継ぎ目が出ず、歩いても空は動きません。「遠くの壁」は以前の置き方（視点ごとの平らな板）で、比べる用です。</p>
+    <div class="group" id="skyBox">
+      <label class="check" for="skyFill"><input type="checkbox" id="skyFill" checked><span>空いた所を自動で埋める（ツール内の計算）</span></label>
+      <label class="check" for="skyAi"><input type="checkbox" id="skyAi" checked disabled><span>AI が描いた空を使う</span></label>
+      <div class="label"><span>物の輪郭の近くの空を使わない</span><output id="oSkyMargin"></output></div>
+      <input type="range" id="skyMargin" min="0" max="40" step="1" value="10">
+      <div class="label"><span>埋めた所の色のムラ</span><output id="oSkyMottle"></output></div>
+      <input type="range" id="skyMottle" min="0" max="3" step="0.1" value="1">
+      <div class="label">空の粒の細かさ</div>
+      <div class="seg" id="skyStep">
+        <button type="button" data-v="0.4" aria-pressed="false">粗い</button>
+        <button type="button" data-v="0.2" aria-pressed="true">ふつう</button>
+        <button type="button" data-v="0.12" aria-pressed="false">細かい</button>
+      </div>
+      <p class="note">自動で埋める色は、絵のある所から取った「高さごとの空の色」に、近くの雲の色をぼかして広げたものです。すぐ終わりますが、新しい雲の形は作れません。輪郭の幅は、絵と形のずれで柱などの色が空ににじむのを避けるためのものです。</p>
+      <div class="label">AI に空を描いてもらう（Codex）</div>
+      <p class="note" id="skyPlan"></p>
+      <button type="button" class="main" id="skyPaint">空いた所を AI に描いてもらう</button>
+      <button type="button" class="plain" id="skyStopBtn" hidden>止める</button>
+      <button type="button" class="plain" id="skyDry">文と絵だけ用意する（利用枠を使わない）</button>
+      <button type="button" class="plain" id="skyForget">AI が描いた空を消す</button>
+      <p class="note" id="skyLog" hidden style="white-space:pre-wrap"></p>
+      <p class="note">上半分を 4 つの向きに分け、穴のある向きだけ 1 枚ずつ頼みます（穴をマゼンタで塗った空の絵を見せ、そこだけ描いてもらって貼ります）。絵のある所は変わりません。結果は paint/out/sky_ai.png に残り、次からは読むだけです。色のもと（最初の絵・光の少ない絵・影つきの絵）ごとに別々に持ちます。</p>
+    </div>
   </div>
 
   <div class="group" id="lightBox">
@@ -191,6 +224,7 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <dt>描画速度</dt><dd id="sFps">–</dd>
     <dt>並べ直し</dt><dd id="sSort">–</dd>
     <dt>影の計算</dt><dd id="sSun">–</dd>
+    <dt>空</dt><dd id="sSky">–</dd>
     <dt>いまの位置</dt><dd id="sPos">–</dd>
     <dt>足元</dt><dd id="sFoot">–</dd>
   </dl>
