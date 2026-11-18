@@ -595,9 +595,9 @@ function requestSort() { const a = app; if (!a) return; const e = orderEye(); a.
 function makeMaterials(a) {
   const [P0, B, M, D0, E0, F0] = a.attrs.map((t) => instancedBufferAttribute(t));
   // 動かせる物：枠（F.z）の変換（studio/interact.js の絵）を、位置・面の向き・形に掛ける。枠 0 は単位行列
-  const xv = F0.z.add(0.5).div(SLOTS), r0 = texture(mover.tex, vec2(0.125, xv)), r1 = texture(mover.tex, vec2(0.375, xv)), r2 = texture(mover.tex, vec2(0.625, xv)), flags = texture(mover.tex, vec2(0.875, xv));
-  const R0 = r0.xyz, R1 = r1.xyz, R2 = r2.xyz, rot = (v) => vec3(dot(R0, v), dot(R1, v), dot(R2, v));
-  const P = vec4(rot(P0.xyz).add(vec3(r0.w, r1.w, r2.w)), P0.w), D = vec4(rot(D0.xyz), D0.w);
+  const xv = F0.z.add(0.5).div(SLOTS), xr0 = texture(mover.tex, vec2(0.125, xv)), xr1 = texture(mover.tex, vec2(0.375, xv)), xr2 = texture(mover.tex, vec2(0.625, xv)), flags = texture(mover.tex, vec2(0.875, xv));
+  const R0 = xr0.xyz, R1 = xr1.xyz, R2 = xr2.xyz, rot = (v) => vec3(dot(R0, v), dot(R1, v), dot(R2, v));
+  const P = vec4(rot(P0.xyz).add(vec3(xr0.w, xr1.w, xr2.w)), P0.w), D = vec4(rot(D0.xyz), D0.w);
   // 形（共分散 S）：R S Rᵀ
   const S0o = vec3(E0.x, E0.y, E0.z), S1o = vec3(E0.y, E0.w, F0.x), S2o = vec3(E0.z, F0.x, F0.y);
   const T0 = vec3(dot(R0, S0o), dot(R0, S1o), dot(R0, S2o)), T1 = vec3(dot(R1, S0o), dot(R1, S1o), dot(R1, S2o)), T2 = vec3(dot(R2, S0o), dot(R2, S1o), dot(R2, S2o));

@@ -4,6 +4,9 @@
 // 物：絵の物体 1 つ = 剛体 1 つ。当たりの形は、その物の粒の位置の凸包（物の粒が板のように薄いときは、見る向きに厚みを足す）。
 // 地面：歩くときの当たりの三角形（shared/collision.js の W）のうち、動かせる物の分を除いたもの（動かない三角形のメッシュ）。
 // 自分：歩く人と同じ所に、動かすと物を押すカプセル（キネマティック）を置く。
+// 物は最初「止めた」状態（キネマティック。動かない）で置く。絵の物は足もとが地面に少しめり込んでいることが多く、
+// そのまま重力を掛けると押し合いで沈んだり跳ねたりするため。持つ・体で押す・動いている物が当たると「動く」状態になり、
+// そのとき足もとが地面より下なら、地面の高さまで持ち上げてから重力を掛ける。
 //
 // 物の動きは「置いたときからの変換」（4×4。行ごと）で返す。粒の位置 = 変換 × 置いたときの位置。
 import RAPIER from '@dimforge/rapier3d-compat';
@@ -56,7 +59,7 @@ export function hullPoints(pts, { maxPoints = 1500, minThick = 0.35, view = null
   for (let j = 0; j < 3; j++) c[j] = (lo[j] + hi[j]) / 2;
   const local = new Float32Array(k * 3);
   for (let i = 0; i < k; i++) for (let j = 0; j < 3; j++) local[i * 3 + j] = out[i * 3 + j] - c[j];
-  return { local, center: c, half: [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2] };
+  return { local, center: c, half: [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2], low: lo[1] - c[1] };
 }
 
 /**
@@ -65,7 +68,7 @@ export function hullPoints(pts, { maxPoints = 1500, minThick = 0.35, view = null
  *   objects [{ id, pts（世界の位置）, kind（DENSITY の名前）, view? }]
  * 返すもの：操作の一式（下の説明）
  */
-export async function createPhysics({ ground, objects, gravity = 9.81, player = { radius: 0.3, height: 1.8 } }) {
+export async function createPhysics({ ground, objects, gravity = 9.81, player = { radius: 0.3, height: 1.8 }, groundY = null, pushMass = 40 }) {
   await initPhysics();
   const world = new RAPIER.World({ x: 0, y: -gravity, z: 0 });
   if (ground && ground.n) {
@@ -79,23 +82,32 @@ export async function createPhysics({ ground, objects, gravity = 9.81, player = 
     const desc = RAPIER.ColliderDesc.convexHull(h.local);
     if (!desc) continue; // 点が平らすぎる・少なすぎる
     const vol = 8 * h.half[0] * h.half[1] * h.half[2] * 0.5, mass = Math.max(1, vol * (DENSITY[o.kind] || DENSITY.default));
-    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...h.center).setCanSleep(true).setLinearDamping(0.05).setAngularDamping(0.4));
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(...h.center).setCanSleep(true).setLinearDamping(0.05).setAngularDamping(0.4));
     const col = world.createCollider(desc.setMass(mass).setFriction(0.8).setRestitution(0.05), body);
-    body.sleep(); // 置いたままでは動かない（触る・持つまで眠る）
-    const b = { id: o.id, body, col, rest: h.center.slice(), half: h.half, mass, removed: false, kind: o.kind };
+    const b = { id: o.id, body, col, rest: h.center.slice(), half: h.half, low: h.low, mass, removed: false, kind: o.kind, frozen: true, reach: Math.hypot(...h.half) };
     bodies.set(o.id, b); byCollider.set(col.handle, b);
   }
   // 自分（歩く人）：物を押すカプセル
   const half = Math.max(0.05, player.height / 2 - player.radius);
   const me = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, -1e4, 0));
   const meCol = world.createCollider(RAPIER.ColliderDesc.capsule(half, player.radius), me);
-  const hold = { b: null, dist: 2.5, target: [0, 0, 0] };
+  const hold = { b: null, dist: 2.5, target: [0, 0, 0], feet: null };
+  // 止めた物を動かす：足もとがめり込んでいたら地面まで上げてから、重力の効く物にする
+  const wake = (b) => {
+    if (!b.frozen || b.removed) return;
+    const t = b.body.translation(), g = groundY ? groundY(t.x, t.z, t.y + b.half[1]) : null, bottom = t.y + b.low;
+    if (g !== null && g !== undefined && bottom < g) b.body.setTranslation({ x: t.x, y: t.y + (g - bottom) + 0.01, z: t.z }, true);
+    b.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+    b.frozen = false; b.body.wakeUp();
+  };
+  const near = (b, p, r) => { const t = b.body.translation(); return Math.hypot(t.x - p[0], t.z - p[2]) < r + Math.max(b.half[0], b.half[2]) && p[1] < t.y + b.half[1] + 0.2 && p[1] + player.height > t.y - b.half[1]; };
 
   const api = {
     world, bodies, mass: (id) => bodies.get(id)?.mass ?? 0,
     /** 歩く人の足元。物を押す。null で外す（回して見るとき） */
     setPlayer(feet) {
-      if (!feet) { me.setNextKinematicTranslation({ x: 0, y: -1e4, z: 0 }); return; }
+      if (!feet) { me.setNextKinematicTranslation({ x: 0, y: -1e4, z: 0 }); hold.feet = null; return; }
+      hold.feet = feet;
       me.setNextKinematicTranslation({ x: feet[0], y: feet[1] + player.height / 2, z: feet[2] });
     },
     /** 見ている向きの線で、いちばん近い物を探す。{ id, dist } か null */
@@ -107,7 +119,8 @@ export async function createPhysics({ ground, objects, gravity = 9.81, player = 
       return b && !b.removed ? { id: b.id, dist: t } : null;
     },
     /** 持つ（目の前 dist m の所へ引き寄せ続ける）。id = null で放す。放すときに throwVel を与えられる */
-    grab(id, dist = 2.5) { const b = bodies.get(id); if (!b || b.removed) return false; hold.b = b; hold.dist = Math.max(1, dist); b.body.wakeUp(); return true; },
+    grab(id, dist = 2.5) { const b = bodies.get(id); if (!b || b.removed) return false; wake(b); hold.b = b; hold.dist = Math.max(1, dist); b.body.wakeUp(); return true; },
+    wake: (id) => { const b = bodies.get(id); if (b) wake(b); },
     release(throwVel = null) {
       const b = hold.b; hold.b = null; if (!b) return;
       if (throwVel) b.body.setLinvel({ x: throwVel[0], y: throwVel[1], z: throwVel[2] }, true);
@@ -120,13 +133,22 @@ export async function createPhysics({ ground, objects, gravity = 9.81, player = 
     reset(id = null) {
       for (const b of id === null ? bodies.values() : [bodies.get(id)].filter(Boolean)) {
         b.removed = false; b.body.setEnabled(true);
+        b.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, false); b.frozen = true;
         b.body.setTranslation({ x: b.rest[0], y: b.rest[1], z: b.rest[2] }, false); b.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, false);
-        b.body.setLinvel({ x: 0, y: 0, z: 0 }, false); b.body.setAngvel({ x: 0, y: 0, z: 0 }, false); b.body.sleep();
+        b.body.setNextKinematicTranslation({ x: b.rest[0], y: b.rest[1], z: b.rest[2] }); b.body.setNextKinematicRotation({ x: 0, y: 0, z: 0, w: 1 });
       }
       if (id === null || (hold.b && hold.b.id === id)) hold.b = null;
     },
     /** 時間を進める */
     step(dt) {
+      // 体で押す（軽い物）・動いている物が当たる → 止めた物を動かす
+      const awake = [...bodies.values()].filter((b) => !b.frozen && !b.removed && !b.body.isSleeping());
+      for (const b of bodies.values()) {
+        if (!b.frozen || b.removed) continue;
+        if (hold.feet && b.mass < pushMass && near(b, hold.feet, player.radius)) { wake(b); continue; }
+        const t = b.body.translation();
+        for (const a of awake) { const u = a.body.translation(); if (Math.hypot(u.x - t.x, u.y - t.y, u.z - t.z) < a.reach + b.reach) { wake(b); break; } }
+      }
       if (hold.b) { // 持っている物：目標へ速さで引き寄せる（ぶつかりは物理のまま）
         const p = hold.b.body.translation(), k = 12;
         hold.b.body.setLinvel({ x: (hold.target[0] - p.x) * k, y: (hold.target[1] - p.y) * k, z: (hold.target[2] - p.z) * k }, true);
@@ -147,7 +169,7 @@ export async function createPhysics({ ground, objects, gravity = 9.81, player = 
           R[6], R[7], R[8], t.z - (R[6] * r[0] + R[7] * r[1] + R[8] * r[2]),
           0, 0, 0, 1,
         ];
-        out.push({ id: b.id, m, removed: b.removed, moving: !b.removed && !b.body.isSleeping(), half: b.half, center: [t.x, t.y, t.z], rot: R });
+        out.push({ id: b.id, m, removed: b.removed, moving: !b.removed && !b.frozen && !b.body.isSleeping(), half: b.half, center: [t.x, t.y, t.z], rot: R });
       }
       return out;
     },

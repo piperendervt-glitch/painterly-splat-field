@@ -8,7 +8,7 @@
 //   4. 歩く人の当たり（shared/collision.js）では、動かせる物のもとの形を外し、重い物だけ今の箱の形を入れる。軽い物は体で押す
 import * as THREE from 'three/webgpu';
 import { createPhysics } from './physics.js';
-import { setStaticOff, setDynamic } from '../shared/collision.js';
+import { setStaticOff, setDynamic, groundAt } from '../shared/collision.js';
 
 export const SLOTS = 256;     // 動かせる物の数の上限（枠 0 は使わない）
 export const PUSH_MASS = 40;  // これより軽い物は、歩く人が体で押せる（当たりで止まらない）
@@ -76,7 +76,8 @@ export async function attachPhysics(mover, { cloud, list, front, W, kindOf, eye,
   const keep = [];
   for (let i = 0; i < W.n; i++) if (!W.off[W.objectId[i]]) keep.push(i);
   const gt = new Float32Array(keep.length * 9); keep.forEach((t, k) => gt.set(W.tris.subarray(t * 9, t * 9 + 9), k * 9));
-  const phys = await createPhysics({ ground: { tris: gt, n: keep.length }, objects, player });
+  const groundY = (x, z, yTop) => { const g = groundAt(W, x, z, yTop + 50); return g ? g.y : null; }; // 動かない地面の高さ（動かせる物の分は除いてある）
+  const phys = await createPhysics({ ground: { tris: gt, n: keep.length }, objects, player, groundY, pushMass: PUSH_MASS });
   phys.step(1 / 120); // 当たりの問い合わせ（pick）を使えるようにする
 
   const typeOf = new Map(list.map((o) => [o.id, o.typeId]));
