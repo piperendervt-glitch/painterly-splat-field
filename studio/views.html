@@ -75,11 +75,11 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
 <aside>
   <header>
     <h1>視点を足す</h1>
-    <p class="lead">まだ絵に描かれていない所（穴）が多く見える視点を足し、穴だけを描き足して、その分の粒を空間に加えます。</p>
+    <p class="lead" id="lead">まだ絵に描かれていない所（穴）が多く見える視点を足し、穴だけを描き足して、その分の粒を空間に加えます。</p>
   </header>
   <p class="note warn" id="problem" hidden></p>
 
-  <div class="group">
+  <div class="group" id="lightBox">
     <div class="label">光の描き方（どの絵を基準にするか）</div>
     <div class="seg" id="light">
       <button type="button" data-v="free" aria-pressed="true">自由</button>
@@ -91,9 +91,11 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
 
   <div class="group">
     <h2>1. 視点を決める</h2>
+    <div class="group" id="searchBox">
     <button type="button" class="plain" id="search">穴の多い視点を自動で探す</button>
     <label class="check" for="high"><input type="checkbox" id="high" checked><span>高い視点・真上からの視点も探す</span></label>
     <p class="note" id="searchNote">まわりの位置から形を見たときに、穴がいちばん多く見える所を計算で探します。チェックを外すと、下の「カメラの高さ」だけで探します。</p>
+    </div>
     <div class="label"><span>カメラの高さ</span><output id="oCamY"></output></div>
     <input type="range" id="camY" min="1" max="200" step="0.1" value="1.7">
     <div class="label"><span>見下ろす角度</span><output id="oPitch"></output></div>
@@ -109,7 +111,7 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
     </div>
     <p class="note">マゼンタが穴（どの絵にも描かれていない面）、紫が空の穴です。</p>
     <button type="button" class="main" id="add">この視点を足す</button>
-    <p class="note">プレビズをこの視点から書き出し直し、すでにある絵をこの視点へ写します。ChatGPT の利用枠は使いません。</p>
+    <p class="note" id="addNote">プレビズをこの視点から書き出し直し、すでにある絵をこの視点へ写します。ChatGPT の利用枠は使いません。</p>
   </div>
 
   <div class="group">
@@ -132,6 +134,7 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
         <button type="button" class="plain" id="stop" disabled>止める</button>
       </div>
       <p class="note">どちらも穴の所だけを描き、穴の外は 1 画素も変えません。やり直すと上書きします。</p>
+      <p class="note" id="fillNote"></p>
     </div>
   </div>
 

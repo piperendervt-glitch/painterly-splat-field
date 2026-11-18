@@ -29,7 +29,7 @@ function frustumLines(color) {
   return lines;
 }
 
-export async function createView3D(host, { gl = false, onChange = () => {} } = {}) {
+export async function createView3D(host, { gl = false, onChange = () => {}, mesh = null } = {}) {
   const renderer = new THREE.WebGPURenderer({ antialias: true, forceWebGL: gl });
   await renderer.init();
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -37,9 +37,23 @@ export async function createView3D(host, { gl = false, onChange = () => {} } = {
   const overlay = document.createElement('div'); overlay.className = 'v3-overlay'; host.append(overlay);
   const frame = document.createElement('div'); frame.className = 'v3-frame'; frame.hidden = true; overlay.append(frame);
 
-  const scene = buildScene();
+  // mesh（{ positions, colors, indices }）があれば、プレビズの形の代わりにそれを出す（絵 1 枚から作った場面：奥行きの絵を面にした物）
+  const scene = mesh ? new THREE.Scene() : buildScene();
+  let picture = null;
+  const setMesh = (m) => {
+    if (picture) { scene.remove(picture); picture.geometry.dispose(); }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+    const lin = new Float32Array(m.colors.length), c = new THREE.Color();
+    for (let i = 0; i < lin.length; i += 3) { c.setRGB(m.colors[i], m.colors[i + 1], m.colors[i + 2], THREE.SRGBColorSpace); lin[i] = c.r; lin[i + 1] = c.g; lin[i + 2] = c.b; }
+    geo.setAttribute('color', new THREE.BufferAttribute(lin, 3)); geo.setIndex(new THREE.BufferAttribute(m.indices, 1));
+    picture = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })); picture.name = 'picture';
+    scene.add(picture);
+  };
+  if (mesh) { scene.background = new THREE.Color(0x1b231b); setMesh(mesh); }
   const grid = new THREE.GridHelper(400, 20, 0x3c4a3c, 0x2f3b2f); grid.position.y = 0.05; grid.material.transparent = true; grid.material.opacity = 0.6; scene.add(grid);
   const solids = []; scene.traverse((o) => { if (o.isMesh) solids.push(o); });
+  const listSolids = () => { solids.length = 0; scene.traverse((o) => { if (o.isMesh && (o === picture || !mesh)) solids.push(o); }); };
 
   const camera = new THREE.PerspectiveCamera(FREE_FOV, 1, 0.3, 4000);
   camera.position.set(70, 55, 90);
@@ -156,6 +170,8 @@ export async function createView3D(host, { gl = false, onChange = () => {} } = {
       });
       placeCandidate(); layout();
     },
+    // 絵の形を差し替える（視点を足した後）
+    setMesh(m) { setMesh(m); listSolids(); invalidate(); },
     // 外（つまみ・地図・自動で探す）で候補が変わったとき
     setCandidate(c) {
       cand.position = [...c.position]; cand.target = [...c.target]; placeCandidate();

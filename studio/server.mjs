@@ -44,6 +44,17 @@ function readBody(req, limit = 64 * 1024 * 1024) {
     req.on('error', ng);
   });
 }
+// 絵 1 枚から作った場面で「視点を足す」と、足した視点は cameras.json ではなく added_views.json に入る（cameras.json は git が見ているので書き換えない）。
+// 読むときは、いつも 2 つを合わせた物を返す。
+const camFile = () => path.join(DIRS['previz-export'], 'cameras.json'), addedFile = () => path.join(DIRS['previz-export'], 'added_views.json');
+function addedViews() {
+  try { const list = JSON.parse(fs.readFileSync(addedFile(), 'utf8')); return Array.isArray(list) ? list.filter((v) => v && /^[A-Za-z0-9]+$/.test(v.name || '')) : []; } catch { return []; }
+}
+function readCameras() {
+  const cams = JSON.parse(fs.readFileSync(camFile(), 'utf8')), names = new Set((cams.views || []).map((v) => v.name));
+  cams.views = [...(cams.views || []), ...addedViews().filter((v) => !names.has(v.name)).map((v) => ({ ...v, added: true }))];
+  return cams;
+}
 const stat = (file) => { try { const s = fs.statSync(file); return { size: s.size, mtime: Math.round(s.mtimeMs) }; } catch { return null; } };
 
 // 物体ごとの 3D モデル：paint-out の object_<番号>.glb（無ければ .obj）。{ 番号: ファイル名 }
@@ -58,11 +69,11 @@ function objectModels() {
 
 function state() {
   const out = { scene: SCENE, previz: null, views: [], paintReady: fs.existsSync(path.join(ROOT, 'paint', 'node_modules', 'pngjs')) };
-  const camFile = path.join(DIRS['previz-export'], 'cameras.json');
-  if (!fs.existsSync(camFile)) return out;
+  out.depthReady = fs.existsSync(path.join(ROOT, 'painting', 'node_modules', 'onnxruntime-node')); // 描き足した絵の奥行き推定（painting/depth.mjs）が使えるか
+  if (!fs.existsSync(camFile())) return out;
   let cams;
-  try { cams = JSON.parse(fs.readFileSync(camFile, 'utf8')); } catch { return out; }
-  out.previz = stat(camFile);
+  try { cams = readCameras(); } catch { return out; }
+  out.previz = stat(camFile());
   out.ground_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`ground_ai${sfx}`, stat(path.join(DIRS['paint-out'], `ground_ai${sfx}.png`))])); // AI が描いた周囲の地面
   out.world = stat(path.join(DIRS['paint-out'], 'world.ply')); // 外で作った世界の粒（取り込み用。studio/worldimport.js）
   out.objects = objectModels(); // 物体ごとの 3D モデル（object_<番号>.glb / .obj。studio/objectmodel.js）
@@ -83,6 +94,7 @@ function state() {
     reproj_lit: stat(path.join(DIRS['paint-out'], `${v.name}_reproj_lit.png`)),
     holes_lit: stat(path.join(DIRS['paint-out'], `${v.name}_holes_lit.png`)),
     new_mask: stat(path.join(DIRS['paint-out'], `${v.name}_new.png`)),
+    disp: stat(path.join(DIRS['paint-out'], `${v.name}_disp.png`)), // 描き足した絵から推定した近さ（painting/depth.mjs）
     painted_flat: stat(path.join(DIRS['paint-out'], `${v.name}_painted_flat.png`)),
     overlay_flat: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_flat.png`)),
     painted_lit: stat(path.join(DIRS['paint-out'], `${v.name}_painted_lit.png`)),
@@ -123,9 +135,11 @@ function fillFiles(view, light) {
   const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}${sfx}.png`), pre = (name) => path.join(DIRS['previz-export'], `${view}_${name}.png`);
   return { image: out('reproj'), mask: out('holes'), out: out('painted'), overlay: out('overlay'), previz: pre(ref), depth: pre('depth_view') };
 }
-function runFill({ view, style, dryRun, light }) {
+function runFill({ view, style, dryRun, light, noPreviz, hint }) {
   const f = fillFiles(view, light);
-  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', f.image, '--mask', f.mask, '--out', f.out, '--previz', f.previz, '--depth', f.depth, '--overlay', f.overlay];
+  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', f.image, '--mask', f.mask, '--out', f.out];
+  if (!noPreviz) args.push('--previz', f.previz, '--depth', f.depth, '--overlay', f.overlay); // 絵 1 枚から作った場面には、穴の中の形の見本が無い
+  if (typeof hint === 'string' && hint.trim()) args.push('--hint', hint.trim().replace(/\s+/g, ' ').slice(0, 600));
   if (light === 'flat' || light === 'previz') args.push('--light', light);
   if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
   if (dryRun) args.push('--dry-run');
@@ -189,6 +203,7 @@ export async function handle(req, res, next) {
       if (!DIRS[dir] || !SAFE_NAME.test(name || '')) return json(res, 404, { error: 'not found' });
       const file = path.join(DIRS[dir], name);
       if (!fs.existsSync(file)) return json(res, 404, { error: 'not found' });
+      if (dir === 'previz-export' && name === 'cameras.json' && fs.existsSync(addedFile())) return json(res, 200, readCameras()); // 足した視点を合わせて返す
       res.statusCode = 200;
       res.setHeader('Content-Type', TYPES[path.extname(name)]);
       res.setHeader('Cache-Control', 'no-store');
@@ -213,10 +228,20 @@ export async function handle(req, res, next) {
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
       if (!/^[A-Za-z0-9]+$/.test(body.view || '')) return json(res, 400, { error: '視点の名前が使えません' });
       const need = fillFiles(body.view, body.light);
-      for (const f of [need.image, need.mask, need.previz]) {
+      for (const f of body.noPreviz ? [need.image, need.mask] : [need.image, need.mask, need.previz]) {
         if (!fs.existsSync(f)) return json(res, 400, { error: `${path.basename(f)} がありません。「視点を足す」からやり直してください。` });
       }
       runFill(body);
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/depth' && req.method === 'POST') { // 描き足した絵の近さを推定する（結果は <視点>_disp.png。合わせ込みは画面がする）
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[A-Za-z0-9]+$/.test(body.view || '')) return json(res, 400, { error: '視点の名前が使えません' });
+      const image = fillFiles(body.view, body.light).out;
+      if (!fs.existsSync(image)) return json(res, 400, { error: `${path.basename(image)} がありません。先に穴を埋めてください。` });
+      if (!fs.existsSync(path.join(ROOT, 'painting', 'node_modules', 'onnxruntime-node'))) return json(res, 400, { error: '奥行き推定の用意がまだです。start.bat を起動し直すと入ります（painting フォルダで npm install）。' });
+      startProcess(process.env.PSF_DEPTH_NODE || process.execPath, [path.join(ROOT, 'painting', 'depth.mjs'), '--image', image, '--out', path.join(DIRS['paint-out'], `${body.view}_disp.png`)], path.join(ROOT, 'painting'));
       return json(res, 200, { ok: true });
     }
     if (p === '/api/paint/sky' && req.method === 'POST') {
@@ -286,7 +311,10 @@ export async function handle(req, res, next) {
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
       if (!/^[A-Za-z0-9]+$/.test(body.view || '')) return json(res, 400, { error: '視点の名前が使えません' });
       for (const kind of ['painted', 'overlay', 'reproj', 'holes']) for (const sfx of ['', '_flat', '_lit']) fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_${kind}${sfx}.png`), { force: true });
-      fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_new.png`), { force: true });
+      for (const kind of ['new', 'disp']) fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_${kind}.png`), { force: true });
+      if (addedViews().some((v) => v.name === body.view)) { // 絵 1 枚の場面で足した視点：画面が書いた奥行き・札・下絵も消す（もとの視点の物は消さない）
+        for (const kind of ['color', 'depth', 'depth_view', 'labels', 'objects']) fs.rmSync(path.join(DIRS['previz-export'], `${body.view}_${kind}.png`), { force: true });
+      }
       return json(res, 200, { ok: true });
     }
     if (p === '/api/paint/stop' && req.method === 'POST') { stopPaint(); return json(res, 200, { ok: true }); }

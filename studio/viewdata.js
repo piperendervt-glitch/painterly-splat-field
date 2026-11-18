@@ -40,10 +40,21 @@ export async function loadViews(light = 'free') {
         type = new Uint8Array(W * H); object = new Uint16Array(W * H);
         for (let i = 0; i < W * H; i++) { type[i] = t[i * 4]; object[i] = o[i * 4] * 256 + o[i * 4 + 1]; }
       } catch { type = object = null; }
+    } else if (def.labels && def.objects) { // 絵 1 枚から作った場面：種類は場面ごとの番号（cams.labels.types）、物体は R + G × 256
+      try {
+        const [t, o] = await Promise.all([loadImage(`/files/previz-export/${def.labels}`, W, H), loadImage(`/files/previz-export/${def.objects}`, W, H)]);
+        type = new Uint8Array(W * H); object = new Uint16Array(W * H);
+        for (let i = 0; i < W * H; i++) { type[i] = t[i * 4]; object[i] = o[i * 4] + o[i * 4 + 1] * 256; }
+      } catch { type = object = null; }
+    }
+    // 足した視点で、新しく描いた画素の印（白 = 新しい）。絵 1 枚の場面で、次の視点へ写すときに使う
+    let fresh = null;
+    if (st.new_mask) {
+      try { const m = await loadImage(`/files/paint-out/${def.name}_new.png`, W, H); fresh = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) fresh[i] = m[i * 4] > 127 ? 1 : 0; } catch { fresh = null; }
     }
     views.push({
-      def, name: def.name, W, H, z, st, type, object,
-      added: !!st.new_mask || !!st.reproj || !!st.reproj_flat || !!st.reproj_lit, // 「視点を足す」で足した視点
+      def, name: def.name, W, H, z, st, type, object, fresh,
+      added: !!def.added || !!st.new_mask || !!st.reproj || !!st.reproj_flat || !!st.reproj_lit, // 「視点を足す」で足した視点
       painted: st[`painted${sfx}`] ? await loadImage(`/files/paint-out/${def.name}_painted${sfx}.png`, W, H) : null,
       c2w: def.extrinsics.camera_to_world.flat(), w2c: def.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4
       ...def.intrinsics,

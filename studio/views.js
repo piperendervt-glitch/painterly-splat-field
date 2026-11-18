@@ -1,6 +1,7 @@
 // 視点を足す：穴の多い視点を探す → プレビズを書き出し直す → すでにある絵を新しい視点へ写す → 穴だけ埋める。
 import { createView3D } from './view3d.js';
 import { loadViews, loadImage, sceneTriangles, analyze, warpInto, localFill, VIEW_TINTS, LIGHTS } from './viewdata.js';
+import * as dream from './dreamviews.js';
 
 const $ = (id) => document.getElementById(id);
 const api = async (url, body) => {
@@ -20,6 +21,8 @@ const sfx = () => LIGHTS[light].sfx;
 let repaired = '', heading = 0; // heading：カメラの水平の向き（真下を向いている間も覚えておく）
 let v3 = null; // 3D の画面（作れなかったら null のまま、地図だけで使う）
 let cand = { position: [24, 1.7, -30], target: [0, 15, 0] }, selected = null, dots = [], mapT = null, timer = 0;
+// 絵 1 枚から作った場面（プレビズの形が無い）では、形の代わりに絵の奥行きを使う（studio/dreamviews.js）。shape = 3D の画面と地図に出す、絵の形
+let painting = false, shape = null;
 
 const fovY = () => D.views[0].fov_y_deg;
 const painted = () => D.views.filter((v) => v.painted);
@@ -27,6 +30,8 @@ const painted = () => D.views.filter((v) => v.painted);
 // ---- 読み込み ----
 async function reload() {
   D = await loadViews(light);
+  painting = dream.isPainting(D.cams);
+  if (painting) return reloadPainting();
   // 足した視点が書き出しから消えていたら（古いプレビズの画面から保存された場合など）、書き出し直して戻す。絵は残っているので描き直しは要らない
   const extras = await extraCameras();
   const lost = extras.filter((c) => !D.views.some((v) => v.name === c.name)).map((c) => c.name).join('・');
@@ -42,12 +47,34 @@ async function reload() {
   renderAdded(); drawMap(); show(); showAuto();
 }
 
+// 絵 1 枚から作った場面の読み直し：プレビズの書き出し直しはしない（形が無い）。足した視点は cameras.json に added の印つきで入っている
+function reloadPainting() {
+  meshes = [];
+  shape = dream.sceneMesh(D);
+  problem(painted().length ? '' : 'この場面の絵がまだありません（paint-out に <視点>_painted.png がありません）。');
+  if (selected && !D.views.some((v) => v.name === selected)) selected = null;
+  if (v3) { v3.setMesh(shape); v3.setViews(D.views); v3.setCandidate(cand); }
+  renderAdded(); drawMap(); show(); showAuto();
+}
+const dreamIO = {
+  savePaint: (name, rgba, w, h) => savePng(name, rgba, w, h),
+  async saveExport(name, rgba, w, h) {
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').putImageData(new ImageData(rgba, w, h), 0, 0);
+    const res = await fetch(`/api/previz-export/${name}`, { method: 'POST', body: await new Promise((r) => c.toBlob(r, 'image/png')) });
+    if (!res.ok) throw new Error(`${name} を保存できませんでした`);
+  },
+  async loadAdded() { const r = await fetch('/files/previz-export/added_views.json', { cache: 'no-store' }); return r.ok ? r.json() : []; },
+  async saveAdded(list) { const r = await fetch('/api/previz-export/added_views.json', { method: 'POST', body: JSON.stringify(list, null, 1) }); if (!r.ok) throw new Error('足した視点の一覧を保存できませんでした'); },
+};
+
 // ---- 地図 ----
 function drawMap() {
   const c = $('map'), g = c.getContext('2d'), S = c.width;
   let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
   const grow = (x, z) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); };
   for (const m of meshes) if (!m.ground) { grow(m.min[0], m.min[2]); grow(m.max[0], m.max[2]); }
+  if (painting && shape) for (let i = 0; i < shape.positions.length; i += 3 * 97) grow(shape.positions[i], shape.positions[i + 2]);
   for (const v of D.views) grow(v.def.extrinsics.position[0], v.def.extrinsics.position[2]);
   grow(cand.position[0], cand.position[2]);
   const span = Math.max(x1 - x0, z1 - z0) + 80, mx = (x0 + x1) / 2, mz = (z0 + z1) / 2, k = S / span;
@@ -57,6 +84,9 @@ function drawMap() {
   g.strokeStyle = '#263026'; g.lineWidth = 1; // 20m の目盛り
   for (let t = Math.ceil((mx - span / 2) / 20) * 20; t < mx + span / 2; t += 20) { g.beginPath(); g.moveTo(X(t), 0); g.lineTo(X(t), S); g.stroke(); }
   for (let t = Math.ceil((mz - span / 2) / 20) * 20; t < mz + span / 2; t += 20) { g.beginPath(); g.moveTo(0, Z(t)); g.lineTo(S, Z(t)); g.stroke(); }
+  if (painting && shape) { // 絵の形を、上から見た点の集まりで出す
+    for (let i = 0; i < shape.positions.length; i += 3 * 5) { g.fillStyle = `rgb(${shape.colors[i] * 255 | 0},${shape.colors[i + 1] * 255 | 0},${shape.colors[i + 2] * 255 | 0})`; g.fillRect(X(shape.positions[i]) - 1, Z(shape.positions[i + 2]) - 1, 2, 2); }
+  }
   const top = Math.max(1, ...dots.map((d) => d.score));
   for (const d of dots) { g.fillStyle = `rgba(255,0,255,${0.08 + 0.8 * d.score / top})`; g.beginPath(); g.arc(X(d.x), Z(d.z), 5, 0, 7); g.fill(); }
   g.fillStyle = '#8d8a80'; g.font = '13px sans-serif';
@@ -108,6 +138,13 @@ async function show() {
   $('fillBox').hidden = !selected;
   if (!selected) {
     $('shotTitle').textContent = '候補の視点から見た今の状態';
+    if (painting) {
+      const a = dream.preview(D, cand, 288, VIEW_TINTS, mode);
+      put(a.rgba, a.w, a.h);
+      $('shotNote').textContent = `絵の ${(100 * a.holes / a.pixels).toFixed(0)}% が穴（すでにある絵が写らない所）で、${(100 * a.covered / a.pixels).toFixed(0)}% はすでに描かれています。穴が半分を超えると、描き足す絵がもとの絵とつながりにくくなります。`;
+      window.__views = { analysis: a, cand, D };
+      return;
+    }
     const a = analyze({ meshes, views: D.views, position: cand.position, target: cand.target, fovY: fovY(), w: PREVIEW_W, h: PREVIEW_H, mode });
     put(a.rgba, a.w, a.h);
     $('shotNote').textContent = a.surface
@@ -155,7 +192,7 @@ function renderAdded() {
 
 // ---- 穴の多い視点を探す ----
 async function search() {
-  if (busy || !painted().length) return;
+  if (busy || !painted().length || painting) return;
   busy = true; $('search').disabled = true; dots = [];
   try {
     const solids = meshes.filter((m) => !m.ground);
@@ -223,6 +260,7 @@ async function savePng(name, rgba, w, h) {
 }
 function nextName() {
   const used = new Set(D.views.map((v) => v.name));
+  if (painting) for (let i = 1; ; i++) if (!used.has(`R${i}`)) return `R${i}`; // 絵 1 枚の場面で足した視点は R1, R2, …（.gitignore がこの名前の絵を外す）
   for (const ch of 'CDEFGHIJKLMNOPQRSTUVWXYZ') if (!used.has(ch)) return ch;
   for (let i = 1; ; i++) if (!used.has(`V${i}`)) return `V${i}`;
 }
@@ -237,6 +275,7 @@ async function addView() {
 }
 // いまの候補の視点を足す：プレビズを書き出し直し、すでにある絵を写す。返すのは { name, holes（いまの光の描き方での穴の画素数。絵が無ければ null）, pixels }
 async function addViewCore() {
+  if (painting) return addDreamView(nextName(), cand);
   const name = nextName(), round = (a) => a.map((x) => +x.toFixed(3));
   say('プレビズを書き出しています'); log(`視点 ${name} を足します：位置 ${round(cand.position).join(', ')} → 見る先 ${round(cand.target).join(', ')}`);
   await api('/api/view/forget', { view: name });
@@ -253,6 +292,34 @@ async function addViewCore() {
   await reload();
   const v = D.views.find((x) => x.name === name);
   return { name, holes, pixels: v ? v.W * v.H : 1 };
+}
+// 絵 1 枚の場面：候補 c の視点 name を足す（または写し直す）。すでにある絵を奥行きで写し、穴の奥行きは仮に、まわりからなめらかに伸ばす
+async function addDreamView(name, c) {
+  const round = (a) => a.map((x) => +x.toFixed(3));
+  say('絵を写しています'); log(`視点 ${name} を足します：位置 ${round(c.position).join(', ')} → 見る先 ${round(c.target).join(', ')}`);
+  await api('/api/view/forget', { view: name });
+  await new Promise((r) => setTimeout(r, 30));
+  const t0 = performance.now(), r = await dream.addView(D, c, name, dreamIO);
+  log(`すでにある絵を写しました（${((performance.now() - t0) / 1000).toFixed(1)} 秒）。穴は絵の ${(100 * r.holes / r.pixels).toFixed(1)}%。穴の奥行きは、埋めた後に決め直します。`);
+  selected = name; stage = 'reproj'; press($('stage'), stage);
+  await reload();
+  return { name, holes: r.holes, pixels: r.pixels };
+}
+// 絵 1 枚の場面：埋めた絵の奥行きを推定し、分かっている所に合わせて、穴の奥行きを決め直す
+async function refineDreamDepth(name) {
+  if (!D.state.depthReady) { log('奥行き推定の用意がまだ無いので、穴の奥行きは仮の値（まわりからなめらかに伸ばした値）のままです。start.bat を起動し直すと入ります。'); return false; }
+  say('埋めた絵の奥行きを推定しています');
+  await api('/api/depth', { view: name, light });
+  let st; for (;;) { await sleep(700); try { st = await api('/api/paint/status'); } catch { continue; } if (!st.running) break; }
+  if (st.code !== 0) { log(`奥行きを推定できませんでした（${st.code}）。穴の奥行きは仮の値のままです。\n${st.log}`); return false; }
+  D = await loadViews(light);
+  const v = D.views.find((x) => x.name === name);
+  const [holes, dp] = await Promise.all([loadImage(`/files/paint-out/${name}_holes.png`, v.W, v.H), loadImage(`/files/paint-out/${name}_disp.png`, v.W, v.H)]);
+  const disp = new Float32Array(v.W * v.H); for (let i = 0; i < disp.length; i++) disp[i] = (dp[i * 4] * 256 + dp[i * 4 + 1]) / 65535;
+  await new Promise((r) => setTimeout(r, 30));
+  const r = await dream.refineDepth(D, v, holes, disp, dreamIO);
+  log(r ? `埋めた絵の奥行きを推定して、すでにある面に合わせました（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}）。` : '奥行きを合わせる手がかり（すでに位置の分かっている面）が足りないので、穴の奥行きは仮の値のままです。');
+  return !!r;
 }
 // 視点 name へ、光の描き方 L の絵を写す。写した絵・穴の印を保存する。返すのは穴の画素数。絵が無ければ何もせず null。
 async function warpView(name, L, writeNew) {
@@ -273,6 +340,7 @@ async function rewarp() {
   try {
     say('絵を写しています'); $('log').textContent = '';
     const v = D.views.find((x) => x.name === selected);
+    if (painting) { await addDreamView(selected, { position: [...v.def.extrinsics.position], target: [...v.def.extrinsics.target] }); say('–'); return; }
     // 埋めた絵が残っていると、それ自身が「すでにある絵」として写ってしまうので、先に消す
     await fetch(`/api/paint-out/${selected}_painted${sfx()}.png`, { method: 'DELETE' });
     if ((await warpView(selected, light, !v.st.new_mask)) === null) log(`「${LIGHTS[light].name}」の絵がまだありません。`);
@@ -284,6 +352,12 @@ async function removeView(name) {
   if (busy) return; busy = true;
   try {
     say('取り消しています'); log(`視点 ${name} を取り消します。`);
+    if (painting) {
+      await api('/api/view/forget', { view: name }); // 一覧から外す前に（一覧にある間だけ、奥行きや札の絵も消える）
+      await dreamIO.saveAdded((await dreamIO.loadAdded()).filter((v) => v.name !== name));
+      if (selected === name) selected = null;
+      await reload(); say('–'); log('取り消しました。'); return;
+    }
     await saveExtra((await extraCameras()).filter((c) => c.name !== name));
     await api('/api/view/forget', { view: name });
     await reexport(); if (selected === name) selected = null;
@@ -310,10 +384,12 @@ async function fillLocalCore(name) {
   const all = Math.max(1, f.spread + f.fromPalette);
   log(`視点 ${v.name}：ツール内で埋めました（${((performance.now() - t0) / 1000).toFixed(1)} 秒）。穴のうち ${(100 * f.spread / all).toFixed(0)}% はまわりの色を広げ、${(100 * f.fromPalette / all).toFixed(0)}% は${f.byLabels ? '同じ物体・種類の札の' : '同じ形の'}平均の色で塗りました。`);
 }
-let watching = false;
+let watching = false, watchName = '';
+// 絵 1 枚の場面で Codex に頼むときの追加：形の見本（プレビズ）は無し、画風は場面の物、人を増やさない指示
+const fillExtra = () => (painting ? { noPreviz: true, style: dream.fillStyle(D.cams), hint: dream.FILL_HINT } : {});
 async function fillCodex(dryRun) {
   if (busy || !selected) return;
-  try { await api('/api/paint/fill', { view: selected, dryRun, light }); watching = true; $('log').textContent = ''; poll(); }
+  try { await api('/api/paint/fill', { view: selected, dryRun, light, ...fillExtra() }); watching = true; watchName = selected; $('log').textContent = ''; poll(); }
   catch (e) { log(e.message); }
 }
 async function poll() {
@@ -323,7 +399,14 @@ async function poll() {
     say(st.running ? `Codex で描いています ${st.seconds} 秒` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
     $('log').textContent = st.log; $('stop').disabled = !st.running;
     $('fillCodex').disabled = $('fillDry').disabled = $('fillLocal').disabled = st.running;
-    if (!st.running) { watching = false; if (st.code === 0 && !st.dryRun) { stage = 'painted'; press($('stage'), stage); } await reload(); return; }
+    if (!st.running) {
+      watching = false;
+      if (st.code === 0 && !st.dryRun) {
+        stage = 'painted'; press($('stage'), stage);
+        if (painting && watchName) { busy = true; try { await reload(); await refineDreamDepth(watchName); } catch (e) { log(`奥行きを決め直せませんでした：${e.message}`); } finally { busy = false; say('終わりました'); } }
+      }
+      await reload(); return;
+    }
   } catch { say('サーバーに届きません'); }
   setTimeout(poll, 1500);
 }
@@ -340,7 +423,11 @@ function showAuto() {
   $('oAutoStep').textContent = `${deg}°（1 周 ${Math.ceil(360 / deg)} 歩）`;
   if (!D) return;
   const fx = fovX();
-  $('autoHint').textContent = auto.kind === 'pan'
+  $('autoHint').textContent = painting
+    ? (auto.kind === 'pan'
+      ? `その場で向きだけを変えます。奥行きの誤差が絵のずれにならないので、絵 1 枚の場面ではこちらが確実です。絵の横の画角は ${fx.toFixed(0)}° で、いまの角度では絵の ${Math.max(0, Math.round(100 * (1 - deg / fx)))}% ほどが前の絵と重なります。`
+      : '見る先（白い印）を中心に回ります。位置が動くので、人や木の後ろが穴になります。絵 1 枚の場面では奥行きが粗いので、1 歩を小さく（5〜10°）するか、見る先を近くに置いて、穴が半分を超えないようにしてください。')
+    : auto.kind === 'pan'
     ? `絵の横の画角は ${fx.toFixed(0)}°。1 歩がこれより大きいと、前の絵と重ならず、画風と位置を合わせる手がかりが無くなります。${deg >= fx ? 'いまの角度では重なりません。' : `いまの角度では、絵の ${Math.round(100 * (1 - deg / fx))}% ほどが前の絵と重なります。`}`
     : '見る先（白い印）を中心に、同じ高さ・同じ距離で回ります。1 歩を大きくすると枚数は減りますが、前の絵に斜めから浅く写っていた面は穴と数えないので、粗い色のまま残りやすくなります。';
   $('autoCount').textContent = auto.running || auto.steps ? `これまで ${auto.steps} 歩。Codex を ${auto.codex} 回呼びました。` : '';
@@ -353,7 +440,7 @@ function turnCandidate(deg, kind) {
 }
 // Codex で 1 枚描いてもらい、終わるまで待つ。返すのは /api/paint/status の結果
 async function codexFillWait(name) {
-  await api('/api/paint/fill', { view: name, dryRun: false, light });
+  await api('/api/paint/fill', { view: name, dryRun: false, light, ...fillExtra() });
   for (;;) {
     await sleep(1500);
     let st; try { st = await api('/api/paint/status'); } catch { say('サーバーに届きません'); continue; }
@@ -388,7 +475,8 @@ async function autoRun() {
         const st = await codexFillWait(name);
         if (auto.stop) break;
         if (st.code !== 0) throw new Error(`Codex が止まりました（終了コード ${st.code}）。下の「進み具合」に Codex の出力があります`);
-        autoLog(`  Codex で描き足しました（${st.seconds} 秒）。`);
+        autoLog(`  Codex で描き足しました。`);
+        if (painting) { await reload(); autoLog((await refineDreamDepth(name)) ? '  埋めた絵の奥行きを推定して、すでにある面に合わせました。' : '  穴の奥行きは仮の値のままです（進み具合の欄を見てください）。'); }
       } else { await fillLocalCore(name); autoLog('  ツール内で埋めました。'); }
       last = ''; auto.steps++; showAuto();
       stage = 'painted'; press($('stage'), stage); await reload();
@@ -468,7 +556,7 @@ for (const b of document.querySelectorAll('[data-look]')) b.addEventListener('cl
 async function start3d() {
   try {
     v3 = await createView3D($('view3d'), {
-      gl,
+      gl, mesh: painting ? shape : null,
       onChange: (c) => { // 3D の画面で候補が動いた
         if (busy) return v3.setCandidate(cand);
         cand = c; selected = null; sliders(); renderAdded(); if (!$('paneMap').hidden) drawMap(); schedule();
@@ -482,5 +570,19 @@ async function start3d() {
   showSpace('3d');
 }
 
+// 絵 1 枚から作った場面なら、画面を始める前に切り替える：形の代わりに絵の奥行きを出し、形に頼る機能（自動で探す・光の描き分け）を隠す
+async function prepare() {
+  try { D = await loadViews(light); } catch { return; } // 書き出しが無いときは、今までどおり reload が知らせる
+  painting = dream.isPainting(D.cams);
+  if (!painting) return;
+  shape = dream.sceneMesh(D); cand = dream.defaultCandidate(D);
+  const b = dream.baseView(D), shot = $('shot');
+  Object.assign(shot.style, { aspectRatio: `${b.W} / ${b.H}`, width: '100%', height: 'auto', minHeight: '0' });
+  for (const id of ['searchBox', 'lightBox']) $(id).hidden = true;
+  $('lead').textContent = 'この場面は絵 1 枚から作ってあります。視点を少しずつ変えて、絵の外や物の後ろ（穴）を描き足し、その分の粒を空間に加えます。';
+  $('addNote').textContent = 'すでにある絵を、奥行きを使ってこの視点へ写します。写らなかった所が穴です。ChatGPT の利用枠は使いません。';
+  $('fillNote').textContent = '「Codex で描き足す」は、まわりと同じ画風で穴だけを描きます（人や動物は増やさないように頼みます）。描いた後、その絵の奥行きを推定して、すでにある面に合わせます。「ツール内で埋める」は、まわりの色を広げるだけで、奥行きは仮の値のままです。';
+  auto.kind = 'pan'; press($('autoKind'), 'pan'); $('autoStep').value = 20;
+}
 sliders();
-start3d().then(reload).then(() => { if (v3) v3.frameAll(); }).then(() => { window.__ready = true; }).catch((e) => { problem(e.message); });
+prepare().then(() => { sliders(); return start3d(); }).then(reload).then(() => { if (v3) v3.frameAll(); }).then(() => { window.__ready = true; }).catch((e) => { problem(e.message); });
