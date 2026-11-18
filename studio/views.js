@@ -16,6 +16,7 @@ const gl = new URLSearchParams(location.search).has('gl');
 const PREVIEW_W = 160, PREVIEW_H = 240, SEARCH_W = 40, SEARCH_H = 60;
 let D = null, meshes = null, busy = false, mode = 'painted', stage = 'reproj', light = 'free';
 const sfx = () => LIGHTS[light].sfx;
+let repaired = '', heading = 0; // heading：カメラの水平の向き（真下を向いている間も覚えておく）
 let cand = { position: [24, 1.7, -30], target: [0, 15, 0] }, selected = null, dots = [], mapT = null, timer = 0;
 
 const fovY = () => D.views[0].fov_y_deg;
@@ -24,6 +25,14 @@ const painted = () => D.views.filter((v) => v.painted);
 // ---- 読み込み ----
 async function reload() {
   D = await loadViews(light);
+  // 足した視点が書き出しから消えていたら（古いプレビズの画面から保存された場合など）、書き出し直して戻す。絵は残っているので描き直しは要らない
+  const extras = await extraCameras();
+  const lost = extras.filter((c) => !D.views.some((v) => v.name === c.name)).map((c) => c.name).join('・');
+  if (lost && lost !== repaired) {
+    repaired = lost; say('足した視点を戻しています'); log(`足した視点（${lost}）がプレビズの書き出しから消えていたので、書き出し直します。`);
+    try { await reexport(); D = await loadViews(light); log('戻しました。'); say('–'); } catch (e) { log(`戻せませんでした：${e.message}`); say('止まりました'); }
+  }
+  for (const v of D.views) if (extras.some((c) => c.name === v.name)) v.added = true; // 絵がまだ無くても、足した視点として並べる
   meshes = meshes || sceneTriangles();
   problem(painted().length ? '' : `「${LIGHTS[light].name}」の絵画がまだありません。先に「絵画化」のタブで、この光の描き方の絵を作ってください（穴かどうかは、絵がある視点を基準に決めます）。`);
   if (selected && !D.views.some((v) => v.name === selected)) selected = null;
@@ -50,6 +59,10 @@ function drawMap() {
   g.fillStyle = '#8d8a80'; g.font = '13px sans-serif';
   for (const m of meshes) if (!m.ground) { g.fillRect(X(m.min[0]), Z(m.min[2]), (m.max[0] - m.min[0]) * k, (m.max[2] - m.min[2]) * k); }
   const wedge = (pos, tgt, color, label, len) => {
+    if (Math.hypot(tgt[0] - pos[0], tgt[2] - pos[2]) < 0.5) { // ほぼ真下（真上）向き：輪で示す
+      g.strokeStyle = color; g.lineWidth = 2; g.beginPath(); g.arc(X(pos[0]), Z(pos[2]), 14, 0, 7); g.stroke();
+      g.fillStyle = color; g.beginPath(); g.arc(X(pos[0]), Z(pos[2]), 6, 0, 7); g.fill(); g.fillText(label, X(pos[0]) + 18, Z(pos[2]) - 10); return;
+    }
     const a = Math.atan2(tgt[2] - pos[2], tgt[0] - pos[0]), half = Math.atan(Math.tan(fovY() * Math.PI / 360) * D.views[0].W / D.views[0].H);
     g.fillStyle = color; g.globalAlpha = 0.22; g.beginPath(); g.moveTo(X(pos[0]), Z(pos[2]));
     g.arc(X(pos[0]), Z(pos[2]), len * k, a - half, a + half); g.closePath(); g.fill(); g.globalAlpha = 1;
@@ -71,7 +84,7 @@ function mapInput(e) {
   if (busy) return;
   const [x, z] = mapPoint(e);
   if (e.shiftKey || e.button === 2) { cand.target[0] = x; cand.target[2] = z; } else { cand.position[0] = x; cand.position[2] = z; }
-  selected = null; renderAdded(); drawMapKeepScale(); schedule();
+  selected = null; sliders(); renderAdded(); drawMapKeepScale(); schedule();
 }
 function drawMapKeepScale() { drawMap(); } // 地図の範囲は候補の位置に合わせて広がる
 $('map').addEventListener('pointerdown', (e) => { dragging = true; $('map').setPointerCapture(e.pointerId); mapInput(e); });
@@ -147,37 +160,39 @@ async function search() {
     for (const m of solids) { x0 = Math.min(x0, m.min[0]); x1 = Math.max(x1, m.max[0]); z0 = Math.min(z0, m.min[2]); z1 = Math.max(z1, m.max[2]); }
     for (const v of D.views) { const p = v.def.extrinsics.position; x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); z0 = Math.min(z0, p[2]); z1 = Math.max(z1, p[2]); }
     x0 -= 40; x1 += 40; z0 -= 40; z1 += 40;
-    const step = Math.max(8, Math.max(x1 - x0, z1 - z0) / 16), camY = Number($('camY').value);
-    // 見る先は形ごとの中心。近すぎると形で画面が埋まるので、形の高さに応じて離れる
+    const step = Math.max(8, Math.max(x1 - x0, z1 - z0) / 16), camY = Number($('camY').value), high = $('high').checked;
     const byName = new Map(); // 同じ名前の形（塔の胴と屋根など）は 1 つにまとめる
     for (const m of solids) {
       const b = byName.get(m.name) || { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
       for (let i = 0; i < 3; i++) { b.min[i] = Math.min(b.min[i], m.min[i]); b.max[i] = Math.max(b.max[i], m.max[i]); }
       byName.set(m.name, b);
     }
-    const targets = [...byName.values()].map((m) => ({ at: [(m.min[0] + m.max[0]) / 2, Math.min((m.min[1] + m.max[1]) / 2, 15), (m.min[2] + m.max[2]) / 2], away: Math.max(20, 0.9 * (m.max[1] - m.min[1])) }));
-    const spots = [];
-    for (let z = z0; z <= z1; z += step) for (let x = x0; x <= x1; x += step) {
-      if (solids.some((m) => x > m.min[0] - 3 && x < m.max[0] + 3 && z > m.min[2] - 3 && z < m.max[2] + 3)) continue; // 形の中には立てない
-      spots.push([x, z]);
+    // 見る先は形ごとの中心。近すぎると形で画面が埋まるので、形の高さに応じて離れる
+    const targets = [...byName.values()].map((m) => ({ at: [(m.min[0] + m.max[0]) / 2, Math.min((m.min[1] + m.max[1]) / 2, 15), (m.min[2] + m.max[2]) / 2], away: Math.max(20, 0.9 * (m.max[1] - m.min[1])), top: m.max[1] }));
+    const heights = high ? [...new Set([camY, 30, 70])] : [camY];
+    // 調べる組み合わせ：[位置, 見る先]。地図の点は、その水平位置でいちばん良かった点数
+    const jobs = [];
+    for (let z = z0; z <= z1; z += step) for (let x = x0; x <= x1; x += step) for (const y of heights) {
+      if (solids.some((m) => x > m.min[0] - 3 && x < m.max[0] + 3 && z > m.min[2] - 3 && z < m.max[2] + 3 && y < m.max[1] + 3)) continue; // 形の中には立てない
+      for (const { at, away } of targets) if (Math.hypot(at[0] - x, at[1] - y, at[2] - z) >= away) jobs.push({ position: [x, y, z], target: [...at] });
     }
+    if (high) for (const { at, top } of targets) for (const up of [30, 70]) jobs.push({ position: [at[0], top + up, at[2]], target: [at[0], 0, at[2]] }); // 真上から
     let best = null, done = 0;
-    for (const [x, z] of spots) {
-      let top = 0;
-      for (const { at: t, away } of targets) {
-        if (Math.hypot(t[0] - x, t[2] - z) < away) continue;
-        const a = analyze({ meshes, views: D.views, position: [x, camY, z], target: t, fovY: fovY(), w: SEARCH_W, h: SEARCH_H, wantImage: false });
-        // 形（地面以外）の穴を重く、地面の穴を軽く数える。すでに描かれた所が 2 割は見えていること（画風と位置を合わせる手がかり）
-        const score = a.covered >= 0.2 * a.w * a.h ? a.solidHoles + 0.2 * (a.holes - a.solidHoles) : 0;
-        if (score > top) top = score;
-        if (!best || score > best.score) best = { score, position: [x, camY, z], target: [...t] };
-      }
-      dots.push({ x, z, score: top });
-      if (++done % 8 === 0) { say(`探しています ${done} / ${spots.length}`); drawMap(); await new Promise((r) => setTimeout(r)); }
+    const dotAt = new Map();
+    for (const job of jobs) {
+      const a = analyze({ meshes, views: D.views, position: job.position, target: job.target, fovY: fovY(), w: SEARCH_W, h: SEARCH_H, wantImage: false });
+      // 形（地面以外）の穴を重く、地面の穴を軽く数える。すでに描かれた所が 2 割は見えていること（画風と位置を合わせる手がかり）
+      const score = a.covered >= 0.2 * a.w * a.h ? a.solidHoles + 0.2 * (a.holes - a.solidHoles) : 0;
+      if (!best || score > best.score) best = { score, ...job };
+      const key = `${job.position[0]},${job.position[2]}`, d = dotAt.get(key) || { x: job.position[0], z: job.position[2], score: 0 };
+      d.score = Math.max(d.score, score); dotAt.set(key, d);
+      if (++done % 24 === 0) { dots = [...dotAt.values()]; say(`探しています ${done} / ${jobs.length}`); drawMap(); await new Promise((r) => setTimeout(r)); }
     }
+    dots = [...dotAt.values()];
+    const spots = jobs;
     if (best && best.score > 0) {
-      cand = { position: best.position, target: best.target }; $('tgtY').value = best.target[1]; selected = null;
-      $('searchNote').textContent = `${spots.length} か所を調べ、穴がいちばん多く見える所へ候補を移しました。地図の点は濃いほど穴が多い位置です。`;
+      cand = { position: best.position, target: best.target }; selected = null;
+      $('searchNote').textContent = `${spots.length} 通りの視点を調べ、穴がいちばん多く見える所（高さ ${best.position[1].toFixed(1)} m）へ候補を移しました。地図の点は濃いほど穴が多い位置です。`;
     } else $('searchNote').textContent = '穴の見える位置が見つかりませんでした。';
     say('–'); sliders(); renderAdded(); drawMap(); show();
   } finally { busy = false; $('search').disabled = false; }
@@ -304,12 +319,29 @@ async function poll() {
 // ---- 操作 ----
 function press(el, v) { for (const x of el.children) x.setAttribute('aria-pressed', x.dataset.v === String(v) ? 'true' : 'false'); }
 function seg(id, fn) { const el = $(id); el.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; press(el, b.dataset.v); fn(b.dataset.v); }); }
+// つまみの表示を、いまの候補（位置と見る先）に合わせる。
 function sliders() {
-  $('camY').value = cand.position[1]; $('oCamY').textContent = `${Number($('camY').value).toFixed(1)} m`;
-  $('oTgtY').textContent = `${Number($('tgtY').value).toFixed(1)} m`;
+  const [px, py, pz] = cand.position, [tx, ty, tz] = cand.target, flat = Math.hypot(tx - px, tz - pz);
+  if (flat > 0.05) heading = Math.atan2(tz - pz, tx - px);
+  const pitch = Math.atan2(py - ty, flat) * 180 / Math.PI;
+  $('camY').value = py; $('oCamY').textContent = `${py.toFixed(1)} m`;
+  $('tgtY').value = ty; $('oTgtY').textContent = `${ty.toFixed(1)} m`;
+  $('pitch').value = pitch; $('oPitch').textContent = Math.abs(pitch) < 0.5 ? '水平' : pitch > 89.5 ? '真下' : pitch > 0 ? `下へ ${pitch.toFixed(0)} 度` : `上へ ${(-pitch).toFixed(0)} 度`;
 }
-$('camY').addEventListener('input', () => { cand.position[1] = Number($('camY').value); selected = null; sliders(); renderAdded(); schedule(); });
-$('tgtY').addEventListener('input', () => { cand.target[1] = Number($('tgtY').value); selected = null; sliders(); renderAdded(); schedule(); });
+const changed = () => { selected = null; sliders(); renderAdded(); drawMap(); schedule(); };
+$('camY').addEventListener('input', () => { cand.position[1] = Number($('camY').value); changed(); });
+$('tgtY').addEventListener('input', () => { cand.target[1] = Number($('tgtY').value); changed(); });
+$('pitch').addEventListener('input', () => { // 位置と水平の向きはそのまま、見る先を動かす
+  const p = Number($('pitch').value) * Math.PI / 180, [px, py, pz] = cand.position;
+  const d = Math.max(10, Math.hypot(cand.target[0] - px, cand.target[1] - py, cand.target[2] - pz));
+  cand.target = [px + Math.cos(heading) * Math.cos(p) * d, py - Math.sin(p) * d, pz + Math.sin(heading) * Math.cos(p) * d];
+  changed();
+});
+$('topdown').addEventListener('click', () => { // 見る先の真上へ移り、地面を真下に見る
+  if (busy) return;
+  cand.position = [cand.target[0], Math.max(cand.position[1], 60), cand.target[2]]; cand.target[1] = 0;
+  changed();
+});
 seg('mode', (v) => { mode = v; selected = null; renderAdded(); show(); });
 seg('stage', (v) => { stage = v; show(); });
 seg('light', (v) => { if (busy) return press($('light'), light); light = v; reload().catch((e) => problem(e.message)); });

@@ -28,7 +28,7 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
     <h2>上から見た地図</h2>
     <canvas id="map" width="720" height="720"></canvas>
     <div class="legend">
-      <span><i style="background:#9ccf5a"></i>候補のカメラ（クリックで移動）</span>
+      <span><i style="background:#9ccf5a"></i>候補のカメラ（クリックで移動。真下を向くと輪で表示）</span>
       <span><i style="background:#fff"></i>見る先（Shift＋クリック）</span>
       <span><i style="background:#ff00ff"></i>穴の多い位置（探した結果）</span>
     </div>
@@ -59,11 +59,16 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
   <div class="group">
     <h2>1. 視点を決める</h2>
     <button type="button" class="plain" id="search">穴の多い視点を自動で探す</button>
-    <p class="note" id="searchNote">歩ける高さで、まわりの位置から形を見たときに、穴がいちばん多く見える所を計算で探します。</p>
+    <label class="check" for="high"><input type="checkbox" id="high" checked><span>高い視点・真上からの視点も探す</span></label>
+    <p class="note" id="searchNote">まわりの位置から形を見たときに、穴がいちばん多く見える所を計算で探します。チェックを外すと、下の「カメラの高さ」だけで探します。</p>
     <div class="label"><span>カメラの高さ</span><output id="oCamY"></output></div>
-    <input type="range" id="camY" min="1" max="40" step="0.1" value="1.7">
+    <input type="range" id="camY" min="1" max="200" step="0.1" value="1.7">
+    <div class="label"><span>見下ろす角度</span><output id="oPitch"></output></div>
+    <input type="range" id="pitch" min="-60" max="90" step="1" value="0">
+    <p class="note">0 度が水平、90 度が真下、マイナスは見上げ。動かすと、カメラの位置と向きはそのままで見る先が変わります。</p>
     <div class="label"><span>見る先の高さ</span><output id="oTgtY"></output></div>
-    <input type="range" id="tgtY" min="0" max="80" step="0.5" value="15">
+    <input type="range" id="tgtY" min="-100" max="150" step="0.5" value="15">
+    <button type="button" class="plain" id="topdown">見る先の真上から見下ろす</button>
     <div class="label">穴の表示</div>
     <div class="seg" id="mode">
       <button type="button" data-v="painted" aria-pressed="true">絵の色</button>
