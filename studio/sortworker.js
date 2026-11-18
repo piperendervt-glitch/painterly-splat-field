@@ -23,7 +23,7 @@ self.onmessage = (e) => {
   const S = mats && src[5];
   for (let i = 0; i < n; i++) {
     let x = P[i * 4], y = P[i * 4 + 1], z = P[i * 4 + 2];
-    const slot = S ? S[i * 4 + 2] : 0;
+    const slot = S ? S[i * 4 + 3] : 0; // F.w = 動かせる物の枠
     if (slot && !mats[slot * 16 + 15]) { dist[i] = 0; continue; } // 消した物：いちばん最後に描く（見えない）
     if (slot) { const o = slot * 16, X = x, Y = y, Z = z; x = mats[o] * X + mats[o + 1] * Y + mats[o + 2] * Z + mats[o + 3]; y = mats[o + 4] * X + mats[o + 5] * Y + mats[o + 6] * Z + mats[o + 7]; z = mats[o + 8] * X + mats[o + 9] * Y + mats[o + 10] * Z + mats[o + 11]; }
     const dx = x - ex, dy = y - ey, dz = z - ez;
