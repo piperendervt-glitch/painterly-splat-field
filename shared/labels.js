@@ -6,19 +6,20 @@
 //   water  : 水面（照り返しを付ける対象）
 //   color  : 「種類で色分け」表示の色
 //   tracks : 歩くと足跡が残る
+//   layer  : 'back' = 背景（地面・水・遠景・空）、'front' = 手前の物（人・木・建物）。手前の物の後ろに、背景を伸ばした層を作る（studio/layers.js）
 //   solid  : 歩くときの当たり。'walk' = 上に立てて横からはぶつかる、'wall' = ぶつかるが上には立てない、'none' = すり抜ける
 export const TYPES = [
-  { id: 0, key: 'sky',    name: '空',     color: '#7fb2ea', sway: 0, light: 'sky',  snow: false, water: false, solid: 'none', tracks: false },
-  { id: 1, key: 'ground', name: '地面',   color: '#b0763c', sway: 0, light: 'sun',  snow: true,  water: false, solid: 'walk', tracks: true  },
-  { id: 2, key: 'grass',  name: '草地',   color: '#63c132', sway: 1, light: 'sun',  snow: true,  water: false, solid: 'walk', tracks: true  },
-  { id: 3, key: 'stone',  name: '石壁',   color: '#d9d2c0', sway: 0, light: 'sun',  snow: true,  water: false, solid: 'walk', tracks: false },
-  { id: 4, key: 'trunk',  name: '木の幹', color: '#7a4a21', sway: 0, light: 'sun',  snow: false, water: false, solid: 'walk', tracks: false },
-  { id: 5, key: 'leaves', name: '木の葉', color: '#1f8a4c', sway: 1, light: 'sun',  snow: true,  water: false, solid: 'none', tracks: false },
-  { id: 6, key: 'water',  name: '水',     color: '#2a6fdb', sway: 0, light: 'sun',  snow: false, water: true, solid: 'wall', tracks: false },
-  { id: 7, key: 'lamp',   name: '灯り',   color: '#ffd23f', sway: 0, light: 'self', snow: false, water: false, solid: 'walk', tracks: false },
+  { id: 0, key: 'sky',    name: '空',     color: '#7fb2ea', sway: 0, light: 'sky',  snow: false, water: false, solid: 'none', tracks: false, layer: 'back'  },
+  { id: 1, key: 'ground', name: '地面',   color: '#b0763c', sway: 0, light: 'sun',  snow: true,  water: false, solid: 'walk', tracks: true , layer: 'back'  },
+  { id: 2, key: 'grass',  name: '草地',   color: '#63c132', sway: 1, light: 'sun',  snow: true,  water: false, solid: 'walk', tracks: true , layer: 'back'  },
+  { id: 3, key: 'stone',  name: '石壁',   color: '#d9d2c0', sway: 0, light: 'sun',  snow: true,  water: false, solid: 'walk', tracks: false, layer: 'front' },
+  { id: 4, key: 'trunk',  name: '木の幹', color: '#7a4a21', sway: 0, light: 'sun',  snow: false, water: false, solid: 'walk', tracks: false, layer: 'front' },
+  { id: 5, key: 'leaves', name: '木の葉', color: '#1f8a4c', sway: 1, light: 'sun',  snow: true,  water: false, solid: 'none', tracks: false, layer: 'front' },
+  { id: 6, key: 'water',  name: '水',     color: '#2a6fdb', sway: 0, light: 'sun',  snow: false, water: true, solid: 'wall', tracks: false, layer: 'back'  },
+  { id: 7, key: 'lamp',   name: '灯り',   color: '#ffd23f', sway: 0, light: 'self', snow: false, water: false, solid: 'walk', tracks: false, layer: 'front' },
   // 実在の絵から作った場面（painting/build.mjs）で使う種類
-  { id: 8, key: 'figure', name: '人・動物', color: '#e0607a', sway: 0, light: 'sun',  snow: false, water: false, solid: 'wall', tracks: false },
-  { id: 9, key: 'far',    name: '遠景',   color: '#8f9bb8', sway: 0, light: 'sun',  snow: false, water: false, solid: 'none', tracks: false },
+  { id: 8, key: 'figure', name: '人・動物', color: '#e0607a', sway: 0, light: 'sun',  snow: false, water: false, solid: 'wall', tracks: false, layer: 'front' },
+  { id: 9, key: 'far',    name: '遠景',   color: '#8f9bb8', sway: 0, light: 'sun',  snow: false, water: false, solid: 'none', tracks: false, layer: 'back'  },
 ];
 
 export const SKY_TYPE = 0;

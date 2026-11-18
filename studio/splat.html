@@ -61,8 +61,25 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <div id="sharpBox" hidden>
       <label class="check" for="sharpFit"><input type="checkbox" id="sharpFit" checked><span>SHARP の大きさを奥行きの絵に合わせる（カメラを中心に伸び縮みさせるので、元の視点からの見た目は変わらない）</span></label>
       <p class="note" id="sharpInfo" style="white-space: pre-line"></p>
-      <p class="note">「奥行きの絵から」は絵の 1 画素を 1 粒として奥行きの絵の上に置きます（手前の物の後ろは空っぽ）。SHARP は絵 1 枚から推定した 3D ガウシアンで、手前の物の後ろにも 1 層描き足します。色は SHARP が出した色、札（種類・物体）は粒をその視点へ映した画素から取ります。「視点別」の表示で、奥行きの絵からの粒が橙、SHARP の粒が水色になります。SHARP の粒は細長い形を持ちますが、ここでは丸い粒として描きます（大きい 2 軸の平均の大きさ）。</p>
+      <p class="note">「奥行きの絵から」は絵の 1 画素を 1 粒として奥行きの絵の上に置きます（手前の物の後ろは空っぽ）。SHARP は絵 1 枚から推定した 3D ガウシアンです（2 層ぶん出ますが、2 層目もほぼ同じ面の上にあり、手前の物の後ろは埋まりません。そこは「背後の層を作る」で足します）。色は SHARP が出した色、札（種類・物体）は粒をその視点へ映した画素から取ります。「視点別」の表示で、奥行きの絵からの粒が橙、SHARP の粒が水色になります。SHARP の粒は細長い形を持ちます。「粒の形」が「面に沿う楕円」ならその形のまま、「丸」なら丸い粒（大きい 2 軸の平均の大きさ）で描きます。</p>
     </div>
+  </div>
+
+  <div class="group">
+    <h2>角度を変えたときの崩れを減らす</h2>
+    <div class="label">粒の形</div>
+    <div class="seg" id="shape">
+      <button type="button" data-v="round" aria-pressed="false">丸（今まで）</button>
+      <button type="button" data-v="surfel" aria-pressed="true">面に沿う楕円</button>
+    </div>
+    <div class="label"><span>面に沿って伸ばす上限</span><output id="oStretch"></output></div>
+    <input type="range" id="stretch" min="1" max="32" step="1" value="16">
+    <p class="note">「丸」は、どこから見てもカメラへ向いた丸い粒。「面に沿う楕円」は、粒を地面や壁の上に寝かせます。地面のように斜めに見ていた面は、絵の 1 画素が面の上では奥へ長いので、その長さまで粒を伸ばします（元の視点からの見た目は変わりません）。上や横から見たときの、粒の列のすき間が埋まります。SHARP の粒は、SHARP が出した楕円体の形のまま描きます。</p>
+    <label class="check" for="back"><input type="checkbox" id="back" checked><span>背後の層を作る（人・木・建物の後ろに、背景を伸ばした粒を置く）</span></label>
+    <div class="label"><span>物のまわりを背景の色で塗り直す幅</span><output id="oHalo"></output></div>
+    <input type="range" id="halo" min="0" max="12" step="1" value="3">
+    <p class="note" id="layerInfo" style="white-space: pre-line"></p>
+    <p class="note">背後の層は、手前の物（種類の札が人・木・石壁など）を取り除いた「背景だけの絵と奥行き」を計算で作ったものです。奥行きは同じ行の左右の背景からつなぎ、色は左右の背景の色に、近くの背景の筆あとを写して重ねます。新しい物は描けないので、隠れていた人や物は出てきません。確かめ方：表示の「層」で背後の層が黄色になります。「使う視点」の「（背後の層）だけ」で、その粒だけを見られます。「穴を目立たせる」を入れて横へ動き、このチェックを入れたり外したりして、物の後ろのマゼンタが減るかを見てください。</p>
   </div>
 
   <div class="group">
@@ -102,8 +119,9 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="sun0" aria-pressed="false">日なた（元）</button>
       <button type="button" data-v="sunNow" aria-pressed="false">日なた（今）</button>
       <button type="button" data-v="sway" aria-pressed="false">揺れる粒</button>
+      <button type="button" data-v="layer" aria-pressed="false">層</button>
     </div>
-    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。</p>
+    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。「層」は、絵に見えていた面が灰色、計算で足した背後の層が黄色。</p>
     <label class="check" for="holes"><input type="checkbox" id="holes"><span>穴を目立たせる（背景をマゼンタに）</span></label>
     <label class="check" for="wire"><input type="checkbox" id="wire"><span>プレビズの形を線で重ねる</span></label>
     <label class="check" for="frusta"><input type="checkbox" id="frusta"><span>カメラの視錐台を表示</span></label>
@@ -169,7 +187,7 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <input type="range" id="size" min="0.6" max="5" step="0.05" value="2.6">
     <div class="label"><span>境界の粒を消す</span><output id="oEdge"></output></div>
     <input type="range" id="edge" min="0" max="6" step="1" value="1">
-    <p class="note">奥行きが急に変わる所（柱の縁など）から何画素ぶんの粒を消すか。絵と形のずれで、縁に空の色が乗るのを隠します。</p>
+    <p class="note">奥行きが急に変わる所（柱の縁など）から何画素ぶんの粒を消すか。絵と形のずれで、縁に空の色が乗るのを隠します。SHARP の粒では、1 にすると「手前の物と奥の背景をつないでいる膜」の粒（視線に沿って並び、横から見ると伸びて見える）が消えます。0 にすると膜が残るので、押し比べられます。</p>
     <div class="label">粒の細かさ</div>
     <div class="seg" id="stride">
       <button type="button" data-v="4" aria-pressed="false">粗い</button>
