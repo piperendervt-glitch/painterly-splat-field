@@ -110,3 +110,24 @@ GUI のサーバーは Vite の開発サーバーに小さな API を足した�
 ## prototype/ 粒の絵画ビューア（試作）
 
 1枚の絵を奥行き推定で粒に変換して覗き込む最初の試作。素材の `painting.jpg` と `depth.png` は参考の絵そのものなので、このリポジトリには入れていない（`.gitignore` 済み）。手元で試すときだけ `prototype/` に置く。
+
+## painting/ 実在の絵から歩ける場面を作る
+
+絵 1 枚から、奥行き・領域（種類）・カメラを推定して、プレビズの書き出しと同じ形式のデータを `scenes/<名前>/` に作る。元の視点は絵の画素をそのまま粒にする。
+
+最初の場面はスーラ「グランド・ジャット島の日曜日の午後」（`scenes/jatte/`）。`start-jatte.bat` をダブルクリックして「粒の空間」のタブを開くと、絵の中を歩ける（`PSF_SCENE=jatte` を付けて GUI を起動しているだけ）。
+
+作り直すとき：
+
+```
+cd painting
+npm install
+node build.mjs --image <絵のファイル> --scene jatte --horizon 0.2 --eye 1.7 --hfov 60
+```
+
+- `--horizon`：地平線（目の高さ）が絵の上から何割の所にあるか。`--eye`：目の高さ（m）。`--hfov`：絵の横の画角（度）。
+- 奥行きは Depth Anything V2 Small（Apache-2.0、初回に GitHub から約 95 MB を取得）。地面の奥行きは地平線と目の高さから計算で決め、モデルの値はそれに合うように尺度を合わせて人や木に使う。
+- 出力：`J_color.png`（プレビズ＝種類ごとの色）、`J_depth.png`、`J_labels.png`（種類：0 空 / 1 地面 / 2 水 / 3 人・動物 / 4 遠景 / 5 木）、`J_objects.png`（物体番号）、`J_overlay.png`（絵に境目を重ねた確かめ用）、`paint-out/J_painted.png`（絵そのもの）。
+- 種類分けは奥行きと色だけで決めた下書きで、木の前に立つ人が「木」になるなどの間違いがある。
+
+画像の出典：Georges Seurat, *A Sunday on La Grande Jatte — 1884*, The Art Institute of Chicago（[作品ページ](https://www.artic.edu/artworks/27992)）、CC0 Public Domain Designation。

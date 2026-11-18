@@ -6,6 +6,6 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     // 絵画化の途中で書かれるファイルで画面が読み直されないようにする
-    watch: { ignored: ['**/previz-export/**', '**/paint/out/**'] },
+    watch: { ignored: ['**/previz-export/**', '**/paint/out/**', '**/scenes/**', '**/painting/**'] },
   },
 });
