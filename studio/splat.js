@@ -3,6 +3,9 @@
 import * as THREE from 'three/webgpu';
 import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, cameraViewMatrix, varying } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, SKY_TYPE, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
@@ -13,6 +16,7 @@ import { createWalk } from './walk.js';
 import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
 import { WORLD_PROPS, worldKind, worldTransform, fitWorldScale, splatsFromWorld } from './worldimport.js';
+import { objectTargets, cutoutImage, meshPoints, fitContext, fitModel, modelSplats, inflateSplats } from './objectmodel.js';
 import { layoutFrame, worldShapes, shapeEdges, project as projectTo, rasterLayout, compareLayout, briefText } from './layoutai.js';
 import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, sampleMap, skyDistance, skyNoise, withAi } from './skydome.js';
 
@@ -151,7 +155,7 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, worldFile: !!state.world, painting: views.some((v) => v.painting) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, worldFile: !!state.world, objectFiles: state.objects || {}, painting: views.some((v) => v.painting) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -211,7 +215,7 @@ export const COLUMNS = {
   color: { type: Uint8Array, size: 3, default: 128 },    // 絵の色（sRGB）
   edge: { type: Uint8Array, size: 1, default: EDGE_MAX }, // 奥行きの境界からの距離（画素）
   sky: { type: Uint8Array, size: 1, default: 0 },        // 1 = 空（奥行きが無い画素）
-  view: { type: Uint8Array, size: 1, default: 0 },       // どの視点（や穴埋めの回）から来たか
+  view: { type: Uint16Array, size: 1, default: 0 },      // どの視点（や穴埋めの回）から来たか。視点を足し続けても足りるように 16 ビット
   depthGray: { type: Uint8Array, size: 1, default: 0 },  // 奥行き表示用の明るさ
   type: { type: Uint8Array, size: 1, default: 0 },       // 種類の札（shared/labels.js の TYPES の id）。0 = 空
   object: { type: Uint16Array, size: 1, default: 0 },    // 物体の札（cameras.json の labels.objects の id）。0 = 物体なし
@@ -246,10 +250,10 @@ export function appendSplats(c, columns, count) {
 function colorOf(v, src) { for (let key = src; key; key = SOURCES[key].fallback) if (v.colors[key]) return { key, px: v.colors[key] }; return { key: 'previz', px: v.colors.previz }; }
 
 // back（studio/layers.js の backLayer の結果）を渡すと、物のまわりの縁の画素は置かない（背後の層の粒が代わりに入る）。
-function splatsFromView(v, vi, stride, src, back = null) {
+function splatsFromView(v, vi, stride, src, back = null, hide = null) {
   const { W, H, z, edge, near, far } = v, { fx, fy, cx, cy } = v.def.intrinsics;
   const max = Math.ceil(W / stride) * Math.ceil(H / stride);
-  const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6) };
+  const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint16Array(max).fill(vi), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6) };
   if (v.hasTypes) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max) });
   if (v.hasLabels) Object.assign(col, { normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), lift: new Float32Array(max) });
   const px = colorOf(v, src).px, p = new THREE.Vector3(), off = stride >> 1, zStep = (1 / near - 1 / far) / 65535;
@@ -260,6 +264,7 @@ function splatsFromView(v, vi, stride, src, back = null) {
     if (sky && ui.skyMode !== 'wall') continue; // 空は天球（下の「空の天球」）が受け持つ
     if (v.onlyNew && v.onlyNew[i * 4] < 128) continue;
     if (back && back.kind[i] === BACK_RING) continue;
+    if (hide && v.hasTypes && hide.has(v.object[i]) && FRONT[v.type[i]]) continue; // 3D モデルに置き換えた物体
     p.set((x + 0.5 - cx) / fx * zz, -(y + 0.5 - cy) / fy * zz, -zz).applyMatrix4(v.matrix);
     col.position[k * 3] = p.x; col.position[k * 3 + 1] = p.y; col.position[k * 3 + 2] = p.z;
     col.size[k] = zz * stride / fy;
@@ -326,7 +331,18 @@ function backOf(v, src, plated = true) {
   if (d && !d.px) d.px = gridToPixels(d.z, d.g, v.W, v.H);
   return dressBack(v.back, v, c.key, { W: v.W, H: v.H, z: v.z, zp: d && d.px });
 }
-function sharpParts(withBack) {
+// 粒の列から、3D モデルに置き換えた物体（手前の物）の粒を除く
+function dropObjects(part, hide) {
+  const c = part.columns; if (!c.object || !c.type) return part;
+  let k = 0;
+  for (let i = 0; i < part.count; i++) {
+    if (hide.has(c.object[i]) && FRONT[c.type[i]]) continue;
+    if (k !== i) for (const [name, d] of Object.entries(COLUMNS)) { const a = c[name]; if (a) for (let j = 0; j < d.size; j++) a[k * d.size + j] = a[i * d.size + j]; }
+    k++;
+  }
+  return { ...part, count: k };
+}
+function sharpParts(withBack, hide = null) {
   const out = [];
   data.views.forEach((v, vi) => {
     if (!v.sharp) return;
@@ -339,7 +355,7 @@ function sharpParts(withBack) {
     const grid = v.sharpGrid.grid, opts = SPLAT_OPTS();
     const p = splatsFromSharp(v.sharp, v, sharpViewIndex(vi), { keep, scale, inv, cam, typeOf: opts.typeOf, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, grid });
     v.sharpStats = p.stats;
-    out.push(p);
+    out.push(hide ? dropObjects(p, hide) : p);
     if (withBack && grid && v.hasTypes) { // 背後の層：SHARP の奥行きのます目から作る（SHARP の地面とずれないように）
       const c = colorOf(v, ui.colorSrc), key = `${c.key}:${ui.halo}:${scale}`;
       if (!v.sharpBack || v.sharpBack.key !== key) v.sharpBack = { key, layer: sharpBack(v.sharp, v, grid, c.px, { scale, inv, cam, front: FRONT, halo: Math.max(1, Math.round(ui.halo / 2)) }), variants: new Map() };
@@ -357,18 +373,19 @@ function buildCloud() {
   const placement = data.hasSharp ? ui.placement : 'depth';
   const withBack = ui.back && data.hasTypes; // 背後の層には種類の札が要る
   backInfo.on = withBack; backInfo.views = [];
-  const parts = [];
+  const parts = [], things = objectSplats(), hide = things.length && ui.objects.replace ? new Set(things.map((t) => t.id).filter(Boolean)) : null;
   if (placement !== 'sharp') data.views.forEach((v, vi) => {
     const back = withBack && !v.onlyNew ? backOf(v, ui.colorSrc) : null; // 穴埋めで足した視点（穴の所だけの絵）には作らない
-    parts.push(splatsFromView(v, vi, ui.stride, ui.colorSrc, back));
+    parts.push(splatsFromView(v, vi, ui.stride, ui.colorSrc, back, hide));
     if (!back) return;
     const b = backSplats(v, back, backViewIndex(vi), ui.stride, { ...SPLAT_OPTS(), others: data.views.filter((o) => o !== v) });
     parts.push(b);
     backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined, refined: back.refined, kept: back.kept });
   });
-  if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp'));
+  if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp', hide));
   const around = surroundSplats(); if (around) parts.push(around);
   const outer = worldSplats(); if (outer) parts.push(outer);
+  parts.push(...things);
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
   for (const p of parts) appendSplats(c, p.columns, p.count);
   return c;
@@ -438,7 +455,8 @@ const DISPLAY = {
   sunNow: painted,                                                                                    // いまの日なた（シェーダーが灰色にする）
   layer: (c, i, out) => {                                                                             // 層：絵に見えていた面は灰色、背後の層は黄
     const l = 0.15 + 0.85 * luma(c, i);
-    if (c.layer[i] === 3) { out[0] = l; out[1] = l * 0.3; out[2] = l * 0.8; }                              // 取り込んだ世界は桃色
+    if (c.layer[i] === 4) { out[0] = l * 0.25; out[1] = l; out[2] = l * 0.25; }                            // 物体のモデルは緑
+    else if (c.layer[i] === 3) { out[0] = l; out[1] = l * 0.3; out[2] = l * 0.8; }                         // 取り込んだ世界は桃色
     else if (c.layer[i] === 2) { out[0] = l * 0.1; out[1] = l * 0.8; out[2] = l; }                         // 周囲の地面は水色
     else if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
   },
@@ -852,7 +870,7 @@ function surroundSplats() {
   }
   surround.counts = counts;
   const n = keep.length, col = {
-    position: new Float32Array(n * 3), size: new Float32Array(n), color: new Uint8Array(n * 3), view: new Uint8Array(n).fill(surroundViewIndex()), depthGray: new Uint8Array(n),
+    position: new Float32Array(n * 3), size: new Float32Array(n), color: new Uint8Array(n * 3), view: new Uint16Array(n).fill(surroundViewIndex()), depthGray: new Uint8Array(n),
     type: new Uint8Array(n).fill(surround.type), sway: new Uint8Array(n).fill(sway), normal: new Int8Array(n * 3), cov: new Float32Array(n * 6), layer: new Uint8Array(n).fill(2),
   };
   keep.forEach((i, k) => {
@@ -975,6 +993,151 @@ function showWorld() {
   const b = world.bounds;
   $('worldInfo').textContent = world.error ? `読めませんでした：${world.error}` : !has ? 'まだ読み込んでいません。'
     : `${world.name}：${world.kind === 'gaussians' ? '3D ガウシアン' : '色つきの点'} ${world.ply.count.toLocaleString()} 個${w.show && b ? `（いま ${world.count.toLocaleString()} 粒。広がり 横 ${r(b.max[0] - b.min[0])} × 高さ ${r(b.max[1] - b.min[1])} × 奥 ${r(b.max[2] - b.min[2])} m）` : ''}`;
+}
+
+// ---- 物体ごとの 3D モデル（studio/objectmodel.js） ----
+// 絵の中の物体を 1 つずつ切り抜いて外の道具で 3D モデルにしてもらい、それを絵の物体の輪郭に合わせて置いて、粒にする。
+const objs = { models: new Map(), tried: false, lines: [], busy: '' }; // models：物体の番号 → { name, meshes, isObj, fit, key, error }
+const objectViewIndex = () => data.views.length * 3 + 2;
+ui.objects = { show: true, replace: true, paint: true, inflate: false, adjust: {} }; // adjust：物体の番号 → { yaw（度。自動の向きに足す）, scale（自動の大きさに掛ける） }
+try { Object.assign(ui.objects, JSON.parse(localStorage.getItem('psf-objects') || '{}')); } catch { /* 無ければ最初の値 */ }
+const saveObjects = () => { try { localStorage.setItem('psf-objects', JSON.stringify(ui.objects)); } catch { /* 保存できなくても動く */ } };
+const objectTargetList = () => { if (!data.objectTargets) { const v = centerView(); data.objectTargets = v.hasTypes ? objectTargets(v, { front: FRONT }) : []; } return data.objectTargets; };
+const objectAdjust = (id) => ui.objects.adjust[id] || { yaw: 0, scale: 1 };
+// モデルのファイル（.glb / .gltf / .obj）から、面の集まりを取り出す（位置・面の向き・UV・頂点の色・材質の色・絵）
+async function loadModelMeshes(buffer, name) {
+  const isObj = /\.obj$/i.test(name);
+  let root;
+  if (isObj) root = new OBJLoader().parse(new TextDecoder().decode(buffer));
+  else { const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder); root = (await loader.parseAsync(buffer, '')).scene; }
+  root.updateMatrixWorld(true);
+  const meshes = [], tmp = new THREE.Vector3(), nm = new THREE.Matrix3(), texCache = new Map();
+  const pixels = (tex) => { // 絵（テクスチャ）を画素の列にする。大きい絵は 1024 まで縮める
+    if (!tex || !tex.image) return null;
+    if (texCache.has(tex)) return texCache.get(tex);
+    let out = null;
+    try {
+      const img = tex.image, k = Math.min(1, 1024 / Math.max(img.width, img.height)), w = Math.max(1, Math.round(img.width * k)), h = Math.max(1, Math.round(img.height * k));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(img, 0, 0, w, h);
+      out = { w, h, data: g.getImageData(0, 0, w, h).data, flipY: !!tex.flipY };
+    } catch (e) { console.warn('モデルの絵を読めませんでした', e); }
+    texCache.set(tex, out); return out;
+  };
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    const g = o.geometry, pa = g.attributes.position, na = g.attributes.normal, ua = g.attributes.uv, ca = g.attributes.color, mat = Array.isArray(o.material) ? o.material[0] : o.material;
+    const positions = new Float32Array(pa.count * 3), normals = na ? new Float32Array(pa.count * 3) : null;
+    nm.getNormalMatrix(o.matrixWorld);
+    for (let i = 0; i < pa.count; i++) {
+      tmp.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld); positions[i * 3] = tmp.x; positions[i * 3 + 1] = tmp.y; positions[i * 3 + 2] = tmp.z;
+      if (na) { tmp.fromBufferAttribute(na, i).applyMatrix3(nm).normalize(); normals[i * 3] = tmp.x; normals[i * 3 + 1] = tmp.y; normals[i * 3 + 2] = tmp.z; }
+    }
+    let uvs = null, colors = null;
+    if (ua) { uvs = new Float32Array(pa.count * 2); for (let i = 0; i < pa.count; i++) { uvs[i * 2] = ua.getX(i); uvs[i * 2 + 1] = ua.getY(i); } }
+    if (ca) { colors = new Float32Array(pa.count * 3); for (let i = 0; i < pa.count; i++) { colors[i * 3] = ca.getX(i); colors[i * 3 + 1] = ca.getY(i); colors[i * 3 + 2] = ca.getZ(i); } }
+    meshes.push({ positions, normals, uvs, colors, colorSize: 3, indices: g.index ? Uint32Array.from(g.index.array) : null, base: mat && mat.color ? [mat.color.r, mat.color.g, mat.color.b] : null, tex: mat && uvs ? pixels(mat.map) : null });
+  });
+  if (!meshes.length) throw new Error('モデルに面がありません');
+  return { name, meshes, isObj, fit: null, key: '', error: '' };
+}
+async function loadObjectFiles() {
+  if (objs.tried) return;
+  objs.tried = true;
+  for (const [id, name] of Object.entries(data.objectFiles || {})) {
+    try { const res = await fetch(`/files/paint-out/${name}`, { cache: 'no-store' }); if (res.ok) objs.models.set(Number(id), await loadModelMeshes(await res.arrayBuffer(), name)); }
+    catch (e) { console.error(e); objs.models.set(Number(id), { name, meshes: null, error: e.message }); }
+  }
+}
+// 物体 1 つぶんの置き方（向き・大きさ・位置）。色のもとや手での直しが同じなら作り直さない
+function objectFit(target, model) {
+  const v = centerView(), c = colorOf(v, ui.colorSrc), adj = objectAdjust(target.id), key = `${c.key}:${adj.yaw}:${adj.scale}`;
+  if (model.fit && model.key === key) return model.fit;
+  const cx = fitContext({ W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics }, target, { px: c.px, front: FRONT });
+  let best = null;
+  for (const up of model.isObj ? ['y', 'z'] : ['y']) { // OBJ は上の向きが決まっていないので、両方試して合うほうを使う
+    const pts = meshPoints(model.meshes, 12000, { up }), f = fitModel(pts, cx, { manual: adj.yaw * Math.PI / 180, scaleMul: adj.scale });
+    if (!best || f.auto.iou > best.auto.iou) best = { ...f, up, height: pts.size[1] * f.scale, hasColor: pts.hasColor, area: pts.area };
+  }
+  let r = 0, g = 0, b = 0, k = 0; // 物体の絵の色の平均（モデルに色が無いときの、見えていない側の色）
+  for (let o = 0; o < cx.mask.length; o++) if (cx.mask[o] === 1) { r += cx.pc[o * 3]; g += cx.pc[o * 3 + 1]; b += cx.pc[o * 3 + 2]; k++; }
+  best.fallback = k ? [r / k, g / k, b / k] : [128, 128, 128];
+  model.fit = best; model.key = key;
+  return best;
+}
+function objectSplats() {
+  objs.lines = [];
+  if (!data || (!objs.models.size && !ui.objects.inflate) || !centerView().hasTypes) return [];
+  const v = centerView(), c = colorOf(v, ui.colorSrc), view = { W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics, near: v.near, far: v.far }, out = [];
+  for (const target of objectTargetList()) {
+    const model = objs.models.get(target.id), kind = TYPE_BY_ID.get(target.typeId) || {};
+    if (!model) { // モデルが無い物体：輪郭をふくらませた形（入れてあれば）
+      if (!ui.objects.inflate) continue;
+      const board = !!data.painting; // 絵から作った場面は、物体が 1 枚の板として置いてある
+      const p = inflateSplats(view, target, c.px, { stride: ui.stride, board, sway: Math.round((kind.sway || 0) * 255), viewId: objectViewIndex(), maxStretch: Math.min(ui.stretch, 6), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+      objs.lines.push(`物体 ${target.id}（${kind.name || '?'}）：輪郭をふくらませた形（厚み 最大 ${(p.half * 2).toFixed(2)} m${board ? '' : '。裏側だけ足しました'}）`);
+      if (ui.objects.show) out.push({ ...p, id: board ? target.id : 0 });
+      continue;
+    }
+    if (!model.meshes) { objs.lines.push(`物体 ${target.id}：${model.name} を読めませんでした（${model.error}）`); continue; }
+    try {
+      const fit = objectFit(target, model), spacing = target.depth / view.intr.fx * ui.stride, n = Math.max(3000, Math.min(400000, Math.round(fit.area * fit.scale * fit.scale / (spacing * spacing))));
+      const type = TYPE_BY_ID.get(target.typeId) || {};
+      objs.lines.push(`物体 ${target.id}（${type.name || '?'}）：${model.name}。輪郭の重なり ${Math.round(fit.iou * 100)}%${fit.hasColor ? `、色の近さ ${Math.round(fit.colorSim * 100)}%` : '（モデルに色なし）'}、向き ${Math.round(fit.offset * 180 / Math.PI)}°、高さ ${fit.height.toFixed(2)} m${fit.up === 'z' ? '（+Z を上として読みました）' : ''}`);
+      if (!ui.objects.show) continue;
+      const pts = meshPoints(model.meshes, n, { up: fit.up, seed: 2 });
+      const p = modelSplats(pts, fit, view, target, { spacing, px: c.px, paint: ui.objects.paint, sway: Math.round((type.sway || 0) * 255), viewId: objectViewIndex(), fallback: fit.fallback, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+      out.push({ ...p, id: target.id });
+    } catch (e) { console.error(e); objs.lines.push(`物体 ${target.id}：${model.name} を置けませんでした（${e.message}）`); }
+  }
+  return out;
+}
+const OBJ_SIDE = (t, W) => { const x = (t.x0 + t.x1) / 2 / W; return x < 0.33 ? '絵の左' : x > 0.67 ? '絵の右' : '絵のまん中'; };
+function showObjects() {
+  const box = $('objBox'); if (!box || !data) return;
+  const targets = objectTargetList(), pick = $('objPick'), v = centerView();
+  $('objNone').hidden = targets.length > 0; box.hidden = !targets.length;
+  if (!targets.length) return;
+  const cur = pick.value;
+  pick.replaceChildren(...targets.map((t) => { const o = document.createElement('option'); o.value = String(t.id); o.textContent = `物体 ${t.id}：${(TYPE_BY_ID.get(t.typeId) || {}).name || '?'}（${OBJ_SIDE(t, v.W)}、${t.depth.toFixed(1)} m 先${t.cut ? '、絵の端で切れている' : ''}）${objs.models.has(t.id) ? ' ●' : ''}`; return o; }));
+  if (targets.some((t) => String(t.id) === cur)) pick.value = cur;
+  const id = Number(pick.value), adj = objectAdjust(id), has = objs.models.has(id);
+  $('objShow').checked = ui.objects.show; $('objReplace').checked = ui.objects.replace; $('objPaint').checked = ui.objects.paint; $('objInflate').checked = ui.objects.inflate;
+  $('objAdjust').hidden = !has;
+  $('objYaw').value = String(adj.yaw); $('oObjYaw').textContent = `${adj.yaw > 0 ? '+' : ''}${adj.yaw}°`;
+  $('objScale').value = String(Math.log2(adj.scale)); $('oObjScale').textContent = `${adj.scale.toFixed(2)} 倍`;
+  $('objInfo').textContent = objs.busy || (objs.lines.length ? objs.lines.join('\n') : `手前の物が ${targets.length} 個あります。まだモデルはありません。`);
+}
+// 物体ごとの切り抜きの絵（物体の外は透明）を paint-out に書く。外の道具（絵 1 枚 → 3D モデル）に渡す
+async function exportObjectCutouts() {
+  const v = centerView(), c = colorOf(v, ui.colorSrc), targets = objectTargetList(), list = [];
+  for (const [k, t] of targets.entries()) {
+    objs.busy = `切り抜きを書いています…（${k + 1} / ${targets.length}）`; showObjects();
+    const cut = cutoutImage(v, t, c.px), name = `object_${t.id}.png`;
+    const res = await fetch(`/api/paint-out/${name}`, { method: 'POST', body: await pngBlob(cut.rgba, cut.w, cut.h) });
+    if (!res.ok) throw new Error(`${name} を保存できませんでした`);
+    list.push({ id: t.id, image: name, model: `object_${t.id}.glb`, type: (TYPE_BY_ID.get(t.typeId) || {}).key, bbox: [t.bx0, t.by0, t.bx1, t.by1], depth_m: Math.round(t.depth * 100) / 100, cut_by_frame: t.cut });
+    await sleep(0);
+  }
+  await fetch('/api/paint-out/objects.json', { method: 'POST', body: JSON.stringify({ note: 'object_<id>.png is the cut-out of one object (transparent outside). Save the 3D model made from it as object_<id>.glb (or .obj) in this folder.', source: c.key, objects: list }, null, 1) });
+  objs.busy = ''; showObjects();
+  $('objInfo').textContent = `切り抜きを ${list.length} 枚、paint-out フォルダに書きました（object_<番号>.png）。それぞれから作った 3D モデルを、同じフォルダに object_<番号>.glb の名前で置くか、下で選んでください。\n${objs.lines.join('\n')}`;
+}
+async function addObjectModel(id, file) {
+  const ext = (/\.(glb|obj)$/i.exec(file.name) || [])[1];
+  if (!ext) throw new Error('.glb か .obj のファイルを選んでください');
+  const buffer = await file.arrayBuffer(), model = await loadModelMeshes(buffer, file.name);
+  objs.models.set(id, model);
+  // 次に開いたときも使えるように、paint-out に置く（大きすぎて置けなければ、この場だけ）
+  try {
+    await fetch(`/api/paint-out/object_${id}.${ext.toLowerCase() === 'glb' ? 'obj' : 'glb'}`, { method: 'DELETE' });
+    const res = await fetch(`/api/paint-out/object_${id}.${ext.toLowerCase()}`, { method: 'POST', body: buffer });
+    if (res.ok) model.name = `object_${id}.${ext.toLowerCase()}`;
+  } catch (e) { console.warn(e); }
+}
+async function forgetObjectModel(id) {
+  objs.models.delete(id);
+  for (const ext of ['glb', 'obj']) await fetch(`/api/paint-out/object_${id}.${ext}`, { method: 'DELETE' }).catch(() => {});
 }
 
 // ---- AI に形の配置を書かせる（Codex。絵は作らず、文だけ。studio/layoutai.js） ----
@@ -1282,6 +1445,7 @@ async function start(useGL) {
   if (ui.surround) await groundAiLayer(); // 周囲の地面：AI が描いた層があれば先に読む
   await loadLayoutAi();                    // AI が書いた形の配置があれば読む
   await loadWorldFile();                   // paint-out/world.ply（外で作った世界）があれば読む
+  await loadObjectFiles();                 // paint-out/object_<番号>.glb（物体ごとの 3D モデル）があれば読む
   cloud = buildCloud();
   const n = cloud.n;
   const scene = new THREE.Scene();
@@ -1339,7 +1503,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi(); showWorld();
+  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi(); showWorld(); showObjects();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -1553,6 +1717,7 @@ function setupViewButtons() {
   });
   { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(surroundViewIndex()); b.textContent = '（周囲の地面）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
   { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(worldViewIndex()); b.textContent = '（取り込んだ世界）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
+  { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(objectViewIndex()); b.textContent = '（物体のモデル）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
   ui.source = 'all'; press(src, 'all');
   // 色のもと：どの視点にも無い絵は選べなくする。いま選んでいる絵が無くなっていたら、ある絵へ移す。
   const has = (key) => data.views.some((v) => v.colors[key]);
@@ -1663,6 +1828,23 @@ $('groundDry').addEventListener('click', () => paintGround(true));
 $('groundStopBtn').addEventListener('click', () => { groundStop = true; });
 $('groundForget').addEventListener('click', forgetGround);
 $('estimateExport').addEventListener('click', exportEstimate);
+$('objExport').addEventListener('click', () => { exportObjectCutouts().catch((e) => { console.error(e); objs.busy = ''; $('objInfo').textContent = `書き出せませんでした：${e.message}`; }); });
+$('objPick').addEventListener('change', showObjects);
+$('objFile').addEventListener('change', async () => {
+  const file = $('objFile').files[0], id = Number($('objPick').value); if (!file || !id) return;
+  objs.busy = '読み込んでいます…'; showObjects();
+  try { await addObjectModel(id, file); objs.busy = ''; ui.objects.show = true; rebuild(); }
+  catch (e) { console.error(e); objs.busy = ''; showObjects(); $('objInfo').textContent = `読めませんでした：${e.message}`; }
+  $('objFile').value = '';
+});
+for (const [id, key] of [['objShow', 'show'], ['objReplace', 'replace'], ['objPaint', 'paint'], ['objInflate', 'inflate']]) $(id).addEventListener('change', () => { ui.objects[key] = $(id).checked; saveObjects(); rebuild(); });
+for (const [id, set] of [['objYaw', (a, x) => { a.yaw = x; }], ['objScale', (a, x) => { a.scale = Math.round(2 ** x * 100) / 100; }]]) {
+  const read = () => { const k = Number($('objPick').value), a = { ...objectAdjust(k) }; set(a, Number($(id).value)); ui.objects.adjust[k] = a; };
+  $(id).addEventListener('input', () => { read(); showObjects(); });
+  $(id).addEventListener('change', () => { read(); saveObjects(); rebuild(); });
+}
+$('objAuto').addEventListener('click', () => { delete ui.objects.adjust[Number($('objPick').value)]; saveObjects(); rebuild(); });
+$('objForget').addEventListener('click', async () => { await forgetObjectModel(Number($('objPick').value)); rebuild(); });
 $('worldFile').addEventListener('change', async () => {
   const file = $('worldFile').files[0]; if (!file) return;
   $('worldInfo').textContent = '読み込んでいます…';

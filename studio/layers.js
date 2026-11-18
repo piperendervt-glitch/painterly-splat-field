@@ -334,7 +334,7 @@ export function backSplats(v, back, viewId, stride, { skyZ, typeOf, edgeMax, lab
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) if (back.kind[y * W + x]) max++;
   const col = {
     position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax),
-    sky: new Uint8Array(max), view: new Uint8Array(max).fill(viewId), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),
+    sky: new Uint8Array(max), view: new Uint16Array(max).fill(viewId), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),
   };
   if (v.hasTypes) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max).fill(labelEdgeMax) });
   if (v.hasLabels) Object.assign(col, { normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), lift: new Float32Array(max) });

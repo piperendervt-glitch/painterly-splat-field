@@ -24,8 +24,8 @@ const SCENE = /^[A-Za-z0-9_-]+$/.test(process.env.PSF_SCENE || '') ? process.env
 const DIRS = SCENE
   ? { 'previz-export': path.join(ROOT, 'scenes', SCENE, 'previz-export'), 'paint-out': path.join(ROOT, 'scenes', SCENE, 'paint-out') }
   : { 'previz-export': path.join(ROOT, 'previz-export'), 'paint-out': path.join(ROOT, 'paint', 'out') };
-const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json|ply|obj)$/;
-const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.ply': 'application/octet-stream', '.obj': 'text/plain; charset=utf-8' };
+const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json|ply|obj|glb)$/;
+const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.ply': 'application/octet-stream', '.obj': 'text/plain; charset=utf-8', '.glb': 'model/gltf-binary' };
 const WIN = process.platform === 'win32';
 
 const job = { child: null, running: false, log: '', code: null, startedAt: 0, dryRun: false };
@@ -46,6 +46,16 @@ function readBody(req, limit = 64 * 1024 * 1024) {
 }
 const stat = (file) => { try { const s = fs.statSync(file); return { size: s.size, mtime: Math.round(s.mtimeMs) }; } catch { return null; } };
 
+// 物体ごとの 3D モデル：paint-out の object_<番号>.glb（無ければ .obj）。{ 番号: ファイル名 }
+const OBJECT_MODEL = /^object_(\d{1,5})\.(glb|obj)$/;
+function objectModels() {
+  const out = {};
+  let names = [];
+  try { names = fs.readdirSync(DIRS['paint-out']); } catch { return out; }
+  for (const n of names.sort()) { const m = OBJECT_MODEL.exec(n); if (m && (!out[m[1]] || m[2] === 'glb')) out[m[1]] = n; }
+  return out;
+}
+
 function state() {
   const out = { scene: SCENE, previz: null, views: [], paintReady: fs.existsSync(path.join(ROOT, 'paint', 'node_modules', 'pngjs')) };
   const camFile = path.join(DIRS['previz-export'], 'cameras.json');
@@ -55,6 +65,7 @@ function state() {
   out.previz = stat(camFile);
   out.ground_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`ground_ai${sfx}`, stat(path.join(DIRS['paint-out'], `ground_ai${sfx}.png`))])); // AI が描いた周囲の地面
   out.world = stat(path.join(DIRS['paint-out'], 'world.ply')); // 外で作った世界の粒（取り込み用。studio/worldimport.js）
+  out.objects = objectModels(); // 物体ごとの 3D モデル（object_<番号>.glb / .obj。studio/objectmodel.js）
   out.layout_ai = stat(path.join(DIRS['paint-out'], 'layout_ai.json')); // AI が書いた形の配置
   out.sky_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`sky_ai${sfx}`, stat(path.join(DIRS['paint-out'], `sky_ai${sfx}.png`))])); // AI が描いた空（天球の層）
   out.views = (cams.views || []).map((v) => ({
@@ -253,6 +264,7 @@ export async function handle(req, res, next) {
       const name = p.slice('/api/paint-out/'.length);
       if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
       if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); fs.rmSync(path.join(DIRS['paint-out'], name.replace('.png', '_sharp.ply')), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
+      if (OBJECT_MODEL.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // 物体ごとの 3D モデル
       if (name === 'layout_ai.json') { for (const n of ['layout_ai.json', 'layout_best.json', 'layout_brief.txt', 'layout_report.txt', 'layout_picture.png', 'layout_depth.png', 'layout_overlay.png']) fs.rmSync(path.join(DIRS['paint-out'], n), { force: true }); return json(res, 200, { ok: true }); } // AI が書いた形の配置
       if (/^(sky|ground)_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
       if (!/^[A-Za-z0-9]+_painted(_flat|_lit)?\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
@@ -263,8 +275,9 @@ export async function handle(req, res, next) {
     }
     if (p.startsWith('/api/paint-out/') && req.method === 'POST') {
       const name = p.slice('/api/paint-out/'.length);
-      if (!/^[A-Za-z0-9_-]+\.png$/.test(name) && name !== 'layout_ai.json') return json(res, 400, { error: 'ファイル名が使えません' }); // layout_ai.json は、いちばん合った回の配置を書き戻すため
-      const body = await readBody(req);
+      const model = OBJECT_MODEL.test(name); // 物体ごとの 3D モデル（画面で選んだファイルを、次も使えるように置く）
+      if (!/^[A-Za-z0-9_-]+\.png$/.test(name) && name !== 'layout_ai.json' && name !== 'objects.json' && !model) return json(res, 400, { error: 'ファイル名が使えません' }); // layout_ai.json は、いちばん合った回の配置を書き戻すため
+      const body = await readBody(req, model ? 300 * 1024 * 1024 : undefined);
       fs.mkdirSync(DIRS['paint-out'], { recursive: true });
       fs.writeFileSync(path.join(DIRS['paint-out'], name), body);
       return json(res, 200, { ok: true, size: body.length });

@@ -106,7 +106,7 @@ export function splatsFromSharp(ply, v, vi, { keep = 1, scale = 1, inv, cam, typ
   const { W, H, z } = v, { fx, fy, cx, cy } = v.def.intrinsics, e = inv.elements;
   const col = {
     position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax),
-    sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max), opacity: new Uint8Array(max),
+    sky: new Uint8Array(max), view: new Uint16Array(max).fill(vi), depthGray: new Uint8Array(max), opacity: new Uint8Array(max),
     type: new Uint8Array(max), object: new Uint16Array(max), normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max).fill(255),
     sway: new Uint8Array(max), labelEdge: new Uint8Array(max).fill(labelEdgeMax), lift: new Float32Array(max).fill(0.05),
     cov: new Float32Array(max * 6),
@@ -248,7 +248,7 @@ export function sharpBackSplats(ply, v, grid, back, viewId, { step = 1, scale = 
   for (let r = step >> 1; r < g; r += step) for (let c = step >> 1; c < g; c += step) if (use(r * g + c)) max++;
   const col = {
     position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax),
-    sky: new Uint8Array(max), view: new Uint8Array(max).fill(viewId), depthGray: new Uint8Array(max), opacity: new Uint8Array(max).fill(255),
+    sky: new Uint8Array(max), view: new Uint16Array(max).fill(viewId), depthGray: new Uint8Array(max), opacity: new Uint8Array(max).fill(255),
     type: new Uint8Array(max), object: new Uint16Array(max), normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max).fill(255),
     sway: new Uint8Array(max), labelEdge: new Uint8Array(max).fill(labelEdgeMax), lift: new Float32Array(max).fill(0.05),
     cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),

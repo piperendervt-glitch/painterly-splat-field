@@ -80,7 +80,7 @@ export function fitWorldScale(ply, t, view) {
 export function splatsFromWorld(ply, t, viewId, { keep = 1, pointSize = 0.05, layerId = 3, edgeMax = 7, labelEdgeMax = 7 } = {}) {
   const kind = worldKind(ply), P = ply.props, n = ply.count, max = keep > 1 ? Math.ceil(n / keep * 1.1) + 64 : n, { M, scale } = t;
   const col = {
-    position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax), view: new Uint8Array(max).fill(viewId),
+    position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax), view: new Uint16Array(max).fill(viewId),
     depthGray: new Uint8Array(max).fill(128), opacity: new Uint8Array(max).fill(255), normal: new Int8Array(max * 3), labelEdge: new Uint8Array(max).fill(labelEdgeMax),
     cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),
   };

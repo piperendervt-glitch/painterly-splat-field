@@ -24,3 +24,6 @@ world.ply
 # 絵から推定したプレビズのモデル（「粒の空間」の「推定した形を書き出す」。作り直せる）
 estimated_model.obj
 estimated_model.json
+# 物体ごとの切り抜きの絵と、外の道具で作った 3D モデル（studio/objectmodel.js）
+scenes/*/paint-out/object_*
+scenes/*/paint-out/objects.json
