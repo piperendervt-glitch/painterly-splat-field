@@ -1,0 +1,6 @@
+# Packages SHARP needs besides torch (setup.bat installs torch for your GPU, and ml-sharp itself with --no-deps: gsplat for video rendering is not needed).
+numpy
+scipy
+timm
+plyfile
+pillow
