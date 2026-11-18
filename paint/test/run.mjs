@@ -101,4 +101,15 @@ for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
 }
 assert.ok(plateOutsideSame && plateInside > 19 * 29 * 0.75, '背景の絵の貼り方がおかしい');
 console.log('ok fill --plate：物の後ろの背景だけを頼み、穴の所だけ置き換える');
+// fill --ground：周囲の地面。文は「地面だけ」を頼み、目安の絵と画風の見本を見せる
+const ground = path.join(tmp, 'fill', 'ground.png');
+run('fill', '--ground', '--image', path.join(inDir, 'A_color.png'), '--mask', path.join(tmp, 'mask.png'), '--guide', path.join(inDir, 'A_color.png'), '--style-ref', path.join(inDir, 'A_color.png'), '--out', ground, '--codex', fake);
+const groundWork = path.join(tmp, 'fill', 'work', fs.readdirSync(path.join(tmp, 'fill', 'work')).sort().pop());
+const groundPrompt = fs.readFileSync(path.join(groundWork, 'fake-saw-prompt.txt'), 'utf8');
+assert.match(groundPrompt, /EMPTY GROUND ONLY/);
+assert.match(groundPrompt, /this ground belongs to/);
+assert.doesNotMatch(groundPrompt, /SKY ONLY/);
+assert.ok(fs.existsSync(path.join(groundWork, 'references', 'guide.png')) && fs.existsSync(path.join(groundWork, 'references', 'style.png')), '目安の絵か画風の見本が渡っていない');
+assert.ok(fs.existsSync(ground), '周囲の地面の絵ができていない');
+console.log('ok fill --ground：地面だけを頼み、目安の絵と画風の見本を渡す');
 fs.rmSync(tmp, { recursive: true, force: true });

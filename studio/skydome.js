@@ -87,10 +87,10 @@ const DEFAULT_SKY = (t) => [150 + 60 * t, 185 + 40 * t, 225 + 10 * t]; // t = 0 
  * 穴をツール内の計算で埋めた空を作る（地図の半分の細かさ。なめらかなので粗くてよい）。
  *   1. 高さごとの平均の色（地平線から天頂への色の移り変わり）を、絵のある所から取る。絵の無い高さは上下からつなぐ。
  *   2. そこからの差（雲など）を、絵のある所から穴へ、遠くなるほどぼかしながら広げる。絵から 20〜40° 離れると差は消え、高さごとの色だけになる。
- * known は絵の地図（AI の層があれば withAi で重ねたもの）。
+ * known は絵の地図（AI の層があれば withAi で重ねたもの）。ground = true は周囲の地面用（上下を逆さにした世界で使う）：1 の「高さごとの色」を地平線の近くだけにして、ほかは全体の平均の色 1 つにする。
  * 戻り値：{ W, H, rgb（Float32Array）, rough（絵のある所の色の細かいばらつき。埋めた所にムラを足す量の目安） }
  */
-export function fillSky(known) {
+export function fillSky(known, { ground = false } = {}) {
   const W = known.W >> 1, H = known.H >> 1, n = W * H;
   const c = new Float32Array(n * 3), a = new Float32Array(n);
   for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) { // 2×2 をまとめる
@@ -104,10 +104,12 @@ export function fillSky(known) {
   }
   // 1. 高さごとの色
   const prof = new Float32Array(H * 3), has = new Uint8Array(H);
+  let need = 3; // その高さの色として使うのに要る画素の数。地面用では、いちばん多い高さの 3 割より少ない高さは使わない（端の少ない画素の色が広がらないように）
+  if (ground) { let most = 0; for (let j = 0; j < H; j++) { let s = 0; for (let i = 0; i < W; i++) s += a[j * W + i]; most = Math.max(most, s); } need = Math.max(need, most * 0.3); }
   for (let j = 0; j < H; j++) {
     let s = 0, r = 0, g = 0, b = 0;
     for (let i = 0; i < W; i++) { const o = j * W + i, w = a[o]; s += w; r += w * c[o * 3]; g += w * c[o * 3 + 1]; b += w * c[o * 3 + 2]; }
-    if (s >= 3) { has[j] = 1; prof[j * 3] = r / s; prof[j * 3 + 1] = g / s; prof[j * 3 + 2] = b / s; }
+    if (s >= need) { has[j] = 1; prof[j * 3] = r / s; prof[j * 3 + 1] = g / s; prof[j * 3 + 2] = b / s; }
   }
   const rows = []; for (let j = 0; j < H; j++) if (has[j]) rows.push(j);
   for (let j = 0; j < H; j++) {
@@ -117,6 +119,14 @@ export function fillSky(known) {
     for (const r of rows) { if (r < j) lo = r; else { hi = r; break; } }
     if (lo < 0 || hi < 0) { const r = lo < 0 ? hi : lo; for (let k = 0; k < 3; k++) prof[j * 3 + k] = prof[r * 3 + k]; } // 端はいちばん近い高さの色のまま
     else { const t = (j - lo) / (hi - lo); for (let k = 0; k < 3; k++) prof[j * 3 + k] = prof[lo * 3 + k] * (1 - t) + prof[hi * 3 + k] * t; }
+  }
+  if (ground) { // 地面用：近くは全体の平均の色 1 つ、地平線に近い所（遠く）だけ高さごとの色（かすみ）にする。8° より下は平均、3° より上は高さごとの色
+    let s = 0, r = 0, g = 0, b = 0;
+    for (let o = 0; o < n; o++) { const w = a[o]; s += w; r += w * c[o * 3]; g += w * c[o * 3 + 1]; b += w * c[o * 3 + 2]; }
+    if (s > 0) for (let j = 0; j < H; j++) {
+      const el = (0.5 - (j + 0.5) / H) * 180, t = Math.max(0, Math.min(1, (8 - el) / 5)), w = t * t * (3 - 2 * t);
+      prof[j * 3] = r / s * (1 - w) + prof[j * 3] * w; prof[j * 3 + 1] = g / s * (1 - w) + prof[j * 3 + 1] * w; prof[j * 3 + 2] = b / s * (1 - w) + prof[j * 3 + 2] * w;
+    }
   }
   const smooth = new Float32Array(H * 3), R = Math.max(1, Math.round(H / 90)); // 上下 2° ほどでならす
   for (let j = 0; j < H; j++) for (let k = 0; k < 3; k++) {

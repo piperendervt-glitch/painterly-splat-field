@@ -15,6 +15,7 @@
 //     穴をマゼンタで塗った絵を見せて「マゼンタの所だけ描いて」と頼み、できた絵の穴の所だけを元の絵に貼る。
 //     穴の外は 1 画素も変えない。
 //     --sky を付けると、空だけの絵（空の天球の一部）として頼む：地面や物を描かせない。--style-ref <絵> は画風の見本（同じ場面の絵）。
+//     --ground を付けると、周囲の地面の絵（30° 見下ろした広い画角の一部）として頼む：人や物を描かせない。--sky と同じく --style-ref が使える。
 //     --plate を付けると、手前の物を消した背景の絵（背後の層の色）として頼む：穴は手前の物があった所で、その後ろの背景だけを描かせる。
 //       --guide <絵> は、穴をツール内の計算で埋めた絵（どこに何の背景が来るかの目安）。
 //
@@ -108,6 +109,19 @@ function skyInstructions({ style, hasStyleRef, lightLines = [] }) {
   ].filter(Boolean).join('\n');
 }
 
+// 周囲の地面を描いてもらうときの文。絵は、目の高さから 30° 見下ろした広い画角。上の方が地平線とその上、下の端が足もと。
+function groundInstructions({ style, hasStyleRef }) {
+  return [
+    `references/holes.png is one part of a painted ground backdrop for a 3D scene, painted as ${style}. It is seen from eye height, looking down at about 30 degrees with a very wide lens: the horizon is in the upper part of the image, and the bottom edge is the ground right at the viewer's feet.`,
+    'The bright magenta (#FF00FF) areas are holes with no paint yet. Paint ONLY inside the magenta areas, continuing the existing ground naturally in every direction: the same kind of ground (grass, earth, sand, shore, water) with the same colours, the same light and the same brush style, in correct perspective (texture gets smaller towards the horizon).',
+    'This image is EMPTY GROUND ONLY. Do not paint people, animals, trees, bushes with trunks, rocks larger than pebbles, buildings, fences, paths with objects, shadows of objects, text or a frame.',
+    'The plain flat band at the top of the image (above the horizon) is only a placeholder for the sky. Leave it exactly as it is, and let the ground fade softly into haze just below it.',
+    'Everything outside the magenta areas must stay exactly as it is. Do not crop, zoom or shift the image. No magenta may remain in the result.',
+    'guide.png shows the same image with the holes filled by a blurry automatic guess. Use it only as a rough guide for the overall colour at each distance; paint real ground texture and brush strokes instead of its blur.',
+    hasStyleRef ? 'style.png is a painting of the scene that this ground belongs to. Match the colours and brushwork of its ground. Do not copy its people, trees or objects.' : '',
+  ].filter(Boolean).join('\n');
+}
+
 // 手前の物を消した背景の絵（背後の層の色）を描いてもらうときの文。穴は、手前の物（人・幹・柱など）があった所。
 function plateInstructions({ hasGuide }) {
   return [
@@ -181,15 +195,15 @@ async function runFill(o) {
   const holesFile = path.join(workDir, 'holes-input.png');
   writePng(holesFile, paintHoles(original, mask));
   const references = [{ name: 'holes.png', file: holesFile, note: o.plate ? 'picture with the foreground objects cut out (magenta holes to fill with background)' : 'painting with magenta holes to fill' }];
-  const sky = !!o.sky, hasStyleRef = sky && typeof o['style-ref'] === 'string';
+  const ground = !!o.ground, sky = !!o.sky || ground, hasStyleRef = sky && typeof o['style-ref'] === 'string'; // 周囲の地面は、空と同じ形（目安の絵・画風の見本）で頼む
   if (sky) references.push({ name: 'guide.png', file: o.image, note: 'the same image with the holes filled by a blurry automatic guess (rough colour guide only)' });
-  if (hasStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: 'painting of the scene this sky belongs to (style and sky colours to match)' });
+  if (hasStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: ground ? 'painting of the scene this ground belongs to (style and ground colours to match)' : 'painting of the scene this sky belongs to (style and sky colours to match)' });
   const plate = !sky && !!o.plate, hasGuide = plate && typeof o.guide === 'string';
   if (hasGuide) references.push({ name: 'guide.png', file: o.guide, note: 'the same picture with the holes filled by a blurry automatic guess (rough guide only)' });
   const hasPreviz = !sky && !plate && typeof o.previz === 'string';
   if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
   if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
-  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
+  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: ground ? groundInstructions({ style, hasStyleRef }) : sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
   console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}`);
   const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (!file) { console.log(`  → ${workDir}`); return; }

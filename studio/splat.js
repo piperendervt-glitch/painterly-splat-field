@@ -12,7 +12,7 @@ import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../
 import { createWalk } from './walk.js';
 import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
-import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, skyDistance, withAi } from './skydome.js';
+import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, sampleMap, skyDistance, skyNoise, withAi } from './skydome.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage'), msg = $('msg');
@@ -41,9 +41,10 @@ const SOURCES = {
 // sfx は、AI が描いた空の絵（paint/out/sky_ai<sfx>.png）の名前の後ろ。paint は、空を描いてもらうときの光の描かせ方（paint.mjs の --light）。
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, backDepth: 'plate', walkShape: 'auto', skyMode: 'dome', skyStep: 0.2 };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, backDepth: 'plate', walkShape: 'auto', surround: true, surroundFill: true, surroundAi: true, skyMode: 'dome', skyStep: 0.2 };
 // 角度を変えたときの崩れを減らす設定（計算は studio/layers.js）：shape = 粒の形（round 丸 / surfel 面に沿う楕円）、stretch = 面に沿って伸ばす上限（倍）、
 // back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う、
+// surround = 絵の外の地面（周囲の地面）を置く、surroundFill = その穴をツール内の計算で埋める、surroundAi = AI が描いた地面（あれば）を使う
 // walkShape = 歩くときの当たりの形（auto = プレビズのある場面はプレビズ、絵から作った場面は推定 / previz / estimate）
 // backDepth = 背後の層の位置（calc 計算で延ばす / plate AI が描いた背景の絵を SHARP に通した奥行き。あれば）
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
@@ -148,7 +149,7 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, painting: views.some((v) => v.painting) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, painting: views.some((v) => v.painting) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -286,6 +287,7 @@ function splatsFromView(v, vi, stride, src, back = null) {
 // 視点別の表示で色が分かれ、「使う視点」で出し入れもできる。
 const sharpViewIndex = (vi) => data.views.length + vi;
 const backViewIndex = (vi) => data.views.length * 2 + vi;
+const surroundViewIndex = () => data.views.length * 3; // 周囲の地面の粒
 const FRONT = frontTable(TYPES);            // 種類 → 手前の物かどうか
 const backInfo = { on: false, views: [] };  // 背後の層の作り方の結果（画面に出す）
 const SPLAT_OPTS = () => ({ skyZ: SKY_Z, typeOf: (t) => TYPE_BY_ID.get(t), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, maxStretch: ui.stretch, emitSky: ui.skyMode === 'wall' });
@@ -363,6 +365,7 @@ function buildCloud() {
     backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined, refined: back.refined, kept: back.kept });
   });
   if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp'));
+  const around = surroundSplats(); if (around) parts.push(around);
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
   for (const p of parts) appendSplats(c, p.columns, p.count);
   return c;
@@ -432,7 +435,8 @@ const DISPLAY = {
   sunNow: painted,                                                                                    // いまの日なた（シェーダーが灰色にする）
   layer: (c, i, out) => {                                                                             // 層：絵に見えていた面は灰色、背後の層は黄
     const l = 0.15 + 0.85 * luma(c, i);
-    if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
+    if (c.layer[i] === 2) { out[0] = l * 0.1; out[1] = l * 0.8; out[2] = l; }                              // 周囲の地面は水色
+    else if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
   },
   labelEdge: (c, i, out) => {                                                                         // 札の境目の近く
     painted(c, i, out);
@@ -736,6 +740,197 @@ async function forgetSky() {
   await refreshSky(); showSkyPlan();
 }
 
+// ---- 周囲の地面（絵の外の地面） ----
+// 空の天球と同じ道具（studio/skydome.js）を、上下を逆さにした世界で使う：絵の視点を中心に、地平線より下の向きの色を 1 枚の全周の絵にまとめ、
+// 絵に無い向きをツール内の計算か AI（Codex）で埋める。粒は、その向きの視線が土台の平面（推定した地面の高さ）に当たる所に置く。
+// 逆さの世界で「空」として扱うのは、絵の中心の視点の「空でない背景の画素」（AI が描いた背景の絵があれば、物があった所も使う）。
+const SURROUND_SIGMA = 0.65; // 粒の広がり（σ）÷ 粒の間隔。後ろが何も無いので、絵の粒（SIGMA_K）より広くしてすき間を無くす
+const SURROUND_GRID = 0.12, SURROUND_GROW = 0.012, SURROUND_MAX = 180; // 粒の間隔（m）：近くは GRID、遠くは 距離 × GROW。置く距離の上限（m）
+const surround = { key: '', map: null, soil: null, type: 0, fillKey: '', fill: null, grid: null, counts: [0, 0, 0, 0] };
+const SOIL = new Uint8Array(256); for (const t of TYPES) if (t.tracks) SOIL[t.id] = 1; // 足あとが付く種類（地面、草地）= 歩ける地面
+const centerView = () => data.views.find((v) => !v.onlyNew) || data.views[0];
+const flipV = (rgba, w, h) => { const out = new Uint8ClampedArray(rgba.length); for (let y = 0; y < h; y++) out.set(rgba.subarray(y * w * 4, (y + 1) * w * 4), (h - 1 - y) * w * 4); return out; };
+function groundMap() {
+  const v = centerView(), c = colorOf(v, ui.colorSrc), plate = ui.plate ? v.plates[c.key] : null, back = v.hasTypes ? backOf(v, ui.colorSrc, false) : null;
+  const key = `${data.views.indexOf(v)}|${c.key}|${plate ? plate.version : '-'}|${ui.halo}`;
+  if (surround.key === key) return surround.map;
+  const n = v.W * v.H, member = new Uint8Array(n), soil = new Uint8Array(n), seen = new Uint32Array(256);
+  let soils = 0;
+  for (let i = 0; i < n; i++) {
+    member[i] = v.isSky[i] ? 0 : back && (back.thing[i] || back.kind[i]) ? (plate && plate.mask[i * 4] >= 128 ? 1 : 0) : 1;
+    if (member[i] && v.hasTypes && SOIL[v.type[i]] && !(back && (back.thing[i] || back.kind[i]))) { soil[i] = 1; soils++; seen[v.type[i]]++; }
+  }
+  const m = Array.from(v.matrix.elements); m[1] = -m[1]; m[5] = -m[5]; m[9] = -m[9]; // 世界の上下を逆さにする
+  const build = (mask) => buildSkyMap([{ W: v.W, H: v.H, ...v.def.intrinsics, m, dist: skyDistance(mask, v.W, v.H), px: plate ? plate.px : c.px, fresh: null }], { width: 2048, margin: 4 });
+  surround.map = build(member);
+  // ツール内で埋める色は、歩ける地面（地面、草地）の画素だけから伸ばす。水や遠景の色が、周囲の地面に広がらないようにする
+  surround.soil = soils > n * 0.005 ? build(soil) : surround.map;
+  surround.type = GROUND_TYPE; { let best = 0; for (let t = 0; t < 256; t++) if (seen[t] > best) { best = seen[t]; surround.type = t; } }
+  surround.key = key; surround.fillKey = '';
+  return surround.map;
+}
+async function groundAiLayer() {
+  const sfx = skySfx();
+  if (!(sfx in data.groundAi)) {
+    const px = data.groundAiFiles[`ground_ai${sfx}`] ? await tryImage(`/files/paint-out/ground_ai${sfx}.png`, AI_W, AI_H) : null;
+    data.groundAi[sfx] = px ? { W: AI_W, H: AI_H, rgba: px, version: 1 } : null;
+  }
+  return data.groundAi[sfx];
+}
+// いまの地図（絵 + AI の層）と、ツール内で埋めた色
+function groundKnown() {
+  const map = groundMap(), ai = ui.surroundAi ? data.groundAi[skySfx()] || null : null, known = withAi(map, ai), fillKey = `${surround.key}|${ai ? skySfx() + ai.version : '-'}`;
+  if (surround.fillKey !== fillKey) { surround.fill = fillSky(withAi(surround.soil, ai), { ground: true }); surround.fillKey = fillKey; }
+  return { map, ai, known, fill: surround.fill };
+}
+// 地面の上の点を、視点の真下を中心にした輪に並べる（高さ h の視点から見た向きと、全周の絵の上の位置も持つ）。逆さの世界の向きなので y は上向き
+function groundGrid(h) {
+  if (surround.grid && surround.grid.h === h) return surround.grid;
+  const rs = [];
+  let n = 0;
+  for (let r = SURROUND_GRID / 2; r <= SURROUND_MAX;) { const s = Math.max(SURROUND_GRID, r * SURROUND_GROW), count = Math.max(6, Math.round(2 * Math.PI * r / s)); rs.push({ r, s, count }); n += count; r += s; }
+  const dir = new Float32Array(n * 3), u = new Float32Array(n), v = new Float32Array(n), x = new Float32Array(n), z = new Float32Array(n), gap = new Float32Array(n);
+  let k = 0;
+  rs.forEach(({ r, s, count }, ring) => {
+    const t = Math.hypot(r, h), el = Math.atan2(h, r);
+    for (let i = 0; i < count; i++, k++) {
+      const az = (i + (ring & 1 ? 0.5 : 0)) / count, a = az * 2 * Math.PI, sx = Math.sin(a), cz = Math.cos(a);
+      dir[k * 3] = sx * r / t; dir[k * 3 + 1] = h / t; dir[k * 3 + 2] = cz * r / t;
+      u[k] = az % 1; v[k] = 0.5 - el / Math.PI; x[k] = sx * r; z[k] = cz * r; gap[k] = s;
+    }
+  });
+  return (surround.grid = { h, n, dir, u, v, x, z, gap });
+}
+// 視点ごとの「背景の奥行き」（手前の物を取り除いた奥行き。物の後ろは背後の層の奥行き、分からない所は -1、空は 0）
+function backgroundDepth(o) {
+  if (o.onlyNew) return null;
+  const back = o.hasTypes ? backOf(o, ui.colorSrc) : null;
+  if (!back) return o.z;
+  const n = o.W * o.H, bz = new Float32Array(n);
+  for (let i = 0; i < n; i++) bz[i] = back.kind[i] === BACK_BEHIND ? back.z2[i] : back.thing[i] ? -1 : o.z[i];
+  return bz;
+}
+// ワールドの点が、視点 o の絵（と背後の層）でもう覆われているか。覆われている所には周囲の地面の粒を置かない。
+// わくの中で、背景がその点と同じくらいの距離か、もっと遠い（= 絵ではそこに地面が無く、向こうが見えている）なら「覆われている」。
+// 背景のほうがずっと手前（木立ちや遠景の後ろ）や空なら、覆われていない。
+// 戻り値：0 = 覆われていない、1 = 覆われている、2 = 覆われているが、視線が地面をかすめていて 1 画素が地面の上で GRAZE m より長い（絵の粒では横から見るとすじになる所）
+const GRAZE = 1.5;
+function framedIn(o, bz, x, y, z) {
+  const m = o.w2c, { fx, fy, cx, cy } = o.def.intrinsics;
+  const xc = m[0] * x + m[1] * y + m[2] * z + m[3], yc = m[4] * x + m[5] * y + m[6] * z + m[7], zc = -(m[8] * x + m[9] * y + m[10] * z + m[11]);
+  if (zc <= 0.05) return 0;
+  const ix = Math.floor(cx + xc / zc * fx), iy = Math.floor(cy - yc / zc * fy);
+  if (ix < 0 || iy < 0 || ix >= o.W || iy >= o.H) return 0;
+  const j = iy * o.W + ix;
+  if (bz ? !(bz[j] < 0 || bz[j] > 0.75 * zc) : !(o.onlyNew[j * 4] >= 128 && o.z[j] > 0.75 * zc)) return 0; // 足した視点は、新しく描いた画素だけ
+  return zc * zc / (fy * Math.max(0.1, Math.abs(o.c2w[7] - y))) > GRAZE ? 2 : 1;
+}
+function surroundSplats() {
+  if (!ui.surround || !data) return null;
+  const v = centerView(), { map, ai, fill } = groundKnown();
+  const eye = [v.c2w[3], v.c2w[7], v.c2w[11]], baseY = data.baseY !== undefined ? data.baseY : (data.baseY = estimateModel().baseY), h = eye[1] - baseY;
+  if (!(h > 0.2)) { surround.counts = [0, 0, 0, 0]; return null; }
+  const grid = groundGrid(h), out = colorDome(grid, { map, ai, fill: ui.surroundFill ? fill : null, mottle: 0 });
+  const sway = Math.round(((TYPE_BY_ID.get(surround.type) || {}).sway || 0) * 255), counts = [0, 0, 0, 0], amp = fill ? fill.rough * 1.6 : 0;
+  const keep = [], bzs = data.views.map(backgroundDepth), tmp = [0, 0, 0, 0], nv = data.views.length;
+  for (let i = 0; i < grid.n; i++) {
+    const px = eye[0] + grid.x[i], pz = eye[2] + grid.z[i];
+    // ほかの視点の絵で覆われている所には置かない。ただし、絵の中心の視点や足した視点で「かすめて見えている」だけの所には置く
+    // （中心の視点なら絵と同じ色なので、元の視点からの見え方は変わらず、横や上から見たときのすじのすき間が埋まる）
+    let cover = 0, own = false;
+    for (let k = 0; k < nv && cover !== 1; k++) { const o = data.views[k], f = framedIn(o, bzs[k], px, baseY, pz); if (f === 1 || (f === 2 && o !== v && !o.onlyNew)) cover = 1; else if (f === 2) { cover = 2; own = own || o === v; } }
+    if (cover === 1) { counts[1]++; continue; }
+    if (cover === 2 && own && out.from[i] === 1) { counts[1]++; keep.push(i); continue; }
+    // 絵ではその向きに別の物（木立ちや遠景）が見えていて、地面はその後ろ：絵の色は使わず、ツール内で埋めた色にする
+    if (out.from[i] === 1) { if (ui.surroundFill && fill) { sampleMap(fill, grid.u[i], grid.v[i], tmp); out.color[i * 3] = tmp[0]; out.color[i * 3 + 1] = tmp[1]; out.color[i * 3 + 2] = tmp[2]; out.from[i] = 3; } else out.from[i] = 0; }
+    counts[out.from[i]]++;
+    if (out.from[i] >= 2) keep.push(i);
+  }
+  surround.counts = counts;
+  const n = keep.length, col = {
+    position: new Float32Array(n * 3), size: new Float32Array(n), color: new Uint8Array(n * 3), view: new Uint8Array(n).fill(surroundViewIndex()), depthGray: new Uint8Array(n),
+    type: new Uint8Array(n).fill(surround.type), sway: new Uint8Array(n).fill(sway), normal: new Int8Array(n * 3), cov: new Float32Array(n * 6), layer: new Uint8Array(n).fill(2),
+  };
+  keep.forEach((i, k) => {
+    const t = Math.hypot(grid.x[i], grid.z[i], h), s2 = (grid.gap[i] * SURROUND_SIGMA) ** 2;
+    // ツール内で埋めた所には、絵と同じくらいの色のムラを足す（地面の上の位置で決まる、1 m ほどと 30 cm ほどの模様）
+    const j = out.from[i] === 3 ? skyNoise(grid.x[i] * 0.03, 0.5, grid.z[i] * 0.03) * amp : 0;
+    col.position[k * 3] = eye[0] + grid.x[i]; col.position[k * 3 + 1] = baseY; col.position[k * 3 + 2] = eye[2] + grid.z[i];
+    col.size[k] = grid.gap[i];
+    for (let c = 0; c < 3; c++) col.color[k * 3 + c] = Math.max(0, Math.min(255, out.color[i * 3 + c] + j));
+    col.depthGray[k] = Math.max(0, Math.min(255, (1 - Math.log(Math.max(t, v.near) / v.near) / Math.log(v.far / v.near)) * 255));
+    col.normal[k * 3 + 1] = 127;
+    col.cov[k * 6] = s2; col.cov[k * 6 + 3] = s2 * 0.0225; col.cov[k * 6 + 5] = s2; // 地面に寝た丸（厚みは 0.15 倍）
+  });
+  return { columns: col, count: n };
+}
+// 地平線より上の向き（逆さの世界では下半分）を「もう絵がある」ことにした地図。頼む絵の穴を、地平線より下だけにする
+function belowHorizon(known) {
+  const a = new Float32Array(known.a); a.fill(1, (known.H >> 1) * known.W);
+  return { ...known, a };
+}
+// 頼む絵の、地平線より上（空の帯）を、うすい色 1 色の仮の帯にする。y0 = 地平線の行（上から）
+const GROUND_HORIZON = Math.round(FACE.h / 2 - FACE.w / 2 / Math.tan(FACE.hfov / 2 * Math.PI / 180) * Math.tan(FACE.pitch * Math.PI / 180));
+function hazeBand(image, w) {
+  const o = (GROUND_HORIZON * w + (w >> 1)) * 4, c = [0, 1, 2].map((k) => Math.round(image[o + k] * 0.45 + 255 * 0.55));
+  for (let i = 0; i < (GROUND_HORIZON + 3) * w; i++) { image[i * 4] = c[0]; image[i * 4 + 1] = c[1]; image[i * 4 + 2] = c[2]; image[i * 4 + 3] = 255; }
+  return image;
+}
+function showSurround() {
+  if (!data || groundJob) return;
+  const [hole, painted, byAi, byTool] = surround.counts, total = Math.max(1, hole + painted + byAi + byTool), pc = (x) => `${Math.round(100 * x / total)}%`;
+  $('surroundInfo').textContent = !ui.surround ? '' : `視点のまわり ${SURROUND_MAX} m の地面のうち、絵に描かれている所 ${pc(painted)}、AI が描いた所 ${pc(byAi)}、ツール内で埋めた所 ${pc(byTool)}、空いたまま ${pc(hole)}。`;
+  $('surroundAi').disabled = !data.groundAiFiles[`ground_ai${skySfx()}`];
+  const known = belowHorizon(withAi(groundMap(), data.groundAi[skySfx()] || null)); // 頼む枚数は、AI の層を使う・使わないに関係なく、もう描いてもらった所を除いて数える
+  let n = 0; for (let k = 0; k < FACE.count; k++) if (faceHoles(k, known) >= HOLE_MIN) n++;
+  $('groundPlan').textContent = n ? `いま穴のある向きは ${n} / ${FACE.count}。押すと ChatGPT の利用枠を ${n} 枚ぶん使います（1 枚 1〜2 分）。` : '周囲は全部埋まっています。押しても Codex は呼びません。';
+}
+// AI（Codex）に周囲の地面を描いてもらう：4 つの向きを順に、30° 見下ろした絵として頼む（逆さの世界の絵を上下に返してから渡す）
+let groundJob = false, groundStop = false;
+const GROUND_BUTTONS = ['groundPaint', 'groundDry', 'groundForget'];
+async function paintGround(dryRun) {
+  if (groundJob || !app || !data) return;
+  const log = (t) => { $('groundLog').hidden = false; $('groundLog').textContent = t; };
+  groundJob = true; groundStop = false; for (const id of GROUND_BUTTONS) $(id).disabled = true; $('groundStopBtn').hidden = false;
+  let done = 0;
+  try {
+    const sfx = skySfx(), map = groundMap(), src = SOURCES[ui.colorSrc], old = await groundAiLayer();
+    const ai = { W: AI_W, H: AI_H, rgba: old ? new Uint8ClampedArray(old.rgba) : new Uint8ClampedArray(AI_W * AI_H * 4), version: (old ? old.version : 0) + 1 };
+    const first = data.views[0], styleRef = src.file && first.colors[ui.colorSrc] ? `${first.def.name}_painted${sfx}` : null;
+    for (let k = 0; k < FACE.count && !groundStop; k++) {
+      const known = belowHorizon(withAi(map, ai)), face = renderFace(k, known, fillSky(withAi(surround.soil, ai), { ground: true })), name = faceCamera(k).name;
+      if (face.holes < HOLE_MIN) continue;
+      const head = `${name}：穴 ${Math.round(face.holes * 100)}%。`;
+      log(head + (dryRun ? '文と絵を用意しています' : 'Codex が描いています（30 秒〜数分）'));
+      await api(`/api/paint-out/ground_face${k}${sfx}.png`, await pngBlob(hazeBand(flipV(face.image, FACE.w, FACE.h), FACE.w), FACE.w, FACE.h));
+      await api(`/api/paint-out/ground_face${k}${sfx}_holes.png`, await pngBlob(flipV(face.mask, FACE.w, FACE.h), FACE.w, FACE.h));
+      await api('/api/paint/sky', { kind: 'ground', face: k, sfx, light: src.paint, styleRef, dryRun });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (groundStop) await api('/api/paint/stop'); else log(`${head}Codex が描いています（${st.seconds} 秒）`); }
+      if (groundStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
+      done++;
+      if (dryRun) continue;
+      const painted = flipV(await loadImage(`/files/paint-out/ground_face${k}${sfx}_painted.png`, FACE.w, FACE.h), FACE.w, FACE.h);
+      pasteFace(ai, k, painted, face.mask);
+      await api(`/api/paint-out/ground_ai${sfx}.png`, await pngBlob(ai.rgba, AI_W, AI_H));
+      ai.version++; data.groundAi[sfx] = ai; data.groundAiFiles[`ground_ai${sfx}`] = true;
+    }
+    log(groundStop ? '止めました。' : !done ? '穴のある向きがありません。' : dryRun ? `${done} 枚ぶんの文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。` : `${done} 枚描いてもらい、周囲の地面に使っています。`);
+  } catch (e) { console.error(e); log('止まりました：' + e.message); }
+  finally {
+    groundJob = false; for (const id of GROUND_BUTTONS) $(id).disabled = false; $('groundStopBtn').hidden = true;
+    if (done && !dryRun) { ui.surroundAi = true; $('surroundAi').checked = true; rebuild(); } else showSurround();
+  }
+}
+async function forgetGround() {
+  if (groundJob || !data) return;
+  const sfx = skySfx();
+  try { await api(`/api/paint-out/ground_ai${sfx}.png`, null, 'DELETE'); } catch (e) { $('groundLog').hidden = false; $('groundLog').textContent = e.message; return; }
+  data.groundAi[sfx] = null; data.groundAiFiles[`ground_ai${sfx}`] = false; $('groundLog').hidden = true;
+  rebuild();
+}
+
 // ---- 絵と奥行きから推定したプレビズのモデル（studio/estimate.js） ----
 // 背景の面（手前の物を消した後ろの奥行きのメッシュ）と、手前の物を囲む箱。歩くときの当たりの形と、OBJ の書き出しに使う。
 const GROUND_TYPE = typeByKey('grass').id;
@@ -903,6 +1098,7 @@ async function start(useGL) {
   forceGL = useGL;
   stage.prepend(renderer.domElement);
 
+  if (ui.surround) await groundAiLayer(); // 周囲の地面：AI が描いた層があれば先に読む
   cloud = buildCloud();
   const n = cloud.n;
   const scene = new THREE.Scene();
@@ -959,7 +1155,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo(); showLayerInfo();
+  showSharpInfo(); showLayerInfo(); showSurround();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -977,7 +1173,7 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, sky, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
+  window.__splat = { app: a, cloud, data, ui, sky, surround, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
     setMode,
     // 確かめ用：表示 mode での全粒の色（リニア）を返す
     colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
@@ -1171,6 +1367,7 @@ function setupViewButtons() {
     const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(i); b.textContent = `${v.def.name} だけ`; b.setAttribute('aria-pressed', 'false'); src.append(b);
     const j = document.createElement('button'); j.type = 'button'; j.className = 'plain'; j.dataset.v = String(i); j.textContent = `カメラ${v.def.name}`; jumpEl.append(j);
   });
+  { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(surroundViewIndex()); b.textContent = '（周囲の地面）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
   ui.source = 'all'; press(src, 'all');
   // 色のもと：どの視点にも無い絵は選べなくする。いま選んでいる絵が無くなっていたら、ある絵へ移す。
   const has = (key) => data.views.some((v) => v.colors[key]);
@@ -1275,6 +1472,11 @@ $('plateStopBtn').addEventListener('click', () => { plateStop = true; });
 $('plateForget').addEventListener('click', forgetPlate);
 $('plateSharp').addEventListener('click', sharpPlate);
 seg('walkShape', (v) => { ui.walkShape = v; rebuild(); });
+for (const [id, key] of [['surround', 'surround'], ['surroundFill', 'surroundFill'], ['surroundAi', 'surroundAi']]) $(id).addEventListener('change', () => { ui[key] = $(id).checked; rebuild(); });
+$('groundPaint').addEventListener('click', () => paintGround(false));
+$('groundDry').addEventListener('click', () => paintGround(true));
+$('groundStopBtn').addEventListener('click', () => { groundStop = true; });
+$('groundForget').addEventListener('click', forgetGround);
 $('estimateExport').addEventListener('click', exportEstimate);
 seg('backDepth', (v) => { ui.backDepth = v; rebuild(); });
 showLayerUi();
