@@ -14,12 +14,15 @@
 .swatch{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
 input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);border-radius:4px;background:transparent;cursor:pointer}
 .row.wrap{grid-auto-flow:row;grid-template-columns:repeat(3,1fr)}
+#brushRing{position:absolute;left:0;top:0;border:1.5px solid rgba(255,255,255,.75);border-radius:50%;pointer-events:none;box-shadow:0 0 0 1px rgba(0,0,0,.35)}
+#brushRing.on{border-color:#ffd23f;background:rgba(255,210,63,.08)}
 </style>
 </head>
 <body class="tool">
 <main id="stage">
   <div id="msg">準備しています…</div>
   <div id="hint"></div>
+  <div id="brushRing" hidden></div>
 </main>
 <aside>
   <header>
@@ -158,10 +161,13 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="sun0" aria-pressed="false">日なた（元）</button>
       <button type="button" data-v="sunNow" aria-pressed="false">日なた（今）</button>
       <button type="button" data-v="sway" aria-pressed="false">揺れる粒</button>
+      <button type="button" data-v="windKind" aria-pressed="false">風で動く粒</button>
+      <button type="button" data-v="jiggle" aria-pressed="false">動いた量</button>
+      <button type="button" data-v="jiggleSpeed" aria-pressed="false">動いている粒</button>
       <button type="button" data-v="layer" aria-pressed="false">層</button>
       <button type="button" data-v="skySrc" aria-pressed="false">空の出どころ</button>
     </div>
-    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。「空の出どころ」は、天球の粒を、絵から来た所（視点の色）・AI が描いた所（緑）・ツール内で埋めた所（赤紫）に色分けします。「層」は、絵に見えていた面が灰色、計算で足した背後の層が黄色、周囲の地面が水色、取り込んだ世界が桃色、物体のモデルが緑。</p>
+    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、草よけで動く粒を緑で示します（濃いほどよく揺れる）。「風で動く粒」は風での動き方の色分け（草 黄緑・木の葉 緑・幹 茶・水面 青・空 白）。「動いた量」はブラシや体で元の場所からずれた量、「動いている粒」はいま揺れている速さです（青 → 黄 → 赤）。「空の出どころ」は、天球の粒を、絵から来た所（視点の色）・AI が描いた所（緑）・ツール内で埋めた所（赤紫）に色分けします。「層」は、絵に見えていた面が灰色、計算で足した背後の層が黄色、周囲の地面が水色、取り込んだ世界が桃色、物体のモデルが緑。</p>
     <label class="check" for="holes"><input type="checkbox" id="holes"><span>穴を目立たせる（背景をマゼンタに）</span></label>
     <label class="check" for="wire"><input type="checkbox" id="wire"><span>プレビズの形を線で重ねる</span></label>
     <label class="check" for="frusta"><input type="checkbox" id="frusta"><span>カメラの視錐台を表示</span></label>
@@ -309,6 +315,56 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <p class="note">方位 0° はカメラAの背中側、90° は右。粒の色は「絵の色 × 今の明るさ ÷ 描かれたときの明るさ」で動かします。「光なし」は絵に光が描かれていない前提で、日なたと影を全部計算で足します。「影つき」は絵に下絵どおりの光と影が描かれている前提で、その分を割り戻してから今の光を掛けます（差分方式）。色のもとを選ぶと自動で切り替わります。</p>
   </div>
 
+  <div class="group" id="touchBox">
+    <h2>触って揺らす</h2>
+    <label class="check" for="brushOn"><input type="checkbox" id="brushOn" checked><span>マウスのブラシで粒を押す</span></label>
+    <div id="brushBox">
+      <div class="label">マウスの役目（回して見るとき）</div>
+      <div class="seg" id="brushTool">
+        <button type="button" data-v="brush" aria-pressed="true">ブラシ</button>
+        <button type="button" data-v="orbit" aria-pressed="false">回す</button>
+      </div>
+      <div class="label">押し方</div>
+      <div class="seg grid3" id="brushMode">
+        <button type="button" data-v="push" aria-pressed="true">押しのける</button>
+        <button type="button" data-v="stroke" aria-pressed="false">なでる</button>
+        <button type="button" data-v="press" aria-pressed="false">へこませる</button>
+        <button type="button" data-v="pull" aria-pressed="false">引っぱる</button>
+        <button type="button" data-v="swirl" aria-pressed="false">かき回す</button>
+        <button type="button" data-v="scatter" aria-pressed="false">ばらばら</button>
+        <button type="button" data-v="flick" aria-pressed="false">はじく</button>
+      </div>
+      <label class="check" for="brushHover"><input type="checkbox" id="brushHover"><span>ボタンを押さずに、なぞるだけで触れる</span></label>
+      <div class="label"><span>ブラシの大きさ</span><output id="oBrushR"></output></div>
+      <input type="range" id="brushR" min="5" max="600" step="1" value="70">
+      <div class="label"><span>押す強さ（ずれる距離）</span><output id="oBrushK"></output></div>
+      <input type="range" id="brushK" min="0.01" max="5" step="0.01" value="0.4">
+      <div class="label"><span>押す奥行きの幅</span><output id="oBrushBand"></output></div>
+      <input type="range" id="brushBand" min="0" max="50" step="0.1" value="2">
+    </div>
+    <label class="check" for="bodyOn"><input type="checkbox" id="bodyOn" checked><span>歩くと体で粒を押す</span></label>
+    <div class="label"><span>体の太さ</span><output id="oBodyScale"></output></div>
+    <input type="range" id="bodyScale" min="0.5" max="6" step="0.1" value="1.6">
+    <label class="check" for="bodyGround"><input type="checkbox" id="bodyGround"><span>足もとの地面の粒も押す</span></label>
+    <div class="label"><span>戻る速さ</span><output id="oJigHz"></output></div>
+    <input type="range" id="jigHz" min="0" max="12" step="0.1" value="1.6">
+    <div class="label"><span>揺れの収まりかた</span><output id="oJigDamp"></output></div>
+    <input type="range" id="jigDamp" min="0" max="1.5" step="0.01" value="0.12">
+    <div class="label"><span>粒ごとの硬さのばらつき</span><output id="oJigSpread"></output></div>
+    <input type="range" id="jigSpread" min="0" max="0.95" step="0.01" value="0.35">
+    <div class="label"><span>ずれる距離の上限</span><output id="oJigMax"></output></div>
+    <input type="range" id="jigMax" min="0.05" max="50" step="0.05" value="3">
+    <label class="check" for="jigType"><input type="checkbox" id="jigType"><span>種類で硬さを変える（草や葉は柔らかく、石は硬く）</span></label>
+    <div class="label"><span>待機中のゆらぎ</span><output id="oWobble"></output></div>
+    <input type="range" id="wobble" min="0" max="2" step="0.01" value="0">
+    <div class="label"><span>ゆらぎの速さ</span><output id="oWobbleSpeed"></output></div>
+    <input type="range" id="wobbleSpeed" min="0.1" max="6" step="0.1" value="1">
+    <label class="check" for="jigPause"><input type="checkbox" id="jigPause"><span>揺れを止めて見る（その場で固める）</span></label>
+    <button type="button" class="plain" id="jigReset">全部の粒を元の場所に戻す</button>
+    <p class="note" id="sBrush"></p>
+    <p class="note">「回して見る」でマウスの役目を「ブラシ」にすると、左ドラッグで粒を押し、右ドラッグで回します。「歩く」では、画面をクリックして視線を固定した後、左ボタンを押している間は画面の真ん中を押します。押された粒はばねで元の場所へ戻り、行き過ぎてぷるぷる揺れます。「戻る速さ」を 0 にすると戻らず、粘土のように形を変えられます（「元の場所に戻す」で戻ります）。「揺れの収まりかた」を 0 にすると揺れ続け、1 以上で揺れずに戻ります。表示の「動いた量」「動いている粒」で、どの粒がどれだけ動いたかを色で見られます（青 → 黄 → 赤）。ブラシの円が黄色のときに押しています。</p>
+  </div>
+
   <div class="group" id="moveBox">
     <h2>動き</h2>
     <label class="check" for="windOn"><input type="checkbox" id="windOn" checked><span>風で揺らす（草や葉の粒）</span></label>
@@ -318,13 +374,35 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <input type="range" id="windSpeed" min="0.2" max="3" step="0.1" value="1">
     <div class="label"><span>風の向き</span><output id="oWindDir"></output></div>
     <input type="range" id="windDir" min="0" max="360" step="5" value="70">
+    <div class="label"><span>草</span><output id="oMGrass"></output></div>
+    <input type="range" id="mGrass" min="0" max="3" step="0.05" value="1">
+    <div class="label"><span>木の葉（枝ごと揺れる）</span><output id="oMLeaves"></output></div>
+    <input type="range" id="mLeaves" min="0" max="3" step="0.05" value="1.2">
+    <div class="label"><span>木の葉のふるえ（1 枚ずつ）</span><output id="oMFlutter"></output></div>
+    <input type="range" id="mFlutter" min="0" max="3" step="0.05" value="0.6">
+    <div class="label"><span>木の幹</span><output id="oMTrunk"></output></div>
+    <input type="range" id="mTrunk" min="0" max="1" step="0.01" value="0.12">
+    <label class="check" for="waterOn"><input type="checkbox" id="waterOn" checked><span>水面を波立たせる</span></label>
+    <div class="label"><span>波の高さ</span><output id="oWaterK"></output></div>
+    <input type="range" id="waterK" min="0" max="0.5" step="0.005" value="0.06">
+    <div class="label"><span>波の速さ</span><output id="oWaterSpeed"></output></div>
+    <input type="range" id="waterSpeed" min="0.1" max="4" step="0.1" value="1">
+    <div class="label"><span>水面のきらめき</span><output id="oWaterGlint"></output></div>
+    <input type="range" id="waterGlint" min="0" max="2" step="0.05" value="0.6">
+    <label class="check" for="cloudOn"><input type="checkbox" id="cloudOn" checked><span>雲（空）を流して、わき立たせる</span></label>
+    <div class="label"><span>雲のわき立ち</span><output id="oCloudK"></output></div>
+    <input type="range" id="cloudK" min="0" max="4" step="0.1" value="0.8">
+    <div class="label"><span>わき立つ速さ</span><output id="oCloudSpeed"></output></div>
+    <input type="range" id="cloudSpeed" min="0.1" max="5" step="0.1" value="1">
+    <div class="label"><span>雲が流れる速さ（天球を回す）</span><output id="oCloudDrift"></output></div>
+    <input type="range" id="cloudDrift" min="0" max="5" step="0.05" value="0.3">
     <label class="check" for="partOn"><input type="checkbox" id="partOn" checked><span>歩くと足元の草がよける</span></label>
     <div class="label"><span>よける範囲</span><output id="oPartR"></output></div>
     <input type="range" id="partR" min="0.5" max="3" step="0.1" value="1.3">
     <label class="check" for="footOn"><input type="checkbox" id="footOn" checked><span>足跡を付ける（地面と草地）</span></label>
     <label class="check" for="footShow"><input type="checkbox" id="footShow"><span>足跡をマゼンタで目立たせる</span></label>
     <button type="button" class="plain" id="footClear">足跡を消す</button>
-    <p class="note">揺れるのは、種類の札で「揺れやすい」とした粒だけです（表示の「揺れる粒」で確かめられます）。草よけと足跡は「歩く」で当たり判定を入れているときに働きます。足跡は歩く人のまわり 128 m 四方に残ります。</p>
+    <p class="note">風で動くのは、種類の札で動き方が決まっている粒です：草・木の葉・木の幹・水・空（表示の「風で動く粒」で確かめられます）。草よけで押されるのは「揺れやすい」とした粒だけです（表示の「揺れる粒」）。雲は空の粒（天球）を風の向きへゆっくり回して流し、粒ごとにゆっくりわき立たせます。草よけと足跡は「歩く」で当たり判定を入れているときに働きます。足跡は歩く人のまわり 128 m 四方に残ります。</p>
   </div>
 
   <div class="group">
@@ -351,6 +429,7 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
   <dl>
     <dt>粒の数</dt><dd id="sCount">–</dd>
     <dt>描画方式</dt><dd id="sBackend">–</dd>
+    <dt>触って揺らす</dt><dd id="sJiggle">–</dd>
     <dt>描画速度</dt><dd id="sFps">–</dd>
     <dt>並べ直し</dt><dd id="sSort">–</dd>
     <dt>影の計算</dt><dd id="sSun">–</dd>

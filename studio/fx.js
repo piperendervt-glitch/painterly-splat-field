@@ -2,22 +2,27 @@
 //   風の揺れ ・ プレイヤーのまわりの草よけ ・ 足跡 ・ 光の付け替え（時間帯）
 // 粒ごとの札（揺れやすさ、種類の光の受け方、足跡が付くか、面の向き、描いたときの日なた）は、描画用の配列 C・D から読む。
 //   A = [位置 xyz, 粒の間隔]  B = [表示する色 rgb（リニア）, 境界からの距離]
-//   C = [空, 視点, 揺れやすさ 0〜1, 光の受け方（0 太陽 / 1 空 / 2 自分で光る）＋ 足跡が付くなら 4]
+//   C = [空, 視点, 揺れやすさ 0〜1, 光の受け方（0 太陽 / 1 空 / 2 自分で光る）＋ 足跡が付くなら 4 ＋ 風での動き方 × 8]
+//       風での動き方（MOTION）：0 動かない / 1 草 / 2 木の葉 / 3 木の幹 / 4 水面 / 5 雲・空
 //   D = [面の向き xyz, 描いたときの日なた 0〜1]
 // 光の式は shared/light.js と同じ（粒の色 = 絵の色 × 今の明るさ ÷ 描いたときの明るさ）。
 import * as THREE from 'three/webgpu';
-import { uniform, texture, varying, vec2, vec3, vec4, float, sin, dot, floor, mix, max, min, step, smoothstep, abs, mod } from 'three/tsl';
+import { uniform, texture, varying, vec2, vec3, vec4, float, sin, cos, fract, dot, floor, mix, max, min, step, smoothstep, abs, mod } from 'three/tsl';
 
 export const SUN_MAP_SIZE = 1024;   // 太陽から見た奥行きの地図（影用）の画素数
 export const FOOT_SIZE = 2048;      // 足跡の地図の画素数
 export const FOOT_METERS = 128;     // 足跡の地図が覆う広さ（m）。1 画素 6.25 cm
 export const KIND = { sun: 0, sky: 1, self: 2 };
+export const MOTION = { none: 0, grass: 1, leaves: 2, trunk: 3, water: 4, cloud: 5 };
 
 export function createFx() {
   const u = {
     time: uniform(0),
     // 風：wind は揺れ幅（m）。0 で止まる
     wind: uniform(0), windDir: uniform(new THREE.Vector2(1, 0)), windSpeed: uniform(1), sheen: uniform(0.9),
+    // 種類ごとの風の効き方（倍率）。草・木の葉・木の幹は wind（m）に掛ける。水面は波の高さ（m）、雲は粒の間隔に対するゆらぎの大きさ
+    mGrass: uniform(1), mLeaves: uniform(1), mFlutter: uniform(0.5), mTrunk: uniform(0.15),
+    water: uniform(0), waterSpeed: uniform(1), waterGlint: uniform(0.6), cloud: uniform(0), cloudSpeed: uniform(1),
     // 草よけ：player は足元の位置。part は押しのける強さ（m）。0 で止まる
     player: uniform(new THREE.Vector3(0, -1e4, 0)), part: uniform(0), partRadius: uniform(1.3),
     // 足跡：foot は暗くする強さ（0〜1）、footShow は目立たせる表示（0/1）、footOrigin は地図の中心（x, z）
@@ -41,8 +46,10 @@ export function createFx() {
   footTex.magFilter = footTex.minFilter = THREE.LinearFilter; footTex.generateMipmaps = false; footTex.needsUpdate = true;
 
   /** 描画用の配列（vec4 のノード）から、粒の位置と色のノードを作る。 */
-  function nodes(P, B, C, D) {
-    const pos = P.xyz, sway = C.z, kind = mod(C.w, 4), tracks = step(3.5, C.w);
+  function nodes(P, B, C, D, jig) {
+    const pos = P.xyz, sway = C.z, kind = mod(C.w, 4), tracks = step(3.5, mod(C.w, 8)), motion = floor(C.w.div(8).add(0.01));
+    const isM = (k) => float(1).sub(step(0.5, abs(motion.sub(k))));
+    const hid = fract(sin(dot(pos, vec3(12.9898, 78.233, 37.719))).mul(43758.5453)); // 粒ごとのばらつき（位置から）
 
     // 足跡の濃さ（0〜1）。もとの位置で地図を引く。地図の外は 0
     const fuv = pos.xz.sub(u.footOrigin).div(FOOT_METERS).add(0.5);
@@ -56,8 +63,25 @@ export function createFx() {
     const gust = sin(along.mul(0.06).sub(t.mul(0.45))).mul(0.5).add(0.5);
     const wave = w1.mul(0.6).add(w2.mul(0.4)).mul(gust.mul(0.7).add(0.3));
     const calm = float(1).sub(foot.mul(0.8));                       // 踏まれた草は揺れにくい
-    const blow = wave.mul(u.wind).mul(sway).mul(calm);              // 揺れ（m）
-    const windOffset = vec3(dir.x.mul(blow), abs(blow).mul(-0.25), dir.y.mul(blow));
+    // 草はそのまま、木の葉は大きく揺れて細かく震え、幹はわずかに。どれも揺れやすさ（sway）が 0 の粒でも、動き方の札で揺れる
+    const classK = isM(1).mul(u.mGrass).add(isM(2).mul(u.mLeaves)).add(isM(3).mul(u.mTrunk));
+    const swayK = max(sway, step(0.5, motion).mul(step(motion, 3.5))).mul(classK);
+    const blow = wave.mul(u.wind).mul(swayK).mul(calm);             // 揺れ（m）
+    const tf = u.time.mul(u.windSpeed).mul(hid.mul(4).add(7));      // 葉のふるえ：粒ごとに違う速さ
+    const flutter = vec3(sin(tf.add(hid.mul(6.283))), sin(tf.mul(1.3).add(hid.mul(17.0))).mul(0.7), cos(tf.mul(0.9).add(hid.mul(29.0))))
+      .mul(u.wind).mul(u.mFlutter).mul(isM(2)).mul(gust.mul(0.6).add(0.4)).mul(0.35);
+    // 水面：風下へ進む 3 つの波を重ね、上下に揺らし、少し前後にも動かす。傾き（照り）で明るさを波打たせる
+    const wt = u.time.mul(u.waterSpeed);
+    const q1 = along.mul(1.7).sub(wt.mul(2.1)), q2 = across.mul(1.1).add(along.mul(0.6)).sub(wt.mul(1.6)), q3 = along.mul(-0.5).add(across.mul(2.9)).sub(wt.mul(2.7));
+    const ripple = sin(q1).mul(0.5).add(sin(q2).mul(0.33)).add(sin(q3).mul(0.17));
+    const slope = cos(q1).mul(0.5).add(cos(q2).mul(0.33)).add(cos(q3).mul(0.17));
+    const isWater = isM(4);
+    const waterOffset = vec3(dir.x.mul(slope), ripple.mul(2.2), dir.y.mul(slope)).mul(u.water).mul(isWater).mul(0.45);
+    // 雲・空：粒の間隔くらいの大きさで、ゆっくりわき立つ
+    const ct = u.time.mul(u.cloudSpeed).mul(0.35);
+    const billow = vec3(sin(ct.add(pos.y.mul(0.013)).add(hid.mul(6.283))), sin(ct.mul(0.7).add(pos.x.mul(0.011))).mul(0.5), cos(ct.mul(0.8).add(pos.z.mul(0.012)).add(hid.mul(3.0))))
+      .mul(P.w).mul(u.cloud).mul(isM(5));
+    const windOffset = vec3(dir.x.mul(blow), abs(blow).mul(-0.25), dir.y.mul(blow)).add(flutter).add(waterOffset).add(billow);
 
     // 草よけ：プレイヤーの足元から外へ押し、少し倒す
     const away = pos.xz.sub(u.player.xz), dist = away.length();
@@ -65,7 +89,8 @@ export function createFx() {
     const push = nearPlayer.mul(u.part).mul(sway);
     const partOffset = vec3(away.x.div(max(dist, 0.05)).mul(push), push.mul(-0.3), away.y.div(max(dist, 0.05)).mul(push));
 
-    const position = pos.add(windOffset).add(partOffset);
+    let position = pos.add(windOffset).add(partOffset);
+    if (jig) position = position.add(jig.offset); // 触って揺らす（studio/jiggle.js）
 
     // 影：太陽から見た奥行きの地図と比べる。面から少し浮かせ、4 点の平均で縁をなだらかにする（shared/light.js の visibilityAt と同じ）
     const n = D.xyz, z = P.w.mul(u.zFromSize), lift = z.mul(z).mul(u.zStep).add(0.05).add(u.sunTexel);
@@ -93,10 +118,15 @@ export function createFx() {
     const shown = mix(mix(base, relit, step(0.5, u.show)), sunGray, step(1.5, u.show));
 
     // 風で草がなびくと明るさも波打つ。足跡は暗くする
-    const sheen = float(1).add(blow.mul(u.sheen));
+    const glint = float(1).add(slope.mul(u.waterGlint).mul(min(u.water.mul(8), 1)).mul(isWater).mul(0.35)); // 水面のきらめき
+    const sheen = float(1).add(blow.mul(u.sheen)).mul(glint);
     const dark = float(1).sub(foot.mul(u.foot));
     const fxColor = mix(shown, shown.mul(sheen).mul(dark), u.colorFx);
-    const color = mix(fxColor, vec3(1, 0, 1), foot.mul(u.footShow));
+    let color = mix(fxColor, vec3(1, 0, 1), foot.mul(u.footShow));
+    if (jig) { // 表示 3 = ブラシで動いた量、4 = いま動いている粒
+      const heat = jig.heat(base.mul(0.35), step(3.5, u.show));
+      color = mix(color, heat, step(2.5, u.show));
+    }
 
     return { position, color: varying(color) }; // 色は粒ごとに一定なので、頂点側で計算して渡す
   }

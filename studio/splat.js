@@ -1,7 +1,7 @@
 // 粒の空間：書き出した奥行き・カメラ情報と、絵（絵画 or プレビズの色）から、1画素を1粒として3D空間に置いて見る。
 // 置き方は cameras.json の projection のとおり。プレビズの形そのものは使わない（線で重ねる確かめ用を除く）。
 import * as THREE from 'three/webgpu';
-import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, cameraViewMatrix, varying } from 'three/tsl';
+import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, sin, cos, cameraViewMatrix, varying } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -14,7 +14,8 @@ import { SIGMA_K, BACK_RING, BACK_BEHIND, surfelCov, roundCov, viewNormal, front
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
 import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
-import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
+import { createFx, KIND, MOTION, SUN_MAP_SIZE } from './fx.js';
+import { createJiggle, pickDepth, BRUSH_MODES } from './jiggle.js';
 import { WORLD_PROPS, worldKind, worldTransform, fitWorldScale, splatsFromWorld } from './worldimport.js';
 import { objectTargets, cutoutImage, meshPoints, fitContext, fitModel, modelSplats, inflateSplats } from './objectmodel.js';
 import { layoutFrame, worldShapes, shapeEdges, project as projectTo, rasterLayout, compareLayout, briefText } from './layoutai.js';
@@ -59,10 +60,13 @@ const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', str
 const PAINT_TYPE_KEYS = { sky: 'sky', ground: 'grass', water: 'water', figure: 'figure', far: 'far', tree: 'leaves' };
 // いまの光。方位・高さは度。色は sRGB の #rrggbb。bands は明暗の段階の数（0 = なめらか）。maxGain は明るくする上限（倍）。
 const light = { azimuth: PAINT_SUN.azimuth, elevation: PAINT_SUN.elevation, sun: LIT_LIGHT.sun, sunColor: '#ffffff', sky: LIT_LIGHT.ambient, skyColor: '#ffffff', bands: 0, maxGain: 4 };
+const uSkyYaw = uniform(0); // 天球を回した角度（雲を流す）
 const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1), uShape = uniform(1), uDome = uniform(1);
 
 // 動きと光（風・草よけ・足跡・光の付け替え）をシェーダーで付ける部品。足跡は作り直しても残るよう、ここで1つだけ持つ。
 const fx = createFx();
+// 触って揺らす（ブラシ・体で押すと、ばねで戻りながら揺れる）。粒を作り直すたびに attach し直す
+const jiggle = createJiggle();
 // 時計：hour は時刻（0〜24）、playing で自動で進む、dayLength は1日にかける秒数。manual は光のつまみを手で動かした状態（時刻と無関係）。
 const clock = { hour: 12, playing: false, dayLength: 120, manual: true };
 
@@ -430,10 +434,19 @@ function relit(c, i, out) {
   for (let k = 0; k < 3; k++) out[k] *= Math.min(L.maxGain, (L.sky[k] * h + L.sun[k] * d) / before);
 }
 
+const MOTION_OF = new Map(TYPES.map((t) => [t.id, MOTION[t.motion] || 0]));
+const MOTION_TINTS = [null, [0.75, 0.95, 0.2], [0.1, 0.75, 0.35], [0.7, 0.42, 0.2], [0.2, 0.5, 1], [1, 1, 1]];
 const DISPLAY = {
   color: painted,                                                                                     // 絵のままの色
   relit: painted,                                                                                     // 光を変えた後（色はシェーダーが掛ける）
-  relitCpu: relit,                                                                                    // 確かめ用：同じ式を CPU で計算したもの
+  relitCpu: relit,
+  jiggle: painted,                                                                                    // ブラシで動いた量（色はシェーダーが付ける）
+  jiggleSpeed: painted,                                                                               // いま動いている粒（同上）
+  windKind: (c, i, out) => { // 風での動き方：草 黄緑・木の葉 緑・幹 茶・水面 青・雲と空 白。動かない粒は暗い灰色
+    const m = MOTION_OF.get(c.type[i]) || 0, t = MOTION_TINTS[m], l = 0.35 + 0.65 * luma(c, i);
+    if (!m) return gray(out, 0.03 + 0.12 * luma(c, i));
+    out[0] = LIN[t[0] * 255 | 0] * l; out[1] = LIN[t[1] * 255 | 0] * l; out[2] = LIN[t[2] * 255 | 0] * l;
+  },                                                                                    // 確かめ用：同じ式を CPU で計算したもの
   sway: (c, i, out) => { const l = luma(c, i) * 0.35, k = c.sway[i] / 255; out[0] = l * (1 - k) + 0.1 * k; out[1] = l * (1 - k) + k; out[2] = l * (1 - k) + 0.75 * k; }, // 揺れる粒
   depth: (c, i, out) => gray(out, LIN[c.depthGray[i]]),                                               // 奥行き
   view: (c, i, out) => {                                                                              // 視点別
@@ -474,11 +487,11 @@ DISPLAY.skySrc = (c, i, out) => {
   const t = from === 1 ? VIEW_TINTS[c.view[i] % VIEW_TINTS.length] : SKY_FROM_TINT[from];
   out[0] = LIN[t[0] * 255 | 0] * l; out[1] = LIN[t[1] * 255 | 0] * l; out[2] = LIN[t[2] * 255 | 0] * l;
 };
-const NEEDS_LABELS = new Set(['relit', 'sway', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge', 'layer']);
-const TYPE_MODES = new Set(['type', 'typeMix', 'object', 'labelEdge', 'layer']); // 種類と物体の札だけで出せる表示（実在の絵の場面でも使える）
-const SHADER_SHOW = { relit: 1, sunNow: 2 };     // シェーダー側で色を作る表示
+const NEEDS_LABELS = new Set(['relit', 'sway', 'windKind', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge', 'layer']);
+const TYPE_MODES = new Set(['windKind', 'type', 'typeMix', 'object', 'labelEdge', 'layer']); // 種類と物体の札だけで出せる表示（実在の絵の場面でも使える）
+const SHADER_SHOW = { relit: 1, sunNow: 2, jiggle: 3, jiggleSpeed: 4 };     // シェーダー側で色を作る表示
 const COLOR_FX = new Set(['color', 'relit']);    // 風の照りと足跡の色を掛ける表示
-const KIND_OF = new Map(TYPES.map((t) => [t.id, KIND[t.light] + (t.tracks ? 4 : 0)]));
+const KIND_OF = new Map(TYPES.map((t) => [t.id, KIND[t.light] + (t.tracks ? 4 : 0) + 8 * (MOTION[t.motion] || 0)]));
 
 // いまの光を、シェーダーの値へ写す。
 function applyLight() {
@@ -516,7 +529,7 @@ async function cpuSun() {
 // 描画用は vec4 を4本にまとめる（WebGPU は頂点バッファの本数に上限があるため、列ごとに分けない）。
 //   A = [位置 xyz, 粒の間隔]  B = [表示する色 rgb, 境界からの距離]
 //   C = [空, 視点, 揺れやすさ, 光の受け方＋足跡が付くか]  D = [面の向き xyz, 描いたときの日なた]（C・D の使い方は studio/fx.js）
-//   E = [形 xx, xy, xz, yy]  F = [形 yz, zz, 空き, 空き]（粒の形の共分散。makeMaterials で画面の上の楕円に直す）
+//   E = [形 xx, xy, xz, yy]  F = [形 yz, zz, 粒の元の番号, 空き]（粒の形の共分散。makeMaterials で画面の上の楕円に直す）
 // 遠い順（視点からの距離）に並べ直すのは別の糸（studio/sortworker.js）で行い、描画は止めない。
 // ここでは、粒の元の並びのまま描画用の値を作って渡す（表示・粒を変えたときだけ。光や動きは描くときに付けるので送り直さない）。
 const OPACITY_PACK = 0.45; // B.w の小数部に「1 − 不透明さ」をこの幅で詰める（境界の判定 step(uEdge, B.w + 0.5) を変えない幅）
@@ -524,7 +537,7 @@ function sendSource() {
   const a = app, c = cloud; if (!a || !c) return;
   const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4), D = new Float32Array(n * 4), E = new Float32Array(n * 4), F = new Float32Array(n * 4);
   prepareLight();
-  const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0], labels = data.hasLabels;
+  const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0], labels = data.hasLabels, types = !!c.type;
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     P[o] = c.position[i * 3]; P[o + 1] = c.position[i * 3 + 1]; P[o + 2] = c.position[i * 3 + 2]; P[o + 3] = c.size[i];
@@ -532,6 +545,8 @@ function sendSource() {
     B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i] + (1 - c.opacity[i] / 255) * OPACITY_PACK; // 境界からの距離（整数）＋ 透けぐあい（小数）
     C[o] = c.sky[i]; C[o + 1] = c.view[i];
     E[o] = c.cov[i * 6]; E[o + 1] = c.cov[i * 6 + 1]; E[o + 2] = c.cov[i * 6 + 2]; E[o + 3] = c.cov[i * 6 + 3]; F[o] = c.cov[i * 6 + 4]; F[o + 1] = c.cov[i * 6 + 5];
+    F[o + 2] = i; // 粒の元の番号（並べ直しても、触って揺らすずれの画像を引けるように）
+    if (types) { C[o + 2] = c.sway[i] / 255; C[o + 3] = KIND_OF.get(c.type[i]) || 0; } // 種類の札だけの場面（実在の絵）でも風で揺らす
     if (labels) {
       C[o + 2] = c.sway[i] / 255; C[o + 3] = KIND_OF.get(c.type[i]) || 0;
       D[o] = c.normal[i * 3] / 127; D[o + 1] = c.normal[i * 3 + 1] / 127; D[o + 2] = c.normal[i * 3 + 2] / 127; D[o + 3] = c.sunVis0[i] / 255;
@@ -574,7 +589,8 @@ function requestSort() { const a = app; if (!a) return; const e = orderEye(); a.
 // ---- 材質 ----
 function makeMaterials(a) {
   const [P, B, M, D, E, F] = a.attrs.map((t) => instancedBufferAttribute(t));
-  const moved = fx.nodes(P, B, M, D); // 風・草よけ・足跡・光の付け替えを掛けた位置と色
+  const jig = jiggle.offsetNodes(F.z, P.w);  // 触って揺らしたずれと、待機中のゆらぎ（studio/jiggle.js）
+  const moved = fx.nodes(P, B, M, D, jig); // 風・草よけ・足跡・光の付け替え・触ったずれを掛けた位置と色
   const edgeOk = step(uEdge, B.w.add(0.5));                               // 境界から uEdge 画素以上はなれた粒だけ
   const skyOk = mix(float(1), uSky, M.x);                                 // 空の粒は uSky で出し入れ
   const viewOk = max(step(uView, -0.5), float(1).sub(step(0.5, abs(M.y.sub(uView))))); // 使う視点だけ
@@ -646,7 +662,10 @@ function makeSkySprite(a) {
   const P = instancedBufferAttribute(attrA), B = instancedBufferAttribute(attrB), u = fx.u;
   const mat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: false });
   const s = P.w.mul(uSize).mul(uDome).mul(SKY_SIZE), r = uv().sub(0.5).length();
-  mat.positionNode = P.xyz; mat.scaleNode = vec2(s, s);
+  // 雲を流す：天球ごと風下へゆっくり回す（uSkyYaw）。雲のわき立ち：粒ごとにゆっくり揺らす（studio/fx.js の雲と同じ式）
+  const cy = cos(uSkyYaw), sy = sin(uSkyYaw), ct = u.time.mul(u.cloudSpeed).mul(0.35), hd = fract(sin(dot(P.xyz, vec3(12.9898, 78.233, 37.719))).mul(43758.5453));
+  const billow = vec3(sin(ct.add(P.y.mul(0.013)).add(hd.mul(6.283))), sin(ct.mul(0.7).add(P.x.mul(0.011))).mul(0.5), cos(ct.mul(0.8).add(P.z.mul(0.012)).add(hd.mul(3.0)))).mul(P.w).mul(u.cloud);
+  mat.positionNode = vec3(P.x.mul(cy).sub(P.z.mul(sy)), P.y, P.x.mul(sy).add(P.z.mul(cy))).add(billow); mat.scaleNode = vec2(s, s);
   // 空は太陽の計算をせず、空の光の色と強さだけを掛ける（studio/fx.js の空の粒と同じ）
   mat.colorNode = varying(mix(mix(B.xyz, B.xyz.mul(u.skyGain), step(0.5, u.show)), vec3(0.3), step(1.5, u.show)));
   mat.opacityNode = exp(r.mul(r).mul(-18));
@@ -1458,6 +1477,8 @@ async function start(useGL) {
     sortEye: new THREE.Vector3(Infinity, 0, 0), yaw: 0, pitch: 0,
   };
   a.sorter = makeSorter(a, n);
+  // 触って揺らす：粒の元の場所を GPU へ。揺れやすさは種類の札から（札が無ければ全部同じ）
+  jiggle.attach(renderer, cloud.position, n, cloud.sway ? Float32Array.from(cloud.sway.subarray(0, n), (v) => v / 255) : null);
   a.mats = makeMaterials(a);
   a.sprite = new THREE.Sprite(a.mats.soft);
   a.sprite.count = n; a.sprite.frustumCulled = false; a.sprite.renderOrder = 1;
@@ -1499,6 +1520,7 @@ async function start(useGL) {
   $('sBackend').textContent = gpu ? 'WebGPU' : 'WebGL 2';
   $('swap').textContent = gpu ? 'WebGL 2 で描き直す' : 'WebGPU で描き直す';
   $('sCount').textContent = `${(n / 10000).toFixed(1)} 万粒`;
+  $('sJiggle').textContent = `${jiggle.size.join(' × ')} の浮動小数の画像 3 枚（1 粒 1 画素、1/120 秒刻み）`;
   const used = data.views.map((v) => colorOf(v, ui.colorSrc).key), missing = used.filter((k) => k !== ui.colorSrc).length;
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
@@ -1511,6 +1533,7 @@ async function start(useGL) {
     const now = performance.now(), dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (ui.nav === 'walk') walkStep(dt); else controls.update();
     tick(dt, now);
+    brushTick(dt);
     if (a.sky) a.sky.sprite.position.copy(camera.position); // 天球はいつもカメラが中心（空は歩いても動かない）
     if (ui.order === 'sort' && !a.sorter.busy && camera.position.distanceToSquared(a.sortEye) > 0.09) requestSort(); // 0.3 m 動いたら、前の並べ直しが終わっていれば次を頼む
     renderer.render(scene, camera);
@@ -1521,7 +1544,7 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, sky, surround, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
+  window.__splat = { jiggle, brush, app: a, cloud, data, ui, sky, surround, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
     setMode,
     // 確かめ用：表示 mode での全粒の色（リニア）を返す
     colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
@@ -1535,6 +1558,7 @@ let lastSunAt = 0, lastClockShown = 0;
 function tick(dt, now) {
   const a = app, u = fx.u, wk = a.walk.wk;
   u.time.value += dt;
+  if ($('windOn').checked && $('cloudOn').checked) uSkyYaw.value = (uSkyYaw.value + dt * Number($('cloudDrift').value) * Math.PI / 180 * Math.sign(Math.sin(Number($('windDir').value) * Math.PI / 180) || 1)) % (2 * Math.PI);
   const walking = ui.nav === 'walk' && !wk.noclip;
   if (walking) u.player.value.set(wk.feet[0], wk.feet[1], wk.feet[2]); else u.player.value.set(0, -1e4, 0);
 
@@ -1576,7 +1600,7 @@ function applyUi() {
   a.sprite.material = ui.order === 'opaque' ? a.mats.hard : a.mats.soft;
   a.controls.enabled = ui.nav === 'orbit';
   // 動き：切ってあれば強さ 0。表示の種類によっては、色の効果（風の照り・足跡の暗さ）を掛けない
-  const u = fx.u, moving = data.hasLabels;
+  const u = fx.u, moving = data.hasLabels || data.hasTypes;
   u.wind.value = moving && $('windOn').checked ? Number($('windK').value) : 0;
   u.windSpeed.value = Number($('windSpeed').value);
   const wa = Number($('windDir').value) * Math.PI / 180; u.windDir.value.set(Math.sin(wa), Math.cos(wa));
@@ -1585,13 +1609,21 @@ function applyUi() {
   u.show.value = SHADER_SHOW[ui.mode] || 0; u.colorFx.value = COLOR_FX.has(ui.mode) ? 1 : 0;
   $('oWindK').textContent = `${Math.round(Number($('windK').value) * 100)} cm`; $('oWindSpeed').textContent = `${Number($('windSpeed').value).toFixed(1)} 倍`;
   $('oWindDir').textContent = `${$('windDir').value}°`; $('oPartR').textContent = `${Number($('partR').value).toFixed(1)} m`;
+  // 種類ごとの風：草・木の葉（＋ふるえ）・幹・水面・雲
+  const wOn = moving && $('windOn').checked;
+  u.mGrass.value = Number($('mGrass').value); u.mLeaves.value = Number($('mLeaves').value); u.mFlutter.value = Number($('mFlutter').value); u.mTrunk.value = Number($('mTrunk').value);
+  u.water.value = wOn && $('waterOn').checked ? Number($('waterK').value) : 0; u.waterSpeed.value = Number($('waterSpeed').value); u.waterGlint.value = Number($('waterGlint').value);
+  u.cloud.value = wOn && $('cloudOn').checked ? Number($('cloudK').value) : 0; u.cloudSpeed.value = Number($('cloudSpeed').value);
+  for (const [id, f] of [['mGrass', (v) => `${v.toFixed(2)} 倍`], ['mLeaves', (v) => `${v.toFixed(2)} 倍`], ['mFlutter', (v) => `${v.toFixed(2)} 倍`], ['mTrunk', (v) => `${v.toFixed(2)} 倍`], ['waterK', (v) => `${Math.round(v * 100)} cm`], ['waterSpeed', (v) => `${v.toFixed(1)} 倍`], ['waterGlint', (v) => v.toFixed(2)], ['cloudK', (v) => `粒の間隔の ${v.toFixed(1)} 倍`], ['cloudSpeed', (v) => `${v.toFixed(1)} 倍`], ['cloudDrift', (v) => v ? `${v.toFixed(2)}°/秒` : '止める']]) $('o' + id[0].toUpperCase() + id.slice(1)).textContent = f(Number($(id).value));
+  applyJiggleUi();
   a.walk.shapes.visible = $('shapes').checked;
   a.walk.me.visible = ui.nav === 'walk' ? $('third').checked : $('shapes').checked; // 自分の体は、後ろから見るときと、回して見るときに当たりの形を出しているとき
   $('walkBox').hidden = ui.nav !== 'walk';
   $('hint').textContent = ui.nav === 'walk'
     ? (a.walk.wk.noclip ? '画面をクリックで視線を動かす（Esc で解除）・ W A S D で飛ぶ ・ E で上 ・ Q で下 ・ Shift で速く'
-      : '画面をクリックで視線を動かす（Esc で解除）・ W A S D か矢印で歩く ・ Shift で走る ・ Space で跳ぶ')
-    : 'ドラッグで回す ・ ホイールで前後 ・ 右ドラッグで横に動く';
+      : '画面をクリックで視線を動かす（Esc で解除）・ W A S D か矢印で歩く ・ Shift で走る ・ Space で跳ぶ ・ 左ボタンを押している間、真ん中の粒を押す')
+    : brush.tool === 'brush' && $('brushOn').checked ? '左ドラッグで粒を押す ・ 右ドラッグで回す ・ ホイールで前後 ・ Shift＋右ドラッグで横に動く'
+      : 'ドラッグで回す ・ ホイールで前後 ・ 右ドラッグで横に動く';
 }
 
 // ---- 視点 ----
@@ -1673,6 +1705,114 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener('blur', () => keys.clear());
 
+// ---- 触って揺らす（ブラシ・体） ----
+// 「回して見る」でマウスの役目を「ブラシ」にすると、左ドラッグで粒を押す（右ドラッグで回す・ホイールで前後）。
+// 「歩く」では、視線を動かしているとき（Esc で解除する前）に左ボタンを押している間、画面の真ん中で押す。体は歩くだけで押す。
+// 押す所の奥行きは、円の中の粒のうち手前から 1 割の粒の奥行き（CPU で間引いて調べる）。その前後 band m の粒だけを押す。
+const brush = { tool: 'brush', mode: 'push', down: false, inside: false, x: 0, y: 0, lastX: NaN, lastY: NaN, hit: null, pickAt: 0, vel: new THREE.Vector3(), wasDown: false, steps: 0, lastPick: '' };
+const _vp = new THREE.Matrix4(), _r = new THREE.Vector3(), _up = new THREE.Vector3(), _f = new THREE.Vector3();
+function brushActive() {
+  if (!app || !$('brushOn').checked) return false;
+  if (ui.nav === 'walk') return brush.down && !!document.pointerLockElement;
+  return brush.tool === 'brush' && brush.inside && (brush.down || $('brushHover').checked);
+}
+function brushTick(dt) {
+  const a = app, u = jiggle.u; if (!a || !jiggle.ready) return;
+  const w = stage.clientWidth, h = stage.clientHeight;
+  a.camera.updateMatrixWorld();
+  _vp.multiplyMatrices(a.camera.projectionMatrix, a.camera.matrixWorldInverse);
+  u.viewProj.value.copy(_vp); u.viewport.value.set(w, h);
+  a.camera.matrixWorld.extractBasis(_r, _up, _f); _f.negate();
+  u.camRight.value.copy(_r); u.camUp.value.copy(_up); u.camFwd.value.copy(_f);
+  const locked = ui.nav === 'walk';
+  const cx = locked ? w / 2 : brush.x, cy = locked ? h / 2 : brush.y;
+  const active = brushActive();
+  u.cursor.value.set(cx, cy);
+  if (active) {
+    // 当たりの奥行き：カーソルかカメラが動いたときだけ調べ直す（0.05 秒に 1 回まで）
+    const key = `${Math.round(cx)},${Math.round(cy)},${a.camera.position.toArray().map((v) => v.toFixed(2))},${a.camera.quaternion.toArray().map((v) => v.toFixed(3))}`;
+    const now = performance.now();
+    if (key !== brush.lastPick && now - brush.pickAt > 50) {
+      brush.pickAt = now; brush.lastPick = key;
+      brush.hit = pickDepth(cloud.position, cloud.n, cloud.sky, _vp, { x: cx, y: cy }, Number($('brushR').value), { x: w, y: h });
+    }
+    // ブラシの動きの速さ（なでる用）：画面の上の動き × 当たりの奥行きでの 1 画素の大きさ
+    if (!Number.isNaN(brush.lastX) && brush.hit) {
+      const perPx = 2 * brush.hit.depth * Math.tan(THREE.MathUtils.degToRad(a.camera.fov) / 2) / h;
+      const dx = (cx - brush.lastX) * perPx / Math.max(dt, 1e-3), dy = (cy - brush.lastY) * perPx / Math.max(dt, 1e-3);
+      const target = _r.clone().multiplyScalar(dx).addScaledVector(_up, -dy);
+      brush.vel.lerp(target, 0.5);
+    } else brush.vel.set(0, 0, 0);
+    if (locked && brush.hit) brush.vel.set(0, 0, 0);
+  } else { brush.vel.multiplyScalar(0.5); }
+  brush.lastX = active ? cx : NaN; brush.lastY = active ? cy : NaN;
+  const band = Number($('brushBand').value);
+  u.brushOn.value = active && (brush.hit || band <= 0) ? 1 : 0;
+  u.hit.value = brush.hit ? brush.hit.depth : 1e9;
+  u.brushVel.value.copy(brush.vel);
+  if (active && !brush.wasDown) u.kick.value = 1; // 「はじく」は押した瞬間に 1 回
+  brush.wasDown = active;
+  // 体：歩いていて当たり判定があるとき
+  const wk = a.walk.wk, body = ui.nav === 'walk' && $('bodyOn').checked;
+  if (body) u.feet.value.set(wk.feet[0], wk.feet[1], wk.feet[2]); else u.feet.value.set(0, -1e4, 0);
+  u.bodyR.value = wk.p.radius * Number($('bodyScale').value); u.bodyH.value = wk.p.height;
+  u.bodyK.value = body ? 1 : 0; u.lift.value = $('bodyGround').checked ? -0.05 : 0.08;
+  const moving = body && (keys.size > 0 || !wk.onGround);
+  const steps = jiggle.step(dt, u.brushOn.value > 0 || moving, $('jigPause').checked);
+  brush.steps += steps;
+  // 円の表示
+  const ring = $('brushRing'), show = $('brushOn').checked && (locked ? !!document.pointerLockElement : brush.tool === 'brush' && brush.inside);
+  ring.hidden = !show;
+  if (show) {
+    const r = Number($('brushR').value);
+    ring.style.width = ring.style.height = `${2 * r}px`; ring.style.transform = `translate(${cx - r}px, ${cy - r}px)`;
+    ring.classList.toggle('on', u.brushOn.value > 0);
+  }
+  if ((brush.statAt = (brush.statAt || 0) + dt) > 0.25) {
+    brush.statAt = 0;
+    const hit = brush.hit;
+    $('sBrush').textContent = `${active ? (hit ? `押している：奥行き ${hit.depth.toFixed(1)} m、円の中 約 ${hit.count.toLocaleString()} 粒` : '円の中に粒がない') : 'さわっていない'} ／ ${$('jigPause').checked ? '計算を止めている' : jiggle.settled ? '揺れが収まったので計算を休んでいる' : '揺れを計算中'}`;
+  }
+}
+function applyJiggleUi() {
+  const u = jiggle.u, hz = Number($('jigHz').value), z = Number($('jigDamp').value);
+  u.on.value = $('brushOn').checked || $('bodyOn').checked ? 1 : 0;
+  u.k.value = Math.pow(2 * Math.PI * hz, 2); u.zeta.value = z; u.spread.value = Number($('jigSpread').value);
+  u.typeAware.value = $('jigType').checked ? 1 : 0; u.maxShift.value = Number($('jigMax').value);
+  u.mode.value = BRUSH_MODES.indexOf(brush.mode || 'push'); u.radius.value = Number($('brushR').value); u.strength.value = Number($('brushK').value);
+  u.band.value = Number($('brushBand').value);
+  u.wobble.value = Number($('wobble').value); u.wobbleSpeed.value = Number($('wobbleSpeed').value);
+  u.heatScale.value = Math.max(0.02, Number($('brushK').value));
+  $('oJigHz').textContent = hz > 0 ? `${hz.toFixed(1)} 回/秒` : '戻らない（粘土）';
+  $('oJigDamp').textContent = z <= 0 ? '揺れ続ける' : z >= 1 ? '揺れずに戻る' : z.toFixed(2);
+  $('oJigSpread').textContent = `${Math.round(Number($('jigSpread').value) * 100)}%`;
+  $('oJigMax').textContent = `${Number($('jigMax').value).toFixed(1)} m`;
+  $('oBrushR').textContent = `${$('brushR').value} 画素`; $('oBrushK').textContent = `${Math.round(Number($('brushK').value) * 100)} cm`;
+  $('oBrushBand').textContent = Number($('brushBand').value) > 0 ? `前後 ${Number($('brushBand').value).toFixed(1)} m` : '奥まで全部';
+  $('oWobble').textContent = Number($('wobble').value) > 0 ? `粒の間隔の ${Number($('wobble').value).toFixed(2)} 倍` : 'なし';
+  $('oWobbleSpeed').textContent = `${Number($('wobbleSpeed').value).toFixed(1)} 倍`;
+  $('oBodyScale').textContent = `${Number($('bodyScale').value).toFixed(1)} 倍`;
+  $('brushBox').hidden = !$('brushOn').checked;
+  if (app) {
+    const orbitButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    app.controls.mouseButtons = brush.tool === 'brush' && ui.nav === 'orbit' && $('brushOn').checked ? { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE } : orbitButtons;
+  }
+}
+stage.addEventListener('pointermove', (e) => {
+  const r = stage.getBoundingClientRect(); brush.x = e.clientX - r.left; brush.y = e.clientY - r.top;
+  brush.inside = e.target.tagName === 'CANVAS';
+});
+stage.addEventListener('pointerleave', () => { brush.inside = false; });
+stage.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.target.tagName !== 'CANVAS') return;
+  if (ui.nav === 'walk' && !document.pointerLockElement) return; // 最初のクリックは視線の固定だけ
+  const r = stage.getBoundingClientRect(); brush.x = e.clientX - r.left; brush.y = e.clientY - r.top; brush.inside = true;
+  brush.down = true;
+});
+window.addEventListener('pointerup', (e) => { if (e.button === 0) brush.down = false; });
+window.addEventListener('mousedown', (e) => { if (e.button === 0 && document.pointerLockElement && ui.nav === 'walk') brush.down = true; });
+window.addEventListener('mouseup', (e) => { if (e.button === 0) brush.down = false; });
+
 function layout() {
   const a = app; if (!a) return;
   const w = stage.clientWidth, h = stage.clientHeight; if (!w || !h) return;
@@ -1743,7 +1883,7 @@ function setupViewButtons() {
   setupViewButtons.sharpSeen = data.hasSharp;
   press($('placement'), ui.placement);
   $('sharpBox').hidden = !data.hasSharp; $('sharpNone').hidden = data.hasSharp;
-  $('lightBox').hidden = $('moveBox').hidden = !data.hasLabels;
+  $('lightBox').hidden = !data.hasLabels; $('moveBox').hidden = !(data.hasLabels || data.hasTypes);
 }
 const SRC_BUTTONS = () => [...$('colorSrc').children, ...$('colorSrc2').children];
 function setColorSrc(v, andRebuild = true) {
@@ -1877,8 +2017,11 @@ seg('order', (v) => {
   requestSort(); applyUi();
 });
 $('jump').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { jump(b.dataset.v); if (ui.nav === 'walk') placeAtCamera(); } });
-for (const id of ['size', 'edge', 'windK', 'windSpeed', 'windDir', 'partR']) $(id).addEventListener('input', applyUi);
-for (const id of ['holes', 'wire', 'frusta', 'shapes', 'third', 'windOn', 'partOn', 'footOn', 'footShow']) $(id).addEventListener('change', applyUi);
+for (const id of ['size', 'edge', 'windK', 'windSpeed', 'windDir', 'partR', 'mGrass', 'mLeaves', 'mFlutter', 'mTrunk', 'waterK', 'waterSpeed', 'waterGlint', 'cloudK', 'cloudSpeed', 'cloudDrift', 'jigHz', 'jigDamp', 'jigSpread', 'jigMax', 'brushR', 'brushK', 'brushBand', 'wobble', 'wobbleSpeed', 'bodyScale']) $(id).addEventListener('input', applyUi);
+seg('brushTool', (v) => { brush.tool = v; applyUi(); });
+seg('brushMode', (v) => { brush.mode = v; applyUi(); });
+$('jigReset').addEventListener('click', () => jiggle.clear());
+for (const id of ['holes', 'wire', 'frusta', 'shapes', 'third', 'windOn', 'partOn', 'footOn', 'footShow', 'waterOn', 'cloudOn', 'brushOn', 'brushHover', 'bodyOn', 'bodyGround', 'jigType', 'jigPause']) $(id).addEventListener('change', applyUi);
 $('footClear').addEventListener('click', () => { if (app) fx.clearFootprints(app.camera.position.x, app.camera.position.z); });
 // 歩き方の操作
 function showWalk() { $('oEye').textContent = `${Number($('eye').value).toFixed(2)} m`; $('oSpeed').textContent = `${Number($('speed').value).toFixed(1)} m/s`; }
