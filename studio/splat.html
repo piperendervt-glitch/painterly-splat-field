@@ -20,6 +20,8 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
 <main id="stage">
   <div id="msg">準備しています…</div>
   <div id="hint"></div>
+  <div id="moveHud" hidden></div>
+  <div id="crosshair" hidden></div>
 </main>
 <aside>
   <header>
@@ -114,6 +116,8 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <div class="label"><span>歩く速さ</span><output id="oSpeed"></output></div>
       <input type="range" id="speed" min="1" max="12" step="0.5" value="4.5">
       <p class="note">走る（Shift）は歩く速さの約 2.7 倍。当たりはプレビズの形そのもので、目の高さ 1.7 m は書き出しカメラと同じ高さです。</p>
+      <div class="label">物を動かす</div>
+      <p class="note">画面のまん中で見ている物が黄色く光ります。F で持つ・放す（持っている間はホイールで近づける・遠ざける）、G で投げる、X で消す、Z で消した物を 1 つ戻す、R で全部を元の所へ戻す。軽い物（40 kg まで）は体で押せます。くわしい設定は下の「物を切り出して動かす」にあります。</p>
     </div>
     <div class="label">当たりの形</div>
     <div class="seg" id="walkShape">
@@ -214,6 +218,43 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <button type="button" class="plain" id="groundForget">AI が描いた地面を消す</button>
     <p class="note" id="groundLog" hidden style="white-space:pre-wrap"></p>
     <p class="note">最初の視点を中心に、地平線より下の向きの色を全周の絵にまとめ、絵に無い向き（絵の左右や後ろ、足もと）を埋めます。粒は、推定した地面の高さの平面に、180 m 先まで置きます。自動で埋める色は、絵の地面の「見下ろす角度ごとの色」を広げたもので、すぐ終わりますが模様は作れません。AI には、4 つの向きを 30° 見下ろした絵として 1 枚ずつ頼みます。AI が描いた背景の絵（上の欄）があると、人や木があった所の地面も元にします。表示「層」では水色、「使う視点」の「（周囲の地面）だけ」でその粒だけを見られます。遠景（木や丘の帯）はまだ足しません。</p>
+  </div>
+
+  <div class="group">
+    <h2>物を切り出して動かす</h2>
+    <div class="label">物の切り分け</div>
+    <div class="seg" id="segPick">
+      <button type="button" data-v="depth" aria-pressed="true">奥行きで分けた（今まで）</button>
+      <button type="button" data-v="sam3" aria-pressed="false">SAM 3 で切り抜いた</button>
+    </div>
+    <p class="note" id="segInfo"></p>
+    <label class="check" for="segPrompts"><span>切り抜く物（英語、カンマ区切り）</span></label>
+    <input type="text" id="segPrompts" value="person, woman, man, child, dog, monkey, umbrella, parasol, boat, sailboat, tree">
+    <button type="button" class="plain" id="segRun">SAM 3 で切り抜き直す（手元の PC の GPU）</button>
+    <div class="label">物の 3D の作り方</div>
+    <div class="seg" id="obj3dMethod">
+      <button type="button" data-v="manual" aria-pressed="true">手で選んだモデル</button>
+      <button type="button" data-v="trellis" aria-pressed="false">TRELLIS</button>
+      <button type="button" data-v="hunyuan3d" aria-pressed="false">Hunyuan3D</button>
+      <button type="button" data-v="sam3d" aria-pressed="false">SAM 3D Objects</button>
+    </div>
+    <p class="note" id="obj3dInfo"></p>
+    <label class="check" for="obj3dFull"><input type="checkbox" id="obj3dFull" checked><span>隠れた所を描き足した全身の絵があれば、そこから作る</span></label>
+    <label class="check" for="obj3dTexture"><input type="checkbox" id="obj3dTexture"><span>Hunyuan3D で色（テクスチャ）も作る（GPU メモリを多く使う）</span></label>
+    <button type="button" class="plain" id="obj3dOne">下の「物体」で選んだ物を、この作り方で 3D にする</button>
+    <button type="button" class="plain" id="obj3dAll">手前の物を全部、この作り方で 3D にする</button>
+    <button type="button" class="plain" id="fullOne">選んだ物の隠れた所を Codex で描き足す（Codex 1 回）</button>
+    <button type="button" class="plain" id="fullAll">手前の物を全部、Codex で描き足す</button>
+    <button type="button" class="plain" id="fullDry">描き足しを頼む文と絵だけ用意する（Codex は呼ばない）</button>
+    <button type="button" class="plain" id="partsStop" hidden>止める</button>
+    <p class="note" id="partsLog" hidden style="white-space:pre-wrap;max-height:220px;overflow:auto"></p>
+    <div class="label">歩く画面で動かす</div>
+    <label class="check" for="moveOn"><input type="checkbox" id="moveOn" checked><span>物を持つ・動かす・消すを使う（物理）</span></label>
+    <label class="check" for="moveTrees"><input type="checkbox" id="moveTrees"><span>木も動かせる物にする</span></label>
+    <label class="check" for="moveBoxes"><input type="checkbox" id="moveBoxes"><span>動かせる物の当たりの箱を表示する</span></label>
+    <button type="button" class="plain" id="moveReset">動かした物を全部元に戻す</button>
+    <p class="note" id="moveInfo"></p>
+    <p class="note">流れ：(1) SAM 3 で絵の中の物を 1 つずつ切り抜く（「物の切り分け」で今までの分け方と見比べられます）→ (2) 隠れた所を Codex で描き足す（任意）→ (3) 絵 1 枚から物の 3D を作る道具で、物ごとに 3D にする（作り方を切り替えて見比べられます。「手で選んだモデル」は下の「物体ごとの 3D モデル」で選んだもの）→ (4) 歩く画面で、物を持つ・動かす・投げる・消す。物を消した後ろには、背後の層（AI が描いた背景の絵があればその色）が見えます。SAM 3・TRELLIS・Hunyuan3D・SAM 3D Objects は手元の PC の WSL で動かします（docs/object-interaction.md）。</p>
   </div>
 
   <div class="group">

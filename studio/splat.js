@@ -1,7 +1,7 @@
 // 粒の空間：書き出した奥行き・カメラ情報と、絵（絵画 or プレビズの色）から、1画素を1粒として3D空間に置いて見る。
 // 置き方は cameras.json の projection のとおり。プレビズの形そのものは使わない（線で重ねる確かめ用を除く）。
 import * as THREE from 'three/webgpu';
-import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, cameraViewMatrix, varying } from 'three/tsl';
+import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, cameraViewMatrix, varying, texture } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -16,7 +16,8 @@ import { createWalk } from './walk.js';
 import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
 import { WORLD_PROPS, worldKind, worldTransform, fitWorldScale, splatsFromWorld } from './worldimport.js';
-import { objectTargets, cutoutImage, meshPoints, fitContext, fitModel, modelSplats, inflateSplats } from './objectmodel.js';
+import { objectTargets, cutoutImage, meshPoints, plyPoints, fitContext, fitModel, modelSplats, inflateSplats } from './objectmodel.js';
+import { createMover, assignSlots, slotFor, attachPhysics, SLOTS, PUSH_MASS } from './interact.js';
 import { layoutFrame, worldShapes, shapeEdges, project as projectTo, rasterLayout, compareLayout, briefText } from './layoutai.js';
 import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, sampleMap, skyDistance, skyNoise, withAi } from './skydome.js';
 
@@ -54,6 +55,14 @@ const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', str
 // walkShape = 歩くときの当たりの形（auto = プレビズのある場面はプレビズ、絵から作った場面は推定 / previz / estimate）
 // backDepth = 背後の層の位置（calc 計算で延ばす / plate AI が描いた背景の絵を SHARP に通した奥行き。あれば）
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
+
+// 物を切り出して動かす：seg = 物の切り分けの版（depth = 奥行きで分けた今までの版 / sam3 = SAM 3 で切り抜いた版。painting/build.mjs --variant）、
+// move = 歩く画面で物を持つ・動かす・消す（studio/interact.js）。trees = 木も動かせる物にする、boxes = 当たりの箱を表示する
+ui.seg = 'depth'; ui.move = { on: true, trees: false, boxes: false };
+try { const v = JSON.parse(localStorage.getItem('psf-parts') || '{}'); if (v.seg) ui.seg = v.seg; Object.assign(ui.move, v.move || {}); } catch { /* 無ければ最初の値 */ }
+const saveParts = () => { try { localStorage.setItem('psf-parts', JSON.stringify({ seg: ui.seg, move: ui.move })); } catch { /* 保存できなくても動く */ } };
+const mover = createMover(); // 動かせる物の変換の絵（シェーダーと並べ直しで使う）
+let inter = null;            // 物理と操作（studio/interact.js の attachPhysics）
 
 // 実在の絵から作った場面（painting/build.mjs）の種類の名前を、shared/labels.js の種類へ読み替える
 const PAINT_TYPE_KEYS = { sky: 'sky', ground: 'grass', water: 'water', figure: 'figure', far: 'far', tree: 'leaves' };
@@ -100,6 +109,12 @@ async function loadData() {
   const cams = await camsRes.json();
   const state = stateRes.ok ? await stateRes.json() : { views: [] };
   const { near, far } = cams.depth;
+  // 物の切り分けの版：SAM 3 で切り抜いた版を選んでいて、その版があれば、奥行き・種類・物体の絵をその版に替える
+  const parts = state.parts || { seg: {}, obj3d: [], full: [] };
+  let segDoc = null;
+  if (ui.seg !== 'depth' && parts.seg[ui.seg]) { const r = await fetch(`/files/previz-export/${parts.seg[ui.seg]}`, { cache: 'no-store' }); if (r.ok) segDoc = await r.json(); }
+  const segUsed = segDoc ? ui.seg : 'depth';
+  if (segDoc) cams.views = cams.views.map((v, i) => (i ? v : { ...v, ...segDoc.files }));
   const views = [];
   for (const v of cams.views) {
     const st = state.views.find((s) => s.name === v.name) || {};
@@ -155,7 +170,8 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, worldFile: !!state.world, objectFiles: state.objects || {}, painting: views.some((v) => v.painting) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, worldFile: !!state.world, objectFiles: state.objects || {}, painting: views.some((v) => v.painting),
+    parts, segUsed, segObjects: segDoc ? segDoc.objects : (cams.objects || []) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -532,6 +548,7 @@ function sendSource() {
     B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i] + (1 - c.opacity[i] / 255) * OPACITY_PACK; // 境界からの距離（整数）＋ 透けぐあい（小数）
     C[o] = c.sky[i]; C[o + 1] = c.view[i];
     E[o] = c.cov[i * 6]; E[o + 1] = c.cov[i * 6 + 1]; E[o + 2] = c.cov[i * 6 + 2]; E[o + 3] = c.cov[i * 6 + 3]; F[o] = c.cov[i * 6 + 4]; F[o + 1] = c.cov[i * 6 + 5];
+    F[o + 2] = slotFor(mover, c, i, FRONT); // 動かせる物の枠（0 = 動かない。studio/interact.js）
     if (labels) {
       C[o + 2] = c.sway[i] / 255; C[o + 3] = KIND_OF.get(c.type[i]) || 0;
       D[o] = c.normal[i * 3] / 127; D[o + 1] = c.normal[i * 3 + 1] / 127; D[o + 2] = c.normal[i * 3 + 2] / 127; D[o + 3] = c.sunVis0[i] / 255;
@@ -539,7 +556,10 @@ function sendSource() {
   }
   const arrays = [P, B, C, D, E, F];
   a.sorter.worker.postMessage({ type: 'source', arrays }, arrays.map((x) => x.buffer));
+  sendMoves();
 }
+// 動かせる物の今の変換を、並べ直しの係にも渡す（動いた物の粒も遠い順に並ぶように）
+function sendMoves() { const a = app; if (a && a.sorter) a.sorter.worker.postMessage({ type: 'xf', mats: mover.matrices() }); }
 // 並べ直しの係。終わった配列を描画用の値と入れ替え、外した方を次の並べ直しの書き込み先に回す。
 function makeSorter(a, n) {
   const worker = new Worker(new URL('./sortworker.js', import.meta.url), { type: 'module' });
@@ -573,12 +593,22 @@ function requestSort() { const a = app; if (!a) return; const e = orderEye(); a.
 
 // ---- 材質 ----
 function makeMaterials(a) {
-  const [P, B, M, D, E, F] = a.attrs.map((t) => instancedBufferAttribute(t));
-  const moved = fx.nodes(P, B, M, D); // 風・草よけ・足跡・光の付け替えを掛けた位置と色
+  const [P0, B, M, D0, E0, F0] = a.attrs.map((t) => instancedBufferAttribute(t));
+  // 動かせる物：枠（F.z）の変換（studio/interact.js の絵）を、位置・面の向き・形に掛ける。枠 0 は単位行列
+  const xv = F0.z.add(0.5).div(SLOTS), r0 = texture(mover.tex, vec2(0.125, xv)), r1 = texture(mover.tex, vec2(0.375, xv)), r2 = texture(mover.tex, vec2(0.625, xv)), flags = texture(mover.tex, vec2(0.875, xv));
+  const R0 = r0.xyz, R1 = r1.xyz, R2 = r2.xyz, rot = (v) => vec3(dot(R0, v), dot(R1, v), dot(R2, v));
+  const P = vec4(rot(P0.xyz).add(vec3(r0.w, r1.w, r2.w)), P0.w), D = vec4(rot(D0.xyz), D0.w);
+  // 形（共分散 S）：R S Rᵀ
+  const S0o = vec3(E0.x, E0.y, E0.z), S1o = vec3(E0.y, E0.w, F0.x), S2o = vec3(E0.z, F0.x, F0.y);
+  const T0 = vec3(dot(R0, S0o), dot(R0, S1o), dot(R0, S2o)), T1 = vec3(dot(R1, S0o), dot(R1, S1o), dot(R1, S2o)), T2 = vec3(dot(R2, S0o), dot(R2, S1o), dot(R2, S2o));
+  const E = vec4(dot(T0, R0), dot(T0, R1), dot(T0, R2), dot(T1, R1)), F = vec4(dot(T1, R2), dot(T2, R2), F0.z, F0.w);
+  const picked = varying(flags.y); // 選んでいる物（見ている物）は少し明るく、黄色に寄せる
+  const moved0 = fx.nodes(P, B, M, D); // 風・草よけ・足跡・光の付け替えを掛けた位置と色
+  const moved = { position: moved0.position, color: mix(moved0.color, moved0.color.mul(0.55).add(vec3(0.5, 0.42, 0.08)), picked.mul(0.6)) };
   const edgeOk = step(uEdge, B.w.add(0.5));                               // 境界から uEdge 画素以上はなれた粒だけ
   const skyOk = mix(float(1), uSky, M.x);                                 // 空の粒は uSky で出し入れ
   const viewOk = max(step(uView, -0.5), float(1).sub(step(0.5, abs(M.y.sub(uView))))); // 使う視点だけ
-  const show = edgeOk.mul(skyOk).mul(viewOk);
+  const show = edgeOk.mul(skyOk).mul(viewOk).mul(flags.x); // flags.x = 0：消した物
   const s = P.w.mul(uSize);
   const r = uv().sub(0.5).length();
 
@@ -999,7 +1029,7 @@ function showWorld() {
 // 絵の中の物体を 1 つずつ切り抜いて外の道具で 3D モデルにしてもらい、それを絵の物体の輪郭に合わせて置いて、粒にする。
 const objs = { models: new Map(), tried: false, lines: [], busy: '' }; // models：物体の番号 → { name, meshes, isObj, fit, key, error }
 const objectViewIndex = () => data.views.length * 3 + 2;
-ui.objects = { show: true, replace: true, paint: true, inflate: false, adjust: {} }; // adjust：物体の番号 → { yaw（度。自動の向きに足す）, scale（自動の大きさに掛ける） }
+ui.objects = { show: true, replace: true, paint: true, inflate: false, adjust: {}, method: 'manual', full: true, texture: false }; // adjust：物体の番号 → { yaw（度。自動の向きに足す）, scale（自動の大きさに掛ける） }
 try { Object.assign(ui.objects, JSON.parse(localStorage.getItem('psf-objects') || '{}')); } catch { /* 無ければ最初の値 */ }
 const saveObjects = () => { try { localStorage.setItem('psf-objects', JSON.stringify(ui.objects)); } catch { /* 保存できなくても動く */ } };
 const objectTargetList = () => { if (!data.objectTargets) { const v = centerView(); data.objectTargets = v.hasTypes ? objectTargets(v, { front: FRONT }) : []; } return data.objectTargets; };
@@ -1044,19 +1074,31 @@ async function loadModelMeshes(buffer, name) {
 async function loadObjectFiles() {
   if (objs.tried) return;
   objs.tried = true;
+  if (ui.objects.method !== 'manual') { // 外の道具（TRELLIS など）で作った、物ごとの 3D（paint/objects.mjs make3d）
+    for (const e of (data.parts.obj3d || []).filter((x) => x.seg === data.segUsed && x.method === ui.objects.method)) {
+      try {
+        const name = e.glb || e.ply, res = await fetch(`/files/paint-out/${name}`, { cache: 'no-store' }); if (!res.ok) continue;
+        const buf = await res.arrayBuffer();
+        objs.models.set(e.id, e.glb ? await loadModelMeshes(buf, name) : { name, ply: parsePly(buf), meshes: true, isPly: true, fit: null, key: '', error: '' });
+      } catch (err) { console.error(err); objs.models.set(e.id, { name: e.glb || e.ply, meshes: null, error: err.message }); }
+    }
+    return;
+  }
   for (const [id, name] of Object.entries(data.objectFiles || {})) {
     try { const res = await fetch(`/files/paint-out/${name}`, { cache: 'no-store' }); if (res.ok) objs.models.set(Number(id), await loadModelMeshes(await res.arrayBuffer(), name)); }
     catch (e) { console.error(e); objs.models.set(Number(id), { name, meshes: null, error: e.message }); }
   }
 }
+// モデルの表面の点（メッシュでも 3D の粒でも同じ形で）
+const modelPoints = (model, n, up, seed = 1) => (model.isPly ? plyPoints(model.ply, n, { up, seed }) : meshPoints(model.meshes, n, { up, seed }));
 // 物体 1 つぶんの置き方（向き・大きさ・位置）。色のもとや手での直しが同じなら作り直さない
 function objectFit(target, model) {
   const v = centerView(), c = colorOf(v, ui.colorSrc), adj = objectAdjust(target.id), key = `${c.key}:${adj.yaw}:${adj.scale}`;
   if (model.fit && model.key === key) return model.fit;
   const cx = fitContext({ W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics }, target, { px: c.px, front: FRONT });
   let best = null;
-  for (const up of model.isObj ? ['y', 'z'] : ['y']) { // OBJ は上の向きが決まっていないので、両方試して合うほうを使う
-    const pts = meshPoints(model.meshes, 12000, { up }), f = fitModel(pts, cx, { manual: adj.yaw * Math.PI / 180, scaleMul: adj.scale });
+  for (const up of model.isObj || model.isPly ? ['y', 'z'] : ['y']) { // OBJ と 3D の粒（.ply）は上の向きが決まっていないので、両方試して合うほうを使う
+    const pts = modelPoints(model, 12000, up), f = fitModel(pts, cx, { manual: adj.yaw * Math.PI / 180, scaleMul: adj.scale });
     if (!best || f.auto.iou > best.auto.iou) best = { ...f, up, height: pts.size[1] * f.scale, hasColor: pts.hasColor, area: pts.area };
   }
   let r = 0, g = 0, b = 0, k = 0; // 物体の絵の色の平均（モデルに色が無いときの、見えていない側の色）
@@ -1085,7 +1127,7 @@ function objectSplats() {
       const type = TYPE_BY_ID.get(target.typeId) || {};
       objs.lines.push(`物体 ${target.id}（${type.name || '?'}）：${model.name}。輪郭の重なり ${Math.round(fit.iou * 100)}%${fit.hasColor ? `、色の近さ ${Math.round(fit.colorSim * 100)}%` : '（モデルに色なし）'}、向き ${Math.round(fit.offset * 180 / Math.PI)}°、高さ ${fit.height.toFixed(2)} m${fit.up === 'z' ? '（+Z を上として読みました）' : ''}`);
       if (!ui.objects.show) continue;
-      const pts = meshPoints(model.meshes, n, { up: fit.up, seed: 2 });
+      const pts = modelPoints(model, n, fit.up, 2);
       const p = modelSplats(pts, fit, view, target, { spacing, px: c.px, paint: ui.objects.paint, sway: Math.round((type.sway || 0) * 255), viewId: objectViewIndex(), fallback: fit.fallback, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
       out.push({ ...p, id: target.id });
     } catch (e) { console.error(e); objs.lines.push(`物体 ${target.id}：${model.name} を置けませんでした（${e.message}）`); }
@@ -1139,6 +1181,91 @@ async function forgetObjectModel(id) {
   objs.models.delete(id);
   for (const ext of ['glb', 'obj']) await fetch(`/api/paint-out/object_${id}.${ext}`, { method: 'DELETE' }).catch(() => {});
 }
+
+// ---- 物を切り出して動かす（paint/objects.mjs、studio/interact.js、studio/physics.js） ----
+const METHOD_NAMES = { manual: '手で選んだモデル', trellis: 'TRELLIS', hunyuan3d: 'Hunyuan3D', sam3d: 'SAM 3D Objects' };
+const objLabel = (id) => { const o = (data.segObjects || []).find((x) => x.id === id); return o ? (o.label || o.type || '') : ''; };
+// 動かせる物：手前の物（木は ui.move.trees のときだけ）で、300 画素以上
+function movableList() {
+  if (!ui.move.on || !data || !data.hasTypes) { mover.clear(); return []; }
+  if (!data.moveTargets) { const v = centerView(); data.moveTargets = objectTargets(v, { front: FRONT, minPixels: 300 }); }
+  const tree = new Set(['leaves', 'trunk']);
+  return assignSlots(mover, data.moveTargets, (t) => ui.move.trees || !tree.has((TYPE_BY_ID.get(t.typeId) || {}).key));
+}
+async function setupMoves(a, scene, list) {
+  $('moveInfo').textContent = '';
+  if (!list.length) { if (ui.move.on && data.hasTypes) $('moveInfo').textContent = '動かせる物がありません。'; return; }
+  try {
+    const v = centerView(), eye = [v.c2w[3], v.c2w[7], v.c2w[11]], p = a.walk.wk.p;
+    inter = await attachPhysics(mover, { cloud, list, front: FRONT, W: a.walk.W, kindOf: (t) => (TYPE_BY_ID.get(t) || {}).key || 'default', eye, scene, player: { radius: p.radius, height: p.height } });
+    inter.boxes.visible = ui.move.boxes;
+    const heavy = [...inter.phys.bodies.values()].filter((b) => b.mass >= PUSH_MASS).length;
+    $('moveInfo').textContent = `動かせる物 ${inter.count} 個（重い物 ${heavy} 個は当たりで止まり、軽い物 ${inter.count - heavy} 個は体で押せます）。重さは種類と大きさからの見積もりです。`;
+    sendMoves();
+  } catch (e) { console.error(e); inter = null; $('moveInfo').textContent = `物理を用意できませんでした：${e.message}`; }
+}
+let lastAim = 0;
+function moveStep(dt, now) {
+  const a = app, wk = a.walk.wk, walking = ui.nav === 'walk' && !wk.noclip;
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(a.camera.quaternion).toArray(), eye = a.camera.position.toArray();
+  if (inter.update(dt, { walking, feet: wk.feet, eye, dir })) { sendMoves(); requestSort(); }
+  const hud = $('moveHud'), cross = $('crosshair');
+  hud.hidden = cross.hidden = ui.nav !== 'walk';
+  if (ui.nav !== 'walk') { if (mover.select(0)) mover.tex.needsUpdate = true; return; }
+  if (now - lastAim < 90) return;
+  lastAim = now;
+  const hit = inter.aim(eye, dir), held = inter.holding();
+  hud.textContent = held !== null ? `物体 ${held}${objLabel(held) ? `（${objLabel(held)}）` : ''} を持っています ・ F で放す ・ G で投げる ・ ホイールで近づける / 遠ざける`
+    : hit ? `物体 ${hit.id}${objLabel(hit.id) ? `（${objLabel(hit.id)}）` : ''}・${Math.round(inter.phys.mass(hit.id))} kg・${hit.dist.toFixed(1)} m ・ F で持つ ・ X で消す` : '';
+}
+function moveKey(code) {
+  if (!inter || ui.nav !== 'walk') return false;
+  const a = app, dir = new THREE.Vector3(0, 0, -1).applyQuaternion(a.camera.quaternion).toArray(), eye = a.camera.position.toArray();
+  if (code === 'KeyF') { inter.grabOrDrop(eye, dir); return true; }
+  if (code === 'KeyG') { inter.throwHeld(dir); return true; }
+  if (code === 'KeyX') { inter.removeAimed(eye, dir); return true; }
+  if (code === 'KeyZ') { inter.undoRemove(); return true; }
+  if (code === 'KeyR') { inter.resetAll(); return true; }
+  return false;
+}
+
+// 切り分けの版と、物の 3D の作り方の表示
+function showParts() {
+  if (!data) return;
+  const has = data.parts.seg || {}, painting = !!data.painting;
+  for (const b of $('segPick').children) b.disabled = b.dataset.v !== 'depth' && !has[b.dataset.v];
+  press($('segPick'), data.segUsed);
+  const so = data.segObjects || [], labels = so.filter((o) => o.label).length;
+  $('segInfo').textContent = !painting ? '物の切り分けの版は、絵から作った場面（painting/build.mjs）だけで使えます。'
+    : `いまの切り分け：${data.segUsed === 'depth' ? '奥行きで分けた（今まで）' : 'SAM 3 で切り抜いた'}。物体 ${so.length} 個${labels ? `（SAM 3 の切り抜き ${labels} 個：${[...new Set(so.filter((o) => o.label).map((o) => o.label))].join('、')}）` : ''}。${has.sam3 ? '' : 'SAM 3 の版はまだありません。'}`;
+  $('segRun').disabled = !painting;
+  press($('obj3dMethod'), ui.objects.method);
+  const mine = (data.parts.obj3d || []).filter((e) => e.seg === data.segUsed), fulls = (data.parts.full || []).filter((e) => e.seg === data.segUsed);
+  const count = (m) => mine.filter((e) => e.method === m).length;
+  $('obj3dInfo').textContent = `この切り分けで作った 3D：${['trellis', 'hunyuan3d', 'sam3d'].map((m) => `${METHOD_NAMES[m]} ${count(m)} 個`).join('、')}。描き足した全身の絵 ${fulls.length} 枚。${ui.objects.method === 'manual' ? '' : `いまは ${METHOD_NAMES[ui.objects.method]} の 3D を置いています（無い物は、輪郭をふくらませた形か絵の粒のまま）。`}`;
+  $('obj3dFull').checked = ui.objects.full; $('obj3dTexture').checked = ui.objects.texture;
+  const targets = objectTargetList();
+  $('fullAll').textContent = `手前の物を全部（${targets.length} 個）、Codex で描き足す（Codex ${targets.length} 回）`;
+  $('obj3dAll').textContent = `手前の物を全部（${targets.length} 個）、この作り方で 3D にする`;
+  for (const id of ['obj3dOne', 'obj3dAll']) $(id).disabled = ui.objects.method === 'manual';
+  $('moveOn').checked = ui.move.on; $('moveTrees').checked = ui.move.trees; $('moveBoxes').checked = ui.move.boxes;
+}
+let partsJob = false, partsStop = false;
+async function runParts(body, what) {
+  if (partsJob) return;
+  partsJob = true; partsStop = false;
+  const log = (t) => { $('partsLog').hidden = false; $('partsLog').textContent = t; };
+  $('partsStop').hidden = false;
+  try {
+    await api('/api/objects/run', body);
+    let st;
+    for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (partsStop) await api('/api/paint/stop'); log(`${what}（${st.seconds} 秒）\n${st.log.split('\n').slice(-12).join('\n')}`); }
+    log(`${what}：${st.code === 0 ? '終わりました' : '止まりました'}\n${st.log.split('\n').slice(-16).join('\n')}`);
+    if (st.code === 0 && !body.dryRun) { data = null; objs.tried = false; objs.models.clear(); partsJob = false; $('partsStop').hidden = true; rebuild(); return; }
+  } catch (e) { log(`${what}：${e.message}`); }
+  partsJob = false; $('partsStop').hidden = true;
+}
+const pickedIds = (all) => (all ? objectTargetList().map((t) => t.id) : [Number($('objPick').value)].filter(Boolean));
 
 // ---- AI に形の配置を書かせる（Codex。絵は作らず、文だけ。studio/layoutai.js） ----
 // 絵・奥行きの絵・カメラと奥行きの表を見せて、箱と円柱の一覧（layout_ai.json）を書いてもらう。
@@ -1431,6 +1558,7 @@ async function start(useGL) {
   if (starting) return; starting = true;
   say('準備しています…');
   const keep = app ? { pos: app.camera.position.clone(), quat: app.camera.quaternion.clone(), target: app.controls.target.clone(), feet: app.walk.wk.feet.slice() } : null;
+  if (inter) { inter.dispose(); inter = null; }
   if (app) { app.sorter.worker.terminate(); app.renderer.setAnimationLoop(null); app.controls.dispose(); app.renderer.domElement.remove(); app.renderer.dispose(); app = null; }
 
   try { if (!data) { data = await loadData(); setupViewButtons(); } }
@@ -1448,6 +1576,7 @@ async function start(useGL) {
   await loadObjectFiles();                 // paint-out/object_<番号>.glb（物体ごとの 3D モデル）があれば読む
   cloud = buildCloud();
   const n = cloud.n;
+  const movable = movableList(); // 動かせる物に枠を振る（sendSource の前に）
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 6000);
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -1485,6 +1614,7 @@ async function start(useGL) {
   if (keep) { camera.position.copy(keep.pos); camera.quaternion.copy(keep.quat); controls.target.copy(keep.target); syncAngles(); }
   else jump('0');
   if (keep && keep.feet) a.walk.place(...keep.feet); else placeAtCamera();
+  await setupMoves(a, scene, movable);
 
   sendSource(); requestSort();
   sky.maps.clear(); sky.fillKey = '';
@@ -1503,7 +1633,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi(); showWorld(); showObjects();
+  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi(); showWorld(); showObjects(); showParts();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -1521,7 +1651,7 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, sky, surround, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
+  window.__splat = { get inter() { return inter; }, mover, app: a, cloud, data, ui, sky, surround, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
     setMode,
     // 確かめ用：表示 mode での全粒の色（リニア）を返す
     colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
@@ -1534,6 +1664,7 @@ const lastStep = { x: NaN, z: NaN, side: 1 };
 let lastSunAt = 0, lastClockShown = 0;
 function tick(dt, now) {
   const a = app, u = fx.u, wk = a.walk.wk;
+  if (inter) moveStep(dt, now);
   u.time.value += dt;
   const walking = ui.nav === 'walk' && !wk.noclip;
   if (walking) u.player.value.set(wk.feet[0], wk.feet[1], wk.feet[2]); else u.player.value.set(0, -1e4, 0);
@@ -1667,6 +1798,7 @@ window.addEventListener('keydown', (e) => {
   const t = e.target; // 文字を打つ欄では歩かない。チェックやつまみに触った後でも、すぐ歩けるようにする
   if (ui.nav !== 'walk' || t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && !/^(checkbox|range|radio|color)$/.test(t.type))) return;
   keys.add(e.code);
+  if (!e.repeat && moveKey(e.code)) e.preventDefault();
   if (e.code === 'Space' && !e.repeat) jumpQueued = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
@@ -1845,6 +1977,25 @@ for (const [id, set] of [['objYaw', (a, x) => { a.yaw = x; }], ['objScale', (a, 
 }
 $('objAuto').addEventListener('click', () => { delete ui.objects.adjust[Number($('objPick').value)]; saveObjects(); rebuild(); });
 $('objForget').addEventListener('click', async () => { await forgetObjectModel(Number($('objPick').value)); rebuild(); });
+seg('segPick', (v) => { ui.seg = v; saveParts(); data = null; objs.tried = false; objs.models.clear(); rebuild(); });
+seg('obj3dMethod', (v) => { ui.objects.method = v; saveObjects(); objs.tried = false; objs.models.clear(); rebuild(); });
+$('obj3dFull').addEventListener('change', () => { ui.objects.full = $('obj3dFull').checked; saveObjects(); });
+$('obj3dTexture').addEventListener('change', () => { ui.objects.texture = $('obj3dTexture').checked; saveObjects(); });
+$('segRun').addEventListener('click', () => runParts({ cmd: 'segment', prompts: $('segPrompts').value }, 'SAM 3 で切り抜いています'));
+for (const [id, all] of [['obj3dOne', false], ['obj3dAll', true]]) $(id).addEventListener('click', () => {
+  const ids = pickedIds(all); if (!ids.length) return;
+  runParts({ cmd: 'make3d', seg: data.segUsed, method: ui.objects.method, ids, source: ui.objects.full ? 'full' : 'cut', texture: ui.objects.texture }, `${METHOD_NAMES[ui.objects.method]} で ${ids.length} 個の物を 3D にしています`);
+});
+for (const [id, all, dry] of [['fullOne', false, false], ['fullAll', true, false], ['fullDry', false, true]]) $(id).addEventListener('click', () => {
+  const ids = pickedIds(all); if (!ids.length) return;
+  runParts({ cmd: 'complete', seg: data.segUsed, ids, dryRun: dry }, dry ? '頼む文と絵を用意しています' : `Codex で ${ids.length} 個の物の全身を描いています`);
+});
+$('partsStop').addEventListener('click', () => { partsStop = true; });
+$('moveOn').addEventListener('change', () => { ui.move.on = $('moveOn').checked; saveParts(); rebuild(); });
+$('moveTrees').addEventListener('change', () => { ui.move.trees = $('moveTrees').checked; saveParts(); rebuild(); });
+$('moveBoxes').addEventListener('change', () => { ui.move.boxes = $('moveBoxes').checked; saveParts(); if (inter) inter.boxes.visible = ui.move.boxes; });
+$('moveReset').addEventListener('click', () => { if (inter) inter.resetAll(); });
+stage.addEventListener('wheel', (e) => { if (inter && ui.nav === 'walk' && inter.holding() !== null) { inter.scroll(e.deltaY > 0 ? -0.4 : 0.4); e.preventDefault(); } }, { passive: false });
 $('worldFile').addEventListener('change', async () => {
   const file = $('worldFile').files[0]; if (!file) return;
   $('worldInfo').textContent = '読み込んでいます…';

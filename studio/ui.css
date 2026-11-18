@@ -42,3 +42,5 @@ dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
   body.tool{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) auto}
   aside{border-left:0;border-top:1px solid var(--line);max-height:50%;padding:14px 16px}
 }
+#moveHud{position:absolute;left:50%;top:calc(50% + 22px);transform:translateX(-50%);color:#fff;font-size:12px;pointer-events:none;text-shadow:0 1px 3px #000;white-space:nowrap}
+#crosshair{position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:50%;background:#fff;box-shadow:0 0 3px #000;pointer-events:none;opacity:.8}
