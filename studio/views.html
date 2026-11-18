@@ -11,6 +11,15 @@ body.tool{grid-template-columns:minmax(0,1fr) 360px}
 .pane{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0}
 .pane canvas{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:6px;display:block}
 #map{aspect-ratio:1/1;cursor:crosshair;touch-action:none}
+#view3d{position:relative;aspect-ratio:1/1;max-height:calc(100vh - 210px);min-height:280px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--panel);touch-action:none}
+#view3d canvas{position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:0}
+.v3-overlay{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.v3-label{position:absolute;font-size:12px;font-weight:700;text-shadow:0 0 3px #000,0 0 3px #000;white-space:nowrap}
+.v3-frame{position:absolute;border:2px solid #9ccf5a;box-shadow:0 0 0 2000px rgba(0,0,0,.45)}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.bar .seg{flex:0 0 auto;min-width:150px}
+.bar button.plain{width:auto;padding:6px 10px}
+.bar button.plain[aria-pressed="true"]{background:var(--moss);color:#10140c;font-weight:700}
 #shot{aspect-ratio:2/3;height:calc(100vh - 130px);min-height:300px;width:auto;max-width:100%;align-self:center}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
@@ -25,12 +34,36 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
 <body class="tool">
 <main id="work">
   <section class="pane">
-    <h2>上から見た地図</h2>
-    <canvas id="map" width="720" height="720"></canvas>
-    <div class="legend">
-      <span><i style="background:#9ccf5a"></i>候補のカメラ（クリックで移動。真下を向くと輪で表示）</span>
-      <span><i style="background:#fff"></i>見る先（Shift＋クリック）</span>
-      <span><i style="background:#ff00ff"></i>穴の多い位置（探した結果）</span>
+    <div class="bar">
+      <div class="seg" id="space">
+        <button type="button" data-v="3d" aria-pressed="true">3D</button>
+        <button type="button" data-v="map" aria-pressed="false">上からの地図</button>
+      </div>
+      <button type="button" class="plain" id="lock" aria-pressed="false">カメラの目で見る</button>
+      <button type="button" class="plain v3only" id="frameAll">全体を見る</button>
+      <button type="button" class="plain v3only" data-look="0,1,0.001">上</button>
+      <button type="button" class="plain v3only" data-look="0,0.15,1">前</button>
+      <button type="button" class="plain v3only" data-look="1,0.15,0">横</button>
+    </div>
+    <div id="pane3d" class="pane">
+      <div id="view3d"></div>
+      <div class="bar">
+        <span class="label">矢印で動かすもの</span>
+        <div class="seg" id="handle">
+          <button type="button" data-v="camera" aria-pressed="true">カメラ</button>
+          <button type="button" data-v="target" aria-pressed="false">見る先</button>
+        </div>
+      </div>
+      <p class="note" id="hint3d">左ドラッグで回す、右ドラッグでずらす、ホイールで寄る・引く。緑の玉が候補のカメラ、白い玉が見る先で、矢印（3 方向）や四角（面に沿う）を掴むと動きます。形をダブルクリックすると、そこが見る先になります。</p>
+      <p class="note warn" id="no3d" hidden></p>
+    </div>
+    <div id="paneMap" class="pane" hidden>
+      <canvas id="map" width="720" height="720"></canvas>
+      <div class="legend">
+        <span><i style="background:#9ccf5a"></i>候補のカメラ（クリックで移動。真下を向くと輪で表示）</span>
+        <span><i style="background:#fff"></i>見る先（Shift＋クリック）</span>
+        <span><i style="background:#ff00ff"></i>穴の多い位置（探した結果）</span>
+      </div>
     </div>
   </section>
   <section class="pane">

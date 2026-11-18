@@ -1,4 +1,5 @@
 // 視点を足す：穴の多い視点を探す → プレビズを書き出し直す → すでにある絵を新しい視点へ写す → 穴だけ埋める。
+import { createView3D } from './view3d.js';
 import { loadViews, loadImage, sceneTriangles, analyze, warpInto, localFill, VIEW_TINTS, LIGHTS } from './viewdata.js';
 
 const $ = (id) => document.getElementById(id);
@@ -17,6 +18,7 @@ const PREVIEW_W = 160, PREVIEW_H = 240, SEARCH_W = 40, SEARCH_H = 60;
 let D = null, meshes = null, busy = false, mode = 'painted', stage = 'reproj', light = 'free';
 const sfx = () => LIGHTS[light].sfx;
 let repaired = '', heading = 0; // heading：カメラの水平の向き（真下を向いている間も覚えておく）
+let v3 = null; // 3D の画面（作れなかったら null のまま、地図だけで使う）
 let cand = { position: [24, 1.7, -30], target: [0, 15, 0] }, selected = null, dots = [], mapT = null, timer = 0;
 
 const fovY = () => D.views[0].fov_y_deg;
@@ -36,6 +38,7 @@ async function reload() {
   meshes = meshes || sceneTriangles();
   problem(painted().length ? '' : `「${LIGHTS[light].name}」の絵画がまだありません。先に「絵画化」のタブで、この光の描き方の絵を作ってください（穴かどうかは、絵がある視点を基準に決めます）。`);
   if (selected && !D.views.some((v) => v.name === selected)) selected = null;
+  if (v3) { v3.setViews(D.views); v3.setCandidate(cand); }
   renderAdded(); drawMap(); show();
 }
 
@@ -84,7 +87,7 @@ function mapInput(e) {
   if (busy) return;
   const [x, z] = mapPoint(e);
   if (e.shiftKey || e.button === 2) { cand.target[0] = x; cand.target[2] = z; } else { cand.position[0] = x; cand.position[2] = z; }
-  selected = null; sliders(); renderAdded(); drawMapKeepScale(); schedule();
+  selected = null; sliders(); renderAdded(); drawMapKeepScale(); schedule(); if (v3) v3.setCandidate(cand);
 }
 function drawMapKeepScale() { drawMap(); } // 地図の範囲は候補の位置に合わせて広がる
 $('map').addEventListener('pointerdown', (e) => { dragging = true; $('map').setPointerCapture(e.pointerId); mapInput(e); });
@@ -194,7 +197,7 @@ async function search() {
       cand = { position: best.position, target: best.target }; selected = null;
       $('searchNote').textContent = `${spots.length} 通りの視点を調べ、穴がいちばん多く見える所（高さ ${best.position[1].toFixed(1)} m）へ候補を移しました。地図の点は濃いほど穴が多い位置です。`;
     } else $('searchNote').textContent = '穴の見える位置が見つかりませんでした。';
-    say('–'); sliders(); renderAdded(); drawMap(); show();
+    say('–'); sliders(); renderAdded(); drawMap(); show(); if (v3) v3.setCandidate(cand);
   } finally { busy = false; $('search').disabled = false; }
 }
 
@@ -328,7 +331,7 @@ function sliders() {
   $('tgtY').value = ty; $('oTgtY').textContent = `${ty.toFixed(1)} m`;
   $('pitch').value = pitch; $('oPitch').textContent = Math.abs(pitch) < 0.5 ? '水平' : pitch > 89.5 ? '真下' : pitch > 0 ? `下へ ${pitch.toFixed(0)} 度` : `上へ ${(-pitch).toFixed(0)} 度`;
 }
-const changed = () => { selected = null; sliders(); renderAdded(); drawMap(); schedule(); };
+const changed = () => { selected = null; sliders(); renderAdded(); drawMap(); schedule(); if (v3) v3.setCandidate(cand); };
 $('camY').addEventListener('input', () => { cand.position[1] = Number($('camY').value); changed(); });
 $('tgtY').addEventListener('input', () => { cand.target[1] = Number($('tgtY').value); changed(); });
 $('pitch').addEventListener('input', () => { // 位置と水平の向きはそのまま、見る先を動かす
@@ -354,5 +357,45 @@ $('fillDry').addEventListener('click', () => fillCodex(true));
 $('stop').addEventListener('click', () => api('/api/paint/stop', {}).catch(() => {}));
 window.addEventListener('focus', () => { if (!busy && !watching) reload().catch(() => {}); });
 
+
+// ---- 3D の画面 ----
+function showSpace(which) {
+  const is3d = which === '3d' && !!v3;
+  $('pane3d').hidden = !is3d; $('paneMap').hidden = is3d; press($('space'), is3d ? '3d' : 'map');
+  for (const b of document.querySelectorAll('.v3only')) b.hidden = !is3d;
+  $('lock').hidden = !is3d;
+  if (!is3d) drawMap();
+}
+function setLock(on) {
+  if (!v3) return;
+  v3.setLocked(on); $('lock').setAttribute('aria-pressed', on ? 'true' : 'false');
+  for (const b of document.querySelectorAll('.v3only')) b.disabled = on;
+  $('handle').parentElement.hidden = on;
+  $('hint3d').textContent = on
+    ? '画面の見え方が、そのまま候補の視点です。緑の枠の中が絵になります。左ドラッグで見る先のまわりを回り、右ドラッグでずらし、ホイールで寄る・引く。形をダブルクリックすると、そこが見る先（回る中心）になります。'
+    : '左ドラッグで回す、右ドラッグでずらす、ホイールで寄る・引く。緑の玉が候補のカメラ、白い玉が見る先で、矢印（3 方向）や四角（面に沿う）を掴むと動きます。形をダブルクリックすると、そこが見る先になります。';
+}
+seg('space', showSpace);
+seg('handle', (v) => v3 && v3.setHandle(v));
+$('lock').addEventListener('click', () => setLock(!v3.locked));
+$('frameAll').addEventListener('click', () => v3 && v3.frameAll());
+for (const b of document.querySelectorAll('[data-look]')) b.addEventListener('click', () => v3 && v3.lookFrom(b.dataset.look.split(',').map(Number)));
+async function start3d() {
+  try {
+    v3 = await createView3D($('view3d'), {
+      gl,
+      onChange: (c) => { // 3D の画面で候補が動いた
+        if (busy) return v3.setCandidate(cand);
+        cand = c; selected = null; sliders(); renderAdded(); if (!$('paneMap').hidden) drawMap(); schedule();
+      },
+    });
+    v3.onHandle = (which) => press($('handle'), which);
+    window.__v3 = v3;
+  } catch (e) {
+    v3 = null; $('no3d').hidden = false; $('no3d').textContent = `3D の画面を作れませんでした（${e.message}）。上からの地図で操作できます。`;
+  }
+  showSpace('3d');
+}
+
 sliders();
-reload().then(() => { window.__ready = true; }).catch((e) => { problem(e.message); });
+start3d().then(reload).then(() => { if (v3) v3.frameAll(); }).then(() => { window.__ready = true; }).catch((e) => { problem(e.message); });
