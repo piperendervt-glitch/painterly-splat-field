@@ -287,6 +287,25 @@ export function labelHoles(c, z, target, { ids, groundY = 0, rise = 0.6, rgba = 
   return c.type;
 }
 
+/**
+ * カメラ cam の画素 (x, y)・奥行き z の点が、もとの視点 base から見て「何も無いはずの所」にあるか：
+ * base の絵に写り、そこに描かれた面より tol 以上手前（空の画素なら、どの距離でも手前）。
+ * 後から足した点が、もとの絵の前に浮いて絵を隠すのを防ぐために使う。base・cam = { W, H, fx, fy, cx, cy, c2w, w2c }、base は z も。
+ */
+export function inFreeSpace(base, cam, x, y, z, tol = 0.12) {
+  const xc = (x + 0.5 - cam.cx) / cam.fx * z, yc = -(y + 0.5 - cam.cy) / cam.fy * z, m = cam.c2w, w = base.w2c;
+  const wx = m[0] * xc + m[1] * yc - m[2] * z + m[3], wy = m[4] * xc + m[5] * yc - m[6] * z + m[7], wz = m[8] * xc + m[9] * yc - m[10] * z + m[11];
+  const bx = w[0] * wx + w[1] * wy + w[2] * wz + w[3], by = w[4] * wx + w[5] * wy + w[6] * wz + w[7], bz = -(w[8] * wx + w[9] * wy + w[10] * wz + w[11]);
+  if (!(bz > 0.05)) return false;
+  const px = Math.floor(base.cx + bx / bz * base.fx), py = Math.floor(base.cy - by / bz * base.fy);
+  if (px < 1 || py < 1 || px >= base.W - 1 || py >= base.H - 1) return false;
+  // まわり 3×3 のいちばん手前の面と比べる（物の縁で、境目のずれだけで捨てないように）
+  let nearest = Infinity, sky = 0;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const zb = base.z[(py + dy) * base.W + px + dx]; if (zb > 0) nearest = Math.min(nearest, zb); else sky++; }
+  if (sky === 9) return true;
+  return bz < nearest * (1 - tol);
+}
+
 /** 奥行きを、書き出しと同じ 16bit の絵（R = 上の桁、G = 下の桁。0 = 空）にする。RGBA。 */
 export function depthPng(z, n, near, far) {
   const out = new Uint8ClampedArray(n * 4);

@@ -318,7 +318,7 @@ async function refineDreamDepth(name) {
   const disp = new Float32Array(v.W * v.H); for (let i = 0; i < disp.length; i++) disp[i] = (dp[i * 4] * 256 + dp[i * 4 + 1]) / 65535;
   await new Promise((r) => setTimeout(r, 30));
   const r = await dream.refineDepth(D, v, holes, disp, dreamIO);
-  log(r ? `埋めた絵の奥行きを推定して、すでにある面に合わせました（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}）。` : '奥行きを合わせる手がかり（すでに位置の分かっている面）が足りないので、穴の奥行きは仮の値のままです。');
+  log(r ? `埋めた絵の奥行きを推定して、すでにある面に合わせました（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}、もとの絵の手前に来たので粒にしない画素 ${r.carved}）。` : '奥行きを合わせる手がかり（すでに位置の分かっている面）が足りないので、穴の奥行きは仮の値のままです。');
   return !!r;
 }
 // 視点 name へ、光の描き方 L の絵を写す。写した絵・穴の印を保存する。返すのは穴の画素数。絵が無ければ何もせず null。

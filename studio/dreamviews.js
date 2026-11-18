@@ -1,7 +1,7 @@
 // 「視点を足す」の、絵 1 枚から作った場面（プレビズの形が無い場面）のための部分。計算は studio/dream.js、ここはファイルの読み書きとの橋渡し。
 // 流れ（LucidDreamer の Dreaming の段と同じ）：すでにある絵を新しい視点へ写す → 穴を埋める（Codex かツール内）→ 埋めた絵の奥行きを推定して、分かっている所に合わせる。
 import { cameraBasis } from './viewdata.js';
-import { cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
+import { cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
 
 /** この場面は、絵 1 枚から作った物か（cameras.json の source.kind）。 */
 export const isPainting = (cams) => !!(cams && cams.source && cams.source.kind === 'painting');
@@ -123,6 +123,15 @@ export async function refineDepth(D, v, holes, disp, io) {
   for (let i = 0; i < n; i++) if (holes[i * 4] > 127) { c.hole[i] = 1; c.z[i] = 0; }
   const r = alignDepth(c, disp);
   if (!r) return null;
+  // もとの視点から見て、絵に描かれた面より手前に来た穴の画素は、もとの絵と食い違うので粒にしない（絵の前に浮いて隠してしまうため）
+  const cam = { cx: v.cx, cy: v.cy, fx: v.fx, fy: v.fy, c2w: v.c2w }, bases = D.views.filter((b) => !b.added && b.z), mask = new Uint8ClampedArray(n * 4);
+  r.carved = 0;
+  for (let i = 0; i < n; i++) {
+    let keep = c.hole[i];
+    if (keep && r.z[i] > 0) for (const b of bases) if (inFreeSpace(b, cam, i % v.W, (i - i % v.W) / v.W, r.z[i])) { keep = 0; r.carved++; break; }
+    mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = keep ? 255 : 0; mask[i * 4 + 3] = 255;
+  }
+  await io.savePaint(`${v.name}_new.png`, mask, v.W, v.H);
   await saveGeometry(D, v.name, c, r.z, { cx: v.cx, cy: v.cy, fx: v.fx, fy: v.fy, c2w: v.c2w }, io, v.painted || null);
   return r;
 }

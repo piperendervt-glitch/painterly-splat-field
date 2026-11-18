@@ -31,5 +31,8 @@ scenes/*/paint-out/objects.json
 scenes/*/previz-export/added_views.json
 scenes/*/previz-export/R[0-9]*_*.png
 scenes/*/paint-out/R[0-9]*_*.png
+# 外の手法の「絵＋奥行き＋カメラ」を取り込んだ視点（painting/import-views.mjs。名前は X1, X2, …）
+scenes/*/previz-export/X[0-9]*_*.png
+scenes/*/paint-out/X[0-9]*_*.png
 # 外部の手法で作った結果の置き場（大きい。ライセンスが研究目的のものもある）
 scenes/*/external/
