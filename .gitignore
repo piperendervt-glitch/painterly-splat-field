@@ -16,3 +16,14 @@ scenes/*/previz-export/*_overlay.png
 # 絵から作った場面で、絵画化や穴埋めを試したときの作業フォルダと結果（paint/paint.mjs）
 scenes/*/paint-out/work/
 scenes/*/paint-out/*_plate*.png
+scenes/*/paint-out/sky_*.png
+scenes/*/paint-out/ground_*.png
+scenes/*/paint-out/layout_*
+# 外の道具で作った世界の粒（取り込み用。大きい）
+world.ply
+# 絵から推定したプレビズのモデル（「粒の空間」の「推定した形を書き出す」。作り直せる）
+estimated_model.obj
+estimated_model.json
+# 物体ごとの切り抜きの絵と、外の道具で作った 3D モデル（studio/objectmodel.js）
+scenes/*/paint-out/object_*
+scenes/*/paint-out/objects.json

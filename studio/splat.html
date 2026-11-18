@@ -88,8 +88,15 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" class="plain" id="plateStopBtn" hidden>止める</button>
       <button type="button" class="plain" id="plateDry">文と絵だけ用意する（利用枠を使わない）</button>
       <button type="button" class="plain" id="plateForget">AI が描いた背景を消す</button>
+      <div class="label">背後の層の位置</div>
+      <div class="seg" id="backDepth">
+        <button type="button" data-v="calc" aria-pressed="true">計算で延ばす</button>
+        <button type="button" data-v="plate" aria-pressed="false" disabled>背景の絵から推定</button>
+      </div>
+      <p class="note" id="plateSharpNote"></p>
+      <button type="button" class="plain" id="plateSharp" disabled>AI が描いた背景から奥行きを推定する（SHARP）</button>
       <p class="note" id="plateLog" hidden style="white-space:pre-wrap"></p>
-      <p class="note">視点ごとに 1 枚、いまの色のもとの絵から、手前の物（人・木・石壁など）とその縁をマゼンタの穴にした絵を見せ、「物の後ろにある背景だけ」を描いてもらいます。できた絵（paint-out の「視点_plate_色のもと.png」）は次からは読むだけです。背後の層の粒の位置は計算のまま、色だけがこの絵になります。上のチェックを外すと計算の色に戻るので、押し比べてください。足した視点（穴埋めの視点）には頼みません。</p>
+      <p class="note">視点ごとに 1 枚、いまの色のもとの絵から、手前の物（人・木・石壁など）とその縁をマゼンタの穴にした絵を見せ、「物の後ろにある背景だけ」を描いてもらいます。できた絵（paint-out の「視点_plate_色のもと.png」）は次からは読むだけです。背後の層の粒の位置は計算のまま、色だけがこの絵になります。上のチェックを外すと計算の色に戻るので、押し比べてください。足した視点（穴埋めの視点）には頼みません。「奥行きを推定する」は、その背景の絵を SHARP に通して、物の無い背景そのものの形を求めます（sharp フォルダの setup.bat が済んでいること。Codex は使いません）。推定した奥行きは、物の外でもとの奥行きに合わせてから、物の後ろの起伏にだけ使います。「背後の層の位置」で計算と押し比べてください。</p>
     </div>
   </div>
 
@@ -108,6 +115,27 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <input type="range" id="speed" min="1" max="12" step="0.5" value="4.5">
       <p class="note">走る（Shift）は歩く速さの約 2.7 倍。当たりはプレビズの形そのもので、目の高さ 1.7 m は書き出しカメラと同じ高さです。</p>
     </div>
+    <div class="label">当たりの形</div>
+    <div class="seg" id="walkShape">
+      <button type="button" data-v="auto" aria-pressed="true">自動</button>
+      <button type="button" data-v="previz" aria-pressed="false">プレビズの形</button>
+      <button type="button" data-v="estimate" aria-pressed="false">絵から推定した形</button>
+      <button type="button" data-v="ai" aria-pressed="false" disabled>AI が書いた形</button>
+    </div>
+    <p class="note">「絵から推定した形」は、手前の物を消した背景の奥行きをメッシュにした面（地面・水・遠景）と、物体ごとの箱です。「自動」は、プレビズのある場面ではプレビズの形、絵から作った場面では推定した形を使います。下の「当たりの形を表示」で形が見えます。プレビズのある場面で「絵から推定した形」にして「プレビズの形を線で重ねる」を入れると、推定と本物を見比べられます。</p>
+    <button type="button" class="plain" id="estimateExport">推定した形を書き出す（OBJ）</button>
+    <p class="note" id="estimateNote"></p>
+    <div class="label">AI に形の配置を書かせる（Codex）</div>
+    <p class="note" id="layoutPlan"></p>
+    <label class="check" for="layoutFixes"><span>見比べて直す回数</span> <select id="layoutFixes"><option value="0">0 回</option><option value="1">1 回</option><option value="2" selected>2 回</option><option value="3">3 回</option></select></label>
+    <button type="button" class="main" id="layoutRun">形の配置を AI に書いてもらう</button>
+    <button type="button" class="plain" id="layoutMore" disabled>もう 1 回、見比べて直してもらう（Codex 1 回）</button>
+    <button type="button" class="plain" id="layoutStopBtn" hidden>止める</button>
+    <button type="button" class="plain" id="layoutDry">文と絵だけ用意する（Codex は呼ばない）</button>
+    <button type="button" class="plain" id="layoutForget" disabled>AI が書いた配置を忘れる</button>
+    <p class="note" id="layoutLog" hidden style="white-space:pre-wrap"></p>
+    <p class="note" id="layoutInfo"></p>
+    <p class="note">絵と奥行きの絵、カメラと奥行きの表を ChatGPT（Codex）に見せて、場面の物を箱と円柱の一覧に書いてもらいます。「見比べて直す」回は、その形を絵に線で重ねた絵と、奥行き・物の輪郭との見比べの結果を見せて、書き直してもらいます。いちばん合った回を残します。結果は paint-out の layout_ai.json、重ねた絵は layout_overlay.png です。背景の面は「絵から推定した形」のものを使います。</p>
     <label class="check" for="shapes"><input type="checkbox" id="shapes"><span>当たりの形を表示（緑 = 立てる床、橙 = 壁、赤 = いま触れている所）</span></label>
     <div class="label">視点を移す</div>
     <div class="row" id="jump">
@@ -133,7 +161,7 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="layer" aria-pressed="false">層</button>
       <button type="button" data-v="skySrc" aria-pressed="false">空の出どころ</button>
     </div>
-    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。「空の出どころ」は、天球の粒を、絵から来た所（視点の色）・AI が描いた所（緑）・ツール内で埋めた所（赤紫）に色分けします。「層」は、絵に見えていた面が灰色、計算で足した背後の層が黄色。</p>
+    <p class="note">「種類」は札の色分け（空が水色、草地が緑、石壁が白）。「種類＋絵」は絵に半分重ねたもの、「札の境目」は種類や物体が切り替わる縁の粒を赤くしたもので、絵の輪郭と札がずれている所を探せます。「面の向き」は法線の色（右が赤、上が緑、手前が青）。「日なた」は白いほど日が当たる所で、（元）は絵を描いたときの太陽、（今）は下の「光を変える」の太陽です。「視点別」は、どの視点の絵から来た粒か（A が橙、B が水色）。「揺れる粒」は、風と草よけで動く粒を緑で示します（濃いほどよく揺れる）。「空の出どころ」は、天球の粒を、絵から来た所（視点の色）・AI が描いた所（緑）・ツール内で埋めた所（赤紫）に色分けします。「層」は、絵に見えていた面が灰色、計算で足した背後の層が黄色、周囲の地面が水色、取り込んだ世界が桃色、物体のモデルが緑。</p>
     <label class="check" for="holes"><input type="checkbox" id="holes"><span>穴を目立たせる（背景をマゼンタに）</span></label>
     <label class="check" for="wire"><input type="checkbox" id="wire"><span>プレビズの形を線で重ねる</span></label>
     <label class="check" for="frusta"><input type="checkbox" id="frusta"><span>カメラの視錐台を表示</span></label>
@@ -170,6 +198,79 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <p class="note" id="skyLog" hidden style="white-space:pre-wrap"></p>
       <p class="note">上半分を 4 つの向きに分け、穴のある向きだけ 1 枚ずつ頼みます（穴をマゼンタで塗った空の絵を見せ、そこだけ描いてもらって貼ります）。絵のある所は変わりません。結果は paint/out/sky_ai.png に残り、次からは読むだけです。色のもと（最初の絵・光の少ない絵・影つきの絵）ごとに別々に持ちます。</p>
     </div>
+  </div>
+
+  <div class="group">
+    <h2>周囲の地面（絵の外）</h2>
+    <label class="check" for="surround"><input type="checkbox" id="surround" checked><span>絵の外の地面に粒を置く</span></label>
+    <label class="check" for="surroundFill"><input type="checkbox" id="surroundFill" checked><span>空いた所を自動で埋める（ツール内の計算）</span></label>
+    <label class="check" for="surroundAi"><input type="checkbox" id="surroundAi" checked disabled><span>AI が描いた地面を使う</span></label>
+    <p class="note" id="surroundInfo"></p>
+    <div class="label">AI に周囲の地面を描いてもらう（Codex）</div>
+    <p class="note" id="groundPlan"></p>
+    <button type="button" class="main" id="groundPaint">周囲の地面を AI に描いてもらう</button>
+    <button type="button" class="plain" id="groundStopBtn" hidden>止める</button>
+    <button type="button" class="plain" id="groundDry">文と絵だけ用意する（利用枠を使わない）</button>
+    <button type="button" class="plain" id="groundForget">AI が描いた地面を消す</button>
+    <p class="note" id="groundLog" hidden style="white-space:pre-wrap"></p>
+    <p class="note">最初の視点を中心に、地平線より下の向きの色を全周の絵にまとめ、絵に無い向き（絵の左右や後ろ、足もと）を埋めます。粒は、推定した地面の高さの平面に、180 m 先まで置きます。自動で埋める色は、絵の地面の「見下ろす角度ごとの色」を広げたもので、すぐ終わりますが模様は作れません。AI には、4 つの向きを 30° 見下ろした絵として 1 枚ずつ頼みます。AI が描いた背景の絵（上の欄）があると、人や木があった所の地面も元にします。表示「層」では水色、「使う視点」の「（周囲の地面）だけ」でその粒だけを見られます。遠景（木や丘の帯）はまだ足しません。</p>
+  </div>
+
+  <div class="group">
+    <h2>物体ごとの 3D モデル（.glb / .obj）</h2>
+    <p class="note" id="objNone">この場面には、物体の札（手前の物の番号）がありません。</p>
+    <div id="objBox" hidden>
+      <button type="button" class="plain" id="objExport">物体ごとの切り抜きの絵を書き出す</button>
+      <div class="label">物体</div>
+      <select id="objPick"></select>
+      <div class="label">この物体の 3D モデルを選ぶ</div>
+      <input type="file" id="objFile" accept=".glb,.obj">
+      <div id="objAdjust" hidden>
+        <div class="label"><span>向きを手で回す（自動の向きに足す）</span><output id="oObjYaw"></output></div>
+        <input type="range" id="objYaw" min="-180" max="180" step="1" value="0">
+        <div class="label"><span>大きさを手で変える</span><output id="oObjScale"></output></div>
+        <input type="range" id="objScale" min="-1" max="1" step="0.01" value="0">
+        <button type="button" class="plain" id="objAuto">自動の合わせに戻す</button>
+        <button type="button" class="plain" id="objForget">この物体のモデルを外す</button>
+      </div>
+      <label class="check" for="objShow"><input type="checkbox" id="objShow" checked><span>物体のモデルを表示する</span></label>
+      <label class="check" for="objReplace"><input type="checkbox" id="objReplace" checked><span>モデルがある物体は、絵の粒を隠す</span></label>
+      <label class="check" for="objPaint"><input type="checkbox" id="objPaint" checked><span>絵から見えている側には、絵の色を写す</span></label>
+      <label class="check" for="objInflate"><input type="checkbox" id="objInflate"><span>モデルが無い物体は、輪郭をふくらませた形にする</span></label>
+      <p class="note" id="objInfo" style="white-space: pre-wrap"></p>
+    </div>
+    <p class="note">絵の中の物体（人、木、石の建物など）を 1 つずつ 3D モデルにして、絵の物体と同じ所に置きます。モデルを作るのは外の道具です（絵 1 枚から 3D モデルを作り、.glb で書き出せるもの）。手順：「切り抜きの絵を書き出す」で paint-out フォルダに object_番号.png ができます。それを外の道具に渡し、できたモデルを上で選ぶか、同じフォルダに object_番号.glb の名前で置いてください。モデルの向き・大きさ・位置は、絵の物体の輪郭にいちばん重なるように自動で探します（合わなければ手で回せます）。表示「層」では緑、「使う視点」の「（物体のモデル）だけ」でモデルの粒だけを見られます。「輪郭をふくらませた形」は、外の道具を使わない代わりの方法です。物体の輪郭を、幅に合わせた厚みで丸くふくらませ、表と裏に絵の色の粒を置きます（板のように見えていた人や木に厚みが付きます。裏側の色は表と同じです）。Codex は使いません。</p>
+  </div>
+
+  <div class="group">
+    <h2>外で作った世界を取り込む（.ply）</h2>
+    <input type="file" id="worldFile" accept=".ply">
+    <p class="note" id="worldInfo">まだ読み込んでいません。</p>
+    <div id="worldBox" hidden>
+      <label class="check" for="worldShow"><input type="checkbox" id="worldShow" checked><span>取り込んだ世界を表示する</span></label>
+      <div class="label">座標の決まり</div>
+      <div class="seg" id="worldFrame">
+        <button type="button" data-v="cv" aria-pressed="true">視点が原点・y が下</button>
+        <button type="button" data-v="gl" aria-pressed="false">視点が原点・y が上</button>
+        <button type="button" data-v="world" aria-pressed="false">この場面のまま</button>
+      </div>
+      <div class="label"><span>大きさ</span><output id="oWorldScale"></output></div>
+      <input type="range" id="worldScale" min="-3" max="3" step="0.01" value="0">
+      <button type="button" class="plain" id="worldFit">大きさを絵の奥行きに合わせる</button>
+      <div class="label"><span>縦軸まわりの回転</span><output id="oWorldYaw"></output></div>
+      <input type="range" id="worldYaw" min="-180" max="180" step="1" value="0">
+      <div class="label"><span>ずらす（右 / 上 / 手前）</span><output id="oWorldOffset"></output></div>
+      <input type="range" id="worldX" min="-50" max="50" step="0.1" value="0">
+      <input type="range" id="worldY" min="-50" max="50" step="0.1" value="0">
+      <input type="range" id="worldZ" min="-50" max="50" step="0.1" value="0">
+      <div id="worldPointBox" hidden>
+        <div class="label"><span>点の大きさ</span><output id="oWorldPoint"></output></div>
+        <input type="range" id="worldPoint" min="0.005" max="1" step="0.005" value="0.05">
+      </div>
+      <button type="button" class="plain" id="worldReset">置き方を最初に戻す</button>
+      <button type="button" class="plain" id="worldForget">取り込みを外す</button>
+    </div>
+    <p class="note">Marble や HunyuanWorld など、外の道具で同じ絵から作った世界を読み込み、この場面と見比べます。3D ガウシアンの .ply と、色つきの点（メッシュなら頂点）の .ply が読めます。ここで選んだファイルは、ページを読み直すと外れます。残したいときは、ファイルを paint-out フォルダに world.ply の名前で置いてください。「使う視点」の「（取り込んだ世界）だけ」で、それだけを表示できます。</p>
   </div>
 
   <div class="group" id="lightBox">

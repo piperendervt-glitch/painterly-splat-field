@@ -3,15 +3,22 @@
 import * as THREE from 'three/webgpu';
 import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, cameraViewMatrix, varying } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, SKY_TYPE, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
 import { parsePly, checkSharp, sharpScale, splatsFromSharp, sharpGrid, sharpBack, sharpBackSplats } from './sharp.js';
-import { SIGMA_K, BACK_RING, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate } from './layers.js';
+import { SIGMA_K, BACK_RING, BACK_BEHIND, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate, refineBackDepth, gridToPixels } from './layers.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
+import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
-import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, skyDistance, withAi } from './skydome.js';
+import { WORLD_PROPS, worldKind, worldTransform, fitWorldScale, splatsFromWorld } from './worldimport.js';
+import { objectTargets, cutoutImage, meshPoints, fitContext, fitModel, modelSplats, inflateSplats } from './objectmodel.js';
+import { layoutFrame, worldShapes, shapeEdges, project as projectTo, rasterLayout, compareLayout, briefText } from './layoutai.js';
+import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, sampleMap, skyDistance, skyNoise, withAi } from './skydome.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage'), msg = $('msg');
@@ -40,9 +47,12 @@ const SOURCES = {
 // sfx は、AI が描いた空の絵（paint/out/sky_ai<sfx>.png）の名前の後ろ。paint は、空を描いてもらうときの光の描かせ方（paint.mjs の --light）。
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, skyMode: 'dome', skyStep: 0.2 };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, backDepth: 'plate', walkShape: 'auto', surround: true, surroundFill: true, surroundAi: true, skyMode: 'dome', skyStep: 0.2 };
 // 角度を変えたときの崩れを減らす設定（計算は studio/layers.js）：shape = 粒の形（round 丸 / surfel 面に沿う楕円）、stretch = 面に沿って伸ばす上限（倍）、
-// back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う
+// back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う、
+// surround = 絵の外の地面（周囲の地面）を置く、surroundFill = その穴をツール内の計算で埋める、surroundAi = AI が描いた地面（あれば）を使う
+// walkShape = 歩くときの当たりの形（auto = プレビズのある場面はプレビズ、絵から作った場面は推定 / previz / estimate）
+// backDepth = 背後の層の位置（calc 計算で延ばす / plate AI が描いた背景の絵を SHARP に通した奥行き。あれば）
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
 
 // 実在の絵から作った場面（painting/build.mjs）の種類の名前を、shared/labels.js の種類へ読み替える
@@ -77,6 +87,12 @@ async function loadImage(url, w, h) {
 
 async function tryImage(url, w, h) { try { return await loadImage(url, w, h); } catch { return null; } }
 
+// AI が描いた背景の絵を SHARP に通した粒（<視点>_plate_<色のもと>_sharp.ply）。無ければ null
+async function loadPlateSharp(name, key) {
+  const res = await fetch(`/files/paint-out/${name}_plate_${key}_sharp.ply`, { cache: 'no-store' });
+  if (!res.ok) return null;
+  try { const ply = parsePly(await res.arrayBuffer()); checkSharp(ply); return ply; } catch (e) { console.warn(e); return null; }
+}
 let plateVersion = 0; // AI が描いた背景の絵を読むたびに増やす（作り置きの層を作り直す目印）
 async function loadData() {
   const [camsRes, stateRes] = await Promise.all([fetch('/files/previz-export/cameras.json', { cache: 'no-store' }), fetch('/api/state', { cache: 'no-store' })]);
@@ -125,10 +141,12 @@ async function loadData() {
     const plates = {};
     for (const key of st.plates || []) {
       const px = await tryImage(`/files/paint-out/${v.name}_plate_${key}.png`, W, H), mask = px && await tryImage(`/files/paint-out/${v.name}_platemask_${key}.png`, W, H);
-      if (px && mask) plates[key] = { px, mask, version: ++plateVersion };
+      if (!px || !mask) continue;
+      plates[key] = { px, mask, version: ++plateVersion, sharp: null };
+      if ((st.plate_sharp || []).includes(key)) plates[key].sharp = await loadPlateSharp(v.name, key); // その絵を SHARP に通した粒（奥行きに使う）
     }
     views.push({
-      plates,
+      plates, painting,
       def: v, W, H, z, edge: edgeDistance(z, W, H), near, far, isSky, skyDist: skyDistance(isSky, W, H),
       colors, hasTypes, hasLabels, type, object, normalPx: hasLabels ? lab.normal : null, sunPx: hasLabels ? lab.sun : null,
       labelEdge: hasTypes ? labelEdgeDistance(type, object, W, H) : null, sharp,
@@ -137,7 +155,7 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0 };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, worldFile: !!state.world, objectFiles: state.objects || {}, painting: views.some((v) => v.painting) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -197,7 +215,7 @@ export const COLUMNS = {
   color: { type: Uint8Array, size: 3, default: 128 },    // 絵の色（sRGB）
   edge: { type: Uint8Array, size: 1, default: EDGE_MAX }, // 奥行きの境界からの距離（画素）
   sky: { type: Uint8Array, size: 1, default: 0 },        // 1 = 空（奥行きが無い画素）
-  view: { type: Uint8Array, size: 1, default: 0 },       // どの視点（や穴埋めの回）から来たか
+  view: { type: Uint16Array, size: 1, default: 0 },      // どの視点（や穴埋めの回）から来たか。視点を足し続けても足りるように 16 ビット
   depthGray: { type: Uint8Array, size: 1, default: 0 },  // 奥行き表示用の明るさ
   type: { type: Uint8Array, size: 1, default: 0 },       // 種類の札（shared/labels.js の TYPES の id）。0 = 空
   object: { type: Uint16Array, size: 1, default: 0 },    // 物体の札（cameras.json の labels.objects の id）。0 = 物体なし
@@ -232,10 +250,10 @@ export function appendSplats(c, columns, count) {
 function colorOf(v, src) { for (let key = src; key; key = SOURCES[key].fallback) if (v.colors[key]) return { key, px: v.colors[key] }; return { key: 'previz', px: v.colors.previz }; }
 
 // back（studio/layers.js の backLayer の結果）を渡すと、物のまわりの縁の画素は置かない（背後の層の粒が代わりに入る）。
-function splatsFromView(v, vi, stride, src, back = null) {
+function splatsFromView(v, vi, stride, src, back = null, hide = null) {
   const { W, H, z, edge, near, far } = v, { fx, fy, cx, cy } = v.def.intrinsics;
   const max = Math.ceil(W / stride) * Math.ceil(H / stride);
-  const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6) };
+  const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint16Array(max).fill(vi), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6) };
   if (v.hasTypes) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max) });
   if (v.hasLabels) Object.assign(col, { normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), lift: new Float32Array(max) });
   const px = colorOf(v, src).px, p = new THREE.Vector3(), off = stride >> 1, zStep = (1 / near - 1 / far) / 65535;
@@ -246,6 +264,7 @@ function splatsFromView(v, vi, stride, src, back = null) {
     if (sky && ui.skyMode !== 'wall') continue; // 空は天球（下の「空の天球」）が受け持つ
     if (v.onlyNew && v.onlyNew[i * 4] < 128) continue;
     if (back && back.kind[i] === BACK_RING) continue;
+    if (hide && v.hasTypes && hide.has(v.object[i]) && FRONT[v.type[i]]) continue; // 3D モデルに置き換えた物体
     p.set((x + 0.5 - cx) / fx * zz, -(y + 0.5 - cy) / fy * zz, -zz).applyMatrix4(v.matrix);
     col.position[k * 3] = p.x; col.position[k * 3 + 1] = p.y; col.position[k * 3 + 2] = p.z;
     col.size[k] = zz * stride / fy;
@@ -275,20 +294,55 @@ function splatsFromView(v, vi, stride, src, back = null) {
 // 視点別の表示で色が分かれ、「使う視点」で出し入れもできる。
 const sharpViewIndex = (vi) => data.views.length + vi;
 const backViewIndex = (vi) => data.views.length * 2 + vi;
+const surroundViewIndex = () => data.views.length * 3; // 周囲の地面の粒
 const FRONT = frontTable(TYPES);            // 種類 → 手前の物かどうか
 const backInfo = { on: false, views: [] };  // 背後の層の作り方の結果（画面に出す）
 const SPLAT_OPTS = () => ({ skyZ: SKY_Z, typeOf: (t) => TYPE_BY_ID.get(t), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, maxStretch: ui.stretch, emitSky: ui.skyMode === 'wall' });
 // 視点 v の背後の層（画素ごと）。色のもとと縁の幅が同じなら作り直さない
+// 背景の絵を SHARP に通した粒から、視点 v のます目（g × g）の奥行きを作る（1 回だけ）。倍率は合わせない（refineBackDepth が縁で合わせる）
+function plateDepth(v, p) {
+  if (!p || !p.sharp) return null;
+  if (p.depth === undefined) {
+    const inv = v.matrix.clone().invert(), cam = new THREE.Vector3().setFromMatrixPosition(v.matrix).toArray();
+    const grid = sharpGrid(p.sharp, { scale: 1, inv, cam, edgeMax: EDGE_MAX });
+    p.depth = grid ? { g: grid.g, z: grid.z[0], px: null } : null;
+  }
+  return p.depth;
+}
+// 計算で作った層に、AI が描いた背景の色（withPlate）と、その絵から推定した奥行き（refineBackDepth）を重ねる。作ったものは holder.variants に取っておく
+function dressBack(holder, v, key, { pixel = null, W, H, z, zp }) {
+  const p = ui.plate ? v.plates[key] : null, depth = ui.backDepth === 'plate' && zp ? 1 : 0;
+  if (!p && !depth) return holder.layer;
+  const id = `${p ? p.version : '-'}:${depth}`;
+  if (!holder.variants.has(id)) {
+    let layer = holder.layer;
+    if (depth) layer = refineBackDepth(layer, { W, H, z, zp });
+    if (p) layer = withPlate(layer, p.px, p.mask, pixel);
+    holder.variants.clear(); holder.variants.set(id, layer);
+  }
+  return holder.variants.get(id);
+}
 // plated = false にすると、AI が描いた背景の絵を使わない、計算だけの層を返す（AI に頼むときの目安の絵に使う）
 function backOf(v, src, plated = true) {
   const c = colorOf(v, src), key = `${c.key}:${ui.halo}`;
-  if (!v.back || v.back.key !== key) v.back = { key, layer: backLayer({ W: v.W, H: v.H, z: v.z, type: v.type, rgba: c.px, front: FRONT, halo: ui.halo }), plated: null };
-  const p = plated && ui.plate ? v.plates[c.key] : null;
-  if (!p) return v.back.layer;
-  if (!v.back.plated || v.back.plated.version !== p.version) v.back.plated = { version: p.version, layer: withPlate(v.back.layer, p.px, p.mask) };
-  return v.back.plated.layer;
+  if (!v.back || v.back.key !== key) v.back = { key, layer: backLayer({ W: v.W, H: v.H, z: v.z, type: v.type, rgba: c.px, front: FRONT, halo: ui.halo }), variants: new Map() };
+  if (!plated) return v.back.layer;
+  const d = plateDepth(v, v.plates[c.key]);
+  if (d && !d.px) d.px = gridToPixels(d.z, d.g, v.W, v.H);
+  return dressBack(v.back, v, c.key, { W: v.W, H: v.H, z: v.z, zp: d && d.px });
 }
-function sharpParts(withBack) {
+// 粒の列から、3D モデルに置き換えた物体（手前の物）の粒を除く
+function dropObjects(part, hide) {
+  const c = part.columns; if (!c.object || !c.type) return part;
+  let k = 0;
+  for (let i = 0; i < part.count; i++) {
+    if (hide.has(c.object[i]) && FRONT[c.type[i]]) continue;
+    if (k !== i) for (const [name, d] of Object.entries(COLUMNS)) { const a = c[name]; if (a) for (let j = 0; j < d.size; j++) a[k * d.size + j] = a[i * d.size + j]; }
+    k++;
+  }
+  return { ...part, count: k };
+}
+function sharpParts(withBack, hide = null) {
   const out = [];
   data.views.forEach((v, vi) => {
     if (!v.sharp) return;
@@ -301,16 +355,16 @@ function sharpParts(withBack) {
     const grid = v.sharpGrid.grid, opts = SPLAT_OPTS();
     const p = splatsFromSharp(v.sharp, v, sharpViewIndex(vi), { keep, scale, inv, cam, typeOf: opts.typeOf, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, grid });
     v.sharpStats = p.stats;
-    out.push(p);
+    out.push(hide ? dropObjects(p, hide) : p);
     if (withBack && grid && v.hasTypes) { // 背後の層：SHARP の奥行きのます目から作る（SHARP の地面とずれないように）
       const c = colorOf(v, ui.colorSrc), key = `${c.key}:${ui.halo}:${scale}`;
-      if (!v.sharpBack || v.sharpBack.key !== key) v.sharpBack = { key, layer: sharpBack(v.sharp, v, grid, c.px, { scale, inv, cam, front: FRONT, halo: Math.max(1, Math.round(ui.halo / 2)) }), plated: null };
-      const pl = ui.plate ? v.plates[c.key] : null; // AI が描いた背景の絵があれば、色はそこから
-      if (pl && (!v.sharpBack.plated || v.sharpBack.plated.version !== pl.version)) v.sharpBack.plated = { version: pl.version, layer: withPlate(v.sharpBack.layer, pl.px, pl.mask, v.sharpBack.layer.pixel) };
-      const layer = pl ? v.sharpBack.plated.layer : v.sharpBack.layer;
+      if (!v.sharpBack || v.sharpBack.key !== key) v.sharpBack = { key, layer: sharpBack(v.sharp, v, grid, c.px, { scale, inv, cam, front: FRONT, halo: Math.max(1, Math.round(ui.halo / 2)) }), variants: new Map() };
+      const pl = ui.plate ? v.plates[c.key] : null, base = v.sharpBack.layer; // AI が描いた背景の絵があれば、色はそこから
+      const pd = plateDepth(v, v.plates[c.key]);                              // その絵を SHARP に通してあれば、位置もそこから（ます目は同じ並び）
+      const layer = dressBack(v.sharpBack, v, c.key, { pixel: base.pixel, W: grid.g, H: grid.g, z: base.gridZ, zp: pd && pd.g === grid.g ? pd.z : null });
       const b = sharpBackSplats(v.sharp, v, grid, layer, backViewIndex(vi), { ...opts, step: Math.max(1, ui.stride >> 1), scale, inv, cam });
       out.push(b);
-      backInfo.views.push({ name: `${v.def.name}（SHARP）`, count: b.count, covered: 0, stats: v.sharpBack.layer.stats, ai: !!pl });
+      backInfo.views.push({ name: `${v.def.name}（SHARP）`, count: b.count, covered: 0, stats: v.sharpBack.layer.stats, ai: !!pl, refined: layer.refined, kept: layer.kept });
     }
   });
   return out;
@@ -319,16 +373,19 @@ function buildCloud() {
   const placement = data.hasSharp ? ui.placement : 'depth';
   const withBack = ui.back && data.hasTypes; // 背後の層には種類の札が要る
   backInfo.on = withBack; backInfo.views = [];
-  const parts = [];
+  const parts = [], things = objectSplats(), hide = things.length && ui.objects.replace ? new Set(things.map((t) => t.id).filter(Boolean)) : null;
   if (placement !== 'sharp') data.views.forEach((v, vi) => {
     const back = withBack && !v.onlyNew ? backOf(v, ui.colorSrc) : null; // 穴埋めで足した視点（穴の所だけの絵）には作らない
-    parts.push(splatsFromView(v, vi, ui.stride, ui.colorSrc, back));
+    parts.push(splatsFromView(v, vi, ui.stride, ui.colorSrc, back, hide));
     if (!back) return;
     const b = backSplats(v, back, backViewIndex(vi), ui.stride, { ...SPLAT_OPTS(), others: data.views.filter((o) => o !== v) });
     parts.push(b);
-    backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined });
+    backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined, refined: back.refined, kept: back.kept });
   });
-  if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp'));
+  if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp', hide));
+  const around = surroundSplats(); if (around) parts.push(around);
+  const outer = worldSplats(); if (outer) parts.push(outer);
+  parts.push(...things);
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
   for (const p of parts) appendSplats(c, p.columns, p.count);
   return c;
@@ -398,7 +455,10 @@ const DISPLAY = {
   sunNow: painted,                                                                                    // いまの日なた（シェーダーが灰色にする）
   layer: (c, i, out) => {                                                                             // 層：絵に見えていた面は灰色、背後の層は黄
     const l = 0.15 + 0.85 * luma(c, i);
-    if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
+    if (c.layer[i] === 4) { out[0] = l * 0.25; out[1] = l; out[2] = l * 0.25; }                            // 物体のモデルは緑
+    else if (c.layer[i] === 3) { out[0] = l; out[1] = l * 0.3; out[2] = l * 0.8; }                         // 取り込んだ世界は桃色
+    else if (c.layer[i] === 2) { out[0] = l * 0.1; out[1] = l * 0.8; out[2] = l; }                         // 周囲の地面は水色
+    else if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
   },
   labelEdge: (c, i, out) => {                                                                         // 札の境目の近く
     painted(c, i, out);
@@ -702,10 +762,582 @@ async function forgetSky() {
   await refreshSky(); showSkyPlan();
 }
 
+// ---- 周囲の地面（絵の外の地面） ----
+// 空の天球と同じ道具（studio/skydome.js）を、上下を逆さにした世界で使う：絵の視点を中心に、地平線より下の向きの色を 1 枚の全周の絵にまとめ、
+// 絵に無い向きをツール内の計算か AI（Codex）で埋める。粒は、その向きの視線が土台の平面（推定した地面の高さ）に当たる所に置く。
+// 逆さの世界で「空」として扱うのは、絵の中心の視点の「空でない背景の画素」（AI が描いた背景の絵があれば、物があった所も使う）。
+const SURROUND_SIGMA = 0.65; // 粒の広がり（σ）÷ 粒の間隔。後ろが何も無いので、絵の粒（SIGMA_K）より広くしてすき間を無くす
+const SURROUND_GRID = 0.12, SURROUND_GROW = 0.012, SURROUND_MAX = 180; // 粒の間隔（m）：近くは GRID、遠くは 距離 × GROW。置く距離の上限（m）
+const surround = { key: '', map: null, soil: null, type: 0, fillKey: '', fill: null, grid: null, counts: [0, 0, 0, 0] };
+const SOIL = new Uint8Array(256); for (const t of TYPES) if (t.tracks) SOIL[t.id] = 1; // 足あとが付く種類（地面、草地）= 歩ける地面
+const centerView = () => data.views.find((v) => !v.onlyNew) || data.views[0];
+const flipV = (rgba, w, h) => { const out = new Uint8ClampedArray(rgba.length); for (let y = 0; y < h; y++) out.set(rgba.subarray(y * w * 4, (y + 1) * w * 4), (h - 1 - y) * w * 4); return out; };
+function groundMap() {
+  const v = centerView(), c = colorOf(v, ui.colorSrc), plate = ui.plate ? v.plates[c.key] : null, back = v.hasTypes ? backOf(v, ui.colorSrc, false) : null;
+  const key = `${data.views.indexOf(v)}|${c.key}|${plate ? plate.version : '-'}|${ui.halo}`;
+  if (surround.key === key) return surround.map;
+  const n = v.W * v.H, member = new Uint8Array(n), soil = new Uint8Array(n), seen = new Uint32Array(256);
+  let soils = 0;
+  for (let i = 0; i < n; i++) {
+    member[i] = v.isSky[i] ? 0 : back && (back.thing[i] || back.kind[i]) ? (plate && plate.mask[i * 4] >= 128 ? 1 : 0) : 1;
+    if (member[i] && v.hasTypes && SOIL[v.type[i]] && !(back && (back.thing[i] || back.kind[i]))) { soil[i] = 1; soils++; seen[v.type[i]]++; }
+  }
+  const m = Array.from(v.matrix.elements); m[1] = -m[1]; m[5] = -m[5]; m[9] = -m[9]; // 世界の上下を逆さにする
+  const build = (mask) => buildSkyMap([{ W: v.W, H: v.H, ...v.def.intrinsics, m, dist: skyDistance(mask, v.W, v.H), px: plate ? plate.px : c.px, fresh: null }], { width: 2048, margin: 4 });
+  surround.map = build(member);
+  // ツール内で埋める色は、歩ける地面（地面、草地）の画素だけから伸ばす。水や遠景の色が、周囲の地面に広がらないようにする
+  surround.soil = soils > n * 0.005 ? build(soil) : surround.map;
+  surround.type = GROUND_TYPE; { let best = 0; for (let t = 0; t < 256; t++) if (seen[t] > best) { best = seen[t]; surround.type = t; } }
+  surround.key = key; surround.fillKey = '';
+  return surround.map;
+}
+async function groundAiLayer() {
+  const sfx = skySfx();
+  if (!(sfx in data.groundAi)) {
+    const px = data.groundAiFiles[`ground_ai${sfx}`] ? await tryImage(`/files/paint-out/ground_ai${sfx}.png`, AI_W, AI_H) : null;
+    data.groundAi[sfx] = px ? { W: AI_W, H: AI_H, rgba: px, version: 1 } : null;
+  }
+  return data.groundAi[sfx];
+}
+// いまの地図（絵 + AI の層）と、ツール内で埋めた色
+function groundKnown() {
+  const map = groundMap(), ai = ui.surroundAi ? data.groundAi[skySfx()] || null : null, known = withAi(map, ai), fillKey = `${surround.key}|${ai ? skySfx() + ai.version : '-'}`;
+  if (surround.fillKey !== fillKey) { surround.fill = fillSky(withAi(surround.soil, ai), { ground: true }); surround.fillKey = fillKey; }
+  return { map, ai, known, fill: surround.fill };
+}
+// 地面の上の点を、視点の真下を中心にした輪に並べる（高さ h の視点から見た向きと、全周の絵の上の位置も持つ）。逆さの世界の向きなので y は上向き
+function groundGrid(h) {
+  if (surround.grid && surround.grid.h === h) return surround.grid;
+  const rs = [];
+  let n = 0;
+  for (let r = SURROUND_GRID / 2; r <= SURROUND_MAX;) { const s = Math.max(SURROUND_GRID, r * SURROUND_GROW), count = Math.max(6, Math.round(2 * Math.PI * r / s)); rs.push({ r, s, count }); n += count; r += s; }
+  const dir = new Float32Array(n * 3), u = new Float32Array(n), v = new Float32Array(n), x = new Float32Array(n), z = new Float32Array(n), gap = new Float32Array(n);
+  let k = 0;
+  rs.forEach(({ r, s, count }, ring) => {
+    const t = Math.hypot(r, h), el = Math.atan2(h, r);
+    for (let i = 0; i < count; i++, k++) {
+      const az = (i + (ring & 1 ? 0.5 : 0)) / count, a = az * 2 * Math.PI, sx = Math.sin(a), cz = Math.cos(a);
+      dir[k * 3] = sx * r / t; dir[k * 3 + 1] = h / t; dir[k * 3 + 2] = cz * r / t;
+      u[k] = az % 1; v[k] = 0.5 - el / Math.PI; x[k] = sx * r; z[k] = cz * r; gap[k] = s;
+    }
+  });
+  return (surround.grid = { h, n, dir, u, v, x, z, gap });
+}
+// 視点ごとの「背景の奥行き」（手前の物を取り除いた奥行き。物の後ろは背後の層の奥行き、分からない所は -1、空は 0）
+function backgroundDepth(o) {
+  if (o.onlyNew) return null;
+  const back = o.hasTypes ? backOf(o, ui.colorSrc) : null;
+  if (!back) return o.z;
+  const n = o.W * o.H, bz = new Float32Array(n);
+  for (let i = 0; i < n; i++) bz[i] = back.kind[i] === BACK_BEHIND ? back.z2[i] : back.thing[i] ? -1 : o.z[i];
+  return bz;
+}
+// ワールドの点が、視点 o の絵（と背後の層）でもう覆われているか。覆われている所には周囲の地面の粒を置かない。
+// わくの中で、背景がその点と同じくらいの距離か、もっと遠い（= 絵ではそこに地面が無く、向こうが見えている）なら「覆われている」。
+// 背景のほうがずっと手前（木立ちや遠景の後ろ）や空なら、覆われていない。
+// 戻り値：0 = 覆われていない、1 = 覆われている、2 = 覆われているが、視線が地面をかすめていて 1 画素が地面の上で GRAZE m より長い（絵の粒では横から見るとすじになる所）
+const GRAZE = 1.5;
+function framedIn(o, bz, x, y, z) {
+  const m = o.w2c, { fx, fy, cx, cy } = o.def.intrinsics;
+  const xc = m[0] * x + m[1] * y + m[2] * z + m[3], yc = m[4] * x + m[5] * y + m[6] * z + m[7], zc = -(m[8] * x + m[9] * y + m[10] * z + m[11]);
+  if (zc <= 0.05) return 0;
+  const ix = Math.floor(cx + xc / zc * fx), iy = Math.floor(cy - yc / zc * fy);
+  if (ix < 0 || iy < 0 || ix >= o.W || iy >= o.H) return 0;
+  const j = iy * o.W + ix;
+  if (bz ? !(bz[j] < 0 || bz[j] > 0.75 * zc) : !(o.onlyNew[j * 4] >= 128 && o.z[j] > 0.75 * zc)) return 0; // 足した視点は、新しく描いた画素だけ
+  return zc * zc / (fy * Math.max(0.1, Math.abs(o.c2w[7] - y))) > GRAZE ? 2 : 1;
+}
+function surroundSplats() {
+  if (!ui.surround || !data) return null;
+  const v = centerView(), { map, ai, fill } = groundKnown();
+  const eye = [v.c2w[3], v.c2w[7], v.c2w[11]], baseY = data.baseY !== undefined ? data.baseY : (data.baseY = estimateModel().baseY), h = eye[1] - baseY;
+  if (!(h > 0.2)) { surround.counts = [0, 0, 0, 0]; return null; }
+  const grid = groundGrid(h), out = colorDome(grid, { map, ai, fill: ui.surroundFill ? fill : null, mottle: 0 });
+  const sway = Math.round(((TYPE_BY_ID.get(surround.type) || {}).sway || 0) * 255), counts = [0, 0, 0, 0], amp = fill ? fill.rough * 1.6 : 0;
+  const keep = [], bzs = data.views.map(backgroundDepth), tmp = [0, 0, 0, 0], nv = data.views.length;
+  for (let i = 0; i < grid.n; i++) {
+    const px = eye[0] + grid.x[i], pz = eye[2] + grid.z[i];
+    // ほかの視点の絵で覆われている所には置かない。ただし、絵の中心の視点や足した視点で「かすめて見えている」だけの所には置く
+    // （中心の視点なら絵と同じ色なので、元の視点からの見え方は変わらず、横や上から見たときのすじのすき間が埋まる）
+    let cover = 0, own = false;
+    for (let k = 0; k < nv && cover !== 1; k++) { const o = data.views[k], f = framedIn(o, bzs[k], px, baseY, pz); if (f === 1 || (f === 2 && o !== v && !o.onlyNew)) cover = 1; else if (f === 2) { cover = 2; own = own || o === v; } }
+    if (cover === 1) { counts[1]++; continue; }
+    if (cover === 2 && own && out.from[i] === 1) { counts[1]++; keep.push(i); continue; }
+    // 絵ではその向きに別の物（木立ちや遠景）が見えていて、地面はその後ろ：絵の色は使わず、ツール内で埋めた色にする
+    if (out.from[i] === 1) { if (ui.surroundFill && fill) { sampleMap(fill, grid.u[i], grid.v[i], tmp); out.color[i * 3] = tmp[0]; out.color[i * 3 + 1] = tmp[1]; out.color[i * 3 + 2] = tmp[2]; out.from[i] = 3; } else out.from[i] = 0; }
+    counts[out.from[i]]++;
+    if (out.from[i] >= 2) keep.push(i);
+  }
+  surround.counts = counts;
+  const n = keep.length, col = {
+    position: new Float32Array(n * 3), size: new Float32Array(n), color: new Uint8Array(n * 3), view: new Uint16Array(n).fill(surroundViewIndex()), depthGray: new Uint8Array(n),
+    type: new Uint8Array(n).fill(surround.type), sway: new Uint8Array(n).fill(sway), normal: new Int8Array(n * 3), cov: new Float32Array(n * 6), layer: new Uint8Array(n).fill(2),
+  };
+  keep.forEach((i, k) => {
+    const t = Math.hypot(grid.x[i], grid.z[i], h), s2 = (grid.gap[i] * SURROUND_SIGMA) ** 2;
+    // ツール内で埋めた所には、絵と同じくらいの色のムラを足す（地面の上の位置で決まる、1 m ほどと 30 cm ほどの模様）
+    const j = out.from[i] === 3 ? skyNoise(grid.x[i] * 0.03, 0.5, grid.z[i] * 0.03) * amp : 0;
+    col.position[k * 3] = eye[0] + grid.x[i]; col.position[k * 3 + 1] = baseY; col.position[k * 3 + 2] = eye[2] + grid.z[i];
+    col.size[k] = grid.gap[i];
+    for (let c = 0; c < 3; c++) col.color[k * 3 + c] = Math.max(0, Math.min(255, out.color[i * 3 + c] + j));
+    col.depthGray[k] = Math.max(0, Math.min(255, (1 - Math.log(Math.max(t, v.near) / v.near) / Math.log(v.far / v.near)) * 255));
+    col.normal[k * 3 + 1] = 127;
+    col.cov[k * 6] = s2; col.cov[k * 6 + 3] = s2 * 0.0225; col.cov[k * 6 + 5] = s2; // 地面に寝た丸（厚みは 0.15 倍）
+  });
+  return { columns: col, count: n };
+}
+// 地平線より上の向き（逆さの世界では下半分）を「もう絵がある」ことにした地図。頼む絵の穴を、地平線より下だけにする
+function belowHorizon(known) {
+  const a = new Float32Array(known.a); a.fill(1, (known.H >> 1) * known.W);
+  return { ...known, a };
+}
+// 頼む絵の、地平線より上（空の帯）を、うすい色 1 色の仮の帯にする。y0 = 地平線の行（上から）
+const GROUND_HORIZON = Math.round(FACE.h / 2 - FACE.w / 2 / Math.tan(FACE.hfov / 2 * Math.PI / 180) * Math.tan(FACE.pitch * Math.PI / 180));
+function hazeBand(image, w) {
+  const o = (GROUND_HORIZON * w + (w >> 1)) * 4, c = [0, 1, 2].map((k) => Math.round(image[o + k] * 0.45 + 255 * 0.55));
+  for (let i = 0; i < (GROUND_HORIZON + 3) * w; i++) { image[i * 4] = c[0]; image[i * 4 + 1] = c[1]; image[i * 4 + 2] = c[2]; image[i * 4 + 3] = 255; }
+  return image;
+}
+function showSurround() {
+  if (!data || groundJob) return;
+  const [hole, painted, byAi, byTool] = surround.counts, total = Math.max(1, hole + painted + byAi + byTool), pc = (x) => `${Math.round(100 * x / total)}%`;
+  $('surroundInfo').textContent = !ui.surround ? '' : `視点のまわり ${SURROUND_MAX} m の地面のうち、絵に描かれている所 ${pc(painted)}、AI が描いた所 ${pc(byAi)}、ツール内で埋めた所 ${pc(byTool)}、空いたまま ${pc(hole)}。`;
+  $('surroundAi').disabled = !data.groundAiFiles[`ground_ai${skySfx()}`];
+  const known = belowHorizon(withAi(groundMap(), data.groundAi[skySfx()] || null)); // 頼む枚数は、AI の層を使う・使わないに関係なく、もう描いてもらった所を除いて数える
+  let n = 0; for (let k = 0; k < FACE.count; k++) if (faceHoles(k, known) >= HOLE_MIN) n++;
+  $('groundPlan').textContent = n ? `いま穴のある向きは ${n} / ${FACE.count}。押すと ChatGPT の利用枠を ${n} 枚ぶん使います（1 枚 1〜2 分）。` : '周囲は全部埋まっています。押しても Codex は呼びません。';
+}
+// AI（Codex）に周囲の地面を描いてもらう：4 つの向きを順に、30° 見下ろした絵として頼む（逆さの世界の絵を上下に返してから渡す）
+let groundJob = false, groundStop = false;
+const GROUND_BUTTONS = ['groundPaint', 'groundDry', 'groundForget'];
+async function paintGround(dryRun) {
+  if (groundJob || !app || !data) return;
+  const log = (t) => { $('groundLog').hidden = false; $('groundLog').textContent = t; };
+  groundJob = true; groundStop = false; for (const id of GROUND_BUTTONS) $(id).disabled = true; $('groundStopBtn').hidden = false;
+  let done = 0;
+  try {
+    const sfx = skySfx(), map = groundMap(), src = SOURCES[ui.colorSrc], old = await groundAiLayer();
+    const ai = { W: AI_W, H: AI_H, rgba: old ? new Uint8ClampedArray(old.rgba) : new Uint8ClampedArray(AI_W * AI_H * 4), version: (old ? old.version : 0) + 1 };
+    const first = data.views[0], styleRef = src.file && first.colors[ui.colorSrc] ? `${first.def.name}_painted${sfx}` : null;
+    for (let k = 0; k < FACE.count && !groundStop; k++) {
+      const known = belowHorizon(withAi(map, ai)), face = renderFace(k, known, fillSky(withAi(surround.soil, ai), { ground: true })), name = faceCamera(k).name;
+      if (face.holes < HOLE_MIN) continue;
+      const head = `${name}：穴 ${Math.round(face.holes * 100)}%。`;
+      log(head + (dryRun ? '文と絵を用意しています' : 'Codex が描いています（30 秒〜数分）'));
+      await api(`/api/paint-out/ground_face${k}${sfx}.png`, await pngBlob(hazeBand(flipV(face.image, FACE.w, FACE.h), FACE.w), FACE.w, FACE.h));
+      await api(`/api/paint-out/ground_face${k}${sfx}_holes.png`, await pngBlob(flipV(face.mask, FACE.w, FACE.h), FACE.w, FACE.h));
+      await api('/api/paint/sky', { kind: 'ground', face: k, sfx, light: src.paint, styleRef, dryRun });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (groundStop) await api('/api/paint/stop'); else log(`${head}Codex が描いています（${st.seconds} 秒）`); }
+      if (groundStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
+      done++;
+      if (dryRun) continue;
+      const painted = flipV(await loadImage(`/files/paint-out/ground_face${k}${sfx}_painted.png`, FACE.w, FACE.h), FACE.w, FACE.h);
+      pasteFace(ai, k, painted, face.mask);
+      await api(`/api/paint-out/ground_ai${sfx}.png`, await pngBlob(ai.rgba, AI_W, AI_H));
+      ai.version++; data.groundAi[sfx] = ai; data.groundAiFiles[`ground_ai${sfx}`] = true;
+    }
+    log(groundStop ? '止めました。' : !done ? '穴のある向きがありません。' : dryRun ? `${done} 枚ぶんの文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。` : `${done} 枚描いてもらい、周囲の地面に使っています。`);
+  } catch (e) { console.error(e); log('止まりました：' + e.message); }
+  finally {
+    groundJob = false; for (const id of GROUND_BUTTONS) $(id).disabled = false; $('groundStopBtn').hidden = true;
+    if (done && !dryRun) { ui.surroundAi = true; $('surroundAi').checked = true; rebuild(); } else showSurround();
+  }
+}
+async function forgetGround() {
+  if (groundJob || !data) return;
+  const sfx = skySfx();
+  try { await api(`/api/paint-out/ground_ai${sfx}.png`, null, 'DELETE'); } catch (e) { $('groundLog').hidden = false; $('groundLog').textContent = e.message; return; }
+  data.groundAi[sfx] = null; data.groundAiFiles[`ground_ai${sfx}`] = false; $('groundLog').hidden = true;
+  rebuild();
+}
+
+// ---- 外で作った世界の取り込み（studio/worldimport.js） ----
+// Marble や HunyuanWorld など、外の道具で作った世界の .ply を、位置と大きさを合わせてこの場面に重ねる。見比べ用。
+const WORLD_DEFAULT = { show: true, frame: 'cv', scale: 1, yaw: 0, x: 0, y: 0, z: 0, point: 0.05 };
+const world = { ply: null, name: '', kind: '', tried: false, count: 0, bounds: null, error: '' };
+const worldViewIndex = () => data.views.length * 3 + 1;
+ui.world = { ...WORLD_DEFAULT };
+try { Object.assign(ui.world, JSON.parse(localStorage.getItem('psf-world') || '{}')); } catch { /* 無ければ最初の値 */ }
+const saveWorld = () => { try { localStorage.setItem('psf-world', JSON.stringify(ui.world)); } catch { /* 保存できなくても動く */ } };
+function setWorldPly(buffer, name) {
+  const ply = parsePly(buffer, WORLD_PROPS);
+  world.kind = worldKind(ply); world.ply = ply; world.name = name; world.error = '';
+}
+async function loadWorldFile() {
+  if (world.tried || !data.worldFile) return;
+  world.tried = true;
+  try { const res = await fetch('/files/paint-out/world.ply', { cache: 'no-store' }); if (res.ok) setWorldPly(await res.arrayBuffer(), 'paint-out/world.ply'); }
+  catch (e) { console.error(e); world.error = e.message; }
+}
+// 置き方：ずらす量は、絵の視点から見た 右 / 上 / 手前（m）
+function worldPlacement() {
+  const v = centerView(), w = ui.world, f = layoutFrame(v.c2w, 0);
+  return worldTransform({ frame: w.frame, c2w: v.c2w, scale: w.scale, yawDeg: w.yaw, offset: [f.right[0] * w.x - f.fwd[0] * w.z, w.y, f.right[2] * w.x - f.fwd[2] * w.z] });
+}
+function worldSplats() {
+  if (!world.ply || !ui.world.show || !data) return null;
+  const out = splatsFromWorld(world.ply, worldPlacement(), worldViewIndex(), { keep: Math.max(1, (ui.stride / 2) ** 2), pointSize: ui.world.point, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+  world.count = out.count; world.bounds = out.bounds;
+  return out;
+}
+function showWorld() {
+  const w = ui.world, has = !!world.ply, r = (x) => (Math.abs(x) >= 100 ? Math.round(x) : Math.round(x * 10) / 10);
+  $('worldBox').hidden = !has; $('worldPointBox').hidden = world.kind !== 'points';
+  $('worldShow').checked = w.show; press($('worldFrame'), w.frame);
+  $('worldScale').value = String(Math.log10(w.scale)); $('oWorldScale').textContent = `${w.scale >= 10 ? w.scale.toFixed(1) : w.scale.toFixed(3)} 倍`;
+  $('worldYaw').value = String(w.yaw); $('oWorldYaw').textContent = `${w.yaw}°`;
+  $('worldX').value = String(w.x); $('worldY').value = String(w.y); $('worldZ').value = String(w.z); $('oWorldOffset').textContent = `${r(w.x)} / ${r(w.y)} / ${r(w.z)} m`;
+  $('worldPoint').value = String(w.point); $('oWorldPoint').textContent = `${Math.round(w.point * 1000) / 10} cm`;
+  const b = world.bounds;
+  $('worldInfo').textContent = world.error ? `読めませんでした：${world.error}` : !has ? 'まだ読み込んでいません。'
+    : `${world.name}：${world.kind === 'gaussians' ? '3D ガウシアン' : '色つきの点'} ${world.ply.count.toLocaleString()} 個${w.show && b ? `（いま ${world.count.toLocaleString()} 粒。広がり 横 ${r(b.max[0] - b.min[0])} × 高さ ${r(b.max[1] - b.min[1])} × 奥 ${r(b.max[2] - b.min[2])} m）` : ''}`;
+}
+
+// ---- 物体ごとの 3D モデル（studio/objectmodel.js） ----
+// 絵の中の物体を 1 つずつ切り抜いて外の道具で 3D モデルにしてもらい、それを絵の物体の輪郭に合わせて置いて、粒にする。
+const objs = { models: new Map(), tried: false, lines: [], busy: '' }; // models：物体の番号 → { name, meshes, isObj, fit, key, error }
+const objectViewIndex = () => data.views.length * 3 + 2;
+ui.objects = { show: true, replace: true, paint: true, inflate: false, adjust: {} }; // adjust：物体の番号 → { yaw（度。自動の向きに足す）, scale（自動の大きさに掛ける） }
+try { Object.assign(ui.objects, JSON.parse(localStorage.getItem('psf-objects') || '{}')); } catch { /* 無ければ最初の値 */ }
+const saveObjects = () => { try { localStorage.setItem('psf-objects', JSON.stringify(ui.objects)); } catch { /* 保存できなくても動く */ } };
+const objectTargetList = () => { if (!data.objectTargets) { const v = centerView(); data.objectTargets = v.hasTypes ? objectTargets(v, { front: FRONT }) : []; } return data.objectTargets; };
+const objectAdjust = (id) => ui.objects.adjust[id] || { yaw: 0, scale: 1 };
+// モデルのファイル（.glb / .gltf / .obj）から、面の集まりを取り出す（位置・面の向き・UV・頂点の色・材質の色・絵）
+async function loadModelMeshes(buffer, name) {
+  const isObj = /\.obj$/i.test(name);
+  let root;
+  if (isObj) root = new OBJLoader().parse(new TextDecoder().decode(buffer));
+  else { const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder); root = (await loader.parseAsync(buffer, '')).scene; }
+  root.updateMatrixWorld(true);
+  const meshes = [], tmp = new THREE.Vector3(), nm = new THREE.Matrix3(), texCache = new Map();
+  const pixels = (tex) => { // 絵（テクスチャ）を画素の列にする。大きい絵は 1024 まで縮める
+    if (!tex || !tex.image) return null;
+    if (texCache.has(tex)) return texCache.get(tex);
+    let out = null;
+    try {
+      const img = tex.image, k = Math.min(1, 1024 / Math.max(img.width, img.height)), w = Math.max(1, Math.round(img.width * k)), h = Math.max(1, Math.round(img.height * k));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(img, 0, 0, w, h);
+      out = { w, h, data: g.getImageData(0, 0, w, h).data, flipY: !!tex.flipY };
+    } catch (e) { console.warn('モデルの絵を読めませんでした', e); }
+    texCache.set(tex, out); return out;
+  };
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    const g = o.geometry, pa = g.attributes.position, na = g.attributes.normal, ua = g.attributes.uv, ca = g.attributes.color, mat = Array.isArray(o.material) ? o.material[0] : o.material;
+    const positions = new Float32Array(pa.count * 3), normals = na ? new Float32Array(pa.count * 3) : null;
+    nm.getNormalMatrix(o.matrixWorld);
+    for (let i = 0; i < pa.count; i++) {
+      tmp.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld); positions[i * 3] = tmp.x; positions[i * 3 + 1] = tmp.y; positions[i * 3 + 2] = tmp.z;
+      if (na) { tmp.fromBufferAttribute(na, i).applyMatrix3(nm).normalize(); normals[i * 3] = tmp.x; normals[i * 3 + 1] = tmp.y; normals[i * 3 + 2] = tmp.z; }
+    }
+    let uvs = null, colors = null;
+    if (ua) { uvs = new Float32Array(pa.count * 2); for (let i = 0; i < pa.count; i++) { uvs[i * 2] = ua.getX(i); uvs[i * 2 + 1] = ua.getY(i); } }
+    if (ca) { colors = new Float32Array(pa.count * 3); for (let i = 0; i < pa.count; i++) { colors[i * 3] = ca.getX(i); colors[i * 3 + 1] = ca.getY(i); colors[i * 3 + 2] = ca.getZ(i); } }
+    meshes.push({ positions, normals, uvs, colors, colorSize: 3, indices: g.index ? Uint32Array.from(g.index.array) : null, base: mat && mat.color ? [mat.color.r, mat.color.g, mat.color.b] : null, tex: mat && uvs ? pixels(mat.map) : null });
+  });
+  if (!meshes.length) throw new Error('モデルに面がありません');
+  return { name, meshes, isObj, fit: null, key: '', error: '' };
+}
+async function loadObjectFiles() {
+  if (objs.tried) return;
+  objs.tried = true;
+  for (const [id, name] of Object.entries(data.objectFiles || {})) {
+    try { const res = await fetch(`/files/paint-out/${name}`, { cache: 'no-store' }); if (res.ok) objs.models.set(Number(id), await loadModelMeshes(await res.arrayBuffer(), name)); }
+    catch (e) { console.error(e); objs.models.set(Number(id), { name, meshes: null, error: e.message }); }
+  }
+}
+// 物体 1 つぶんの置き方（向き・大きさ・位置）。色のもとや手での直しが同じなら作り直さない
+function objectFit(target, model) {
+  const v = centerView(), c = colorOf(v, ui.colorSrc), adj = objectAdjust(target.id), key = `${c.key}:${adj.yaw}:${adj.scale}`;
+  if (model.fit && model.key === key) return model.fit;
+  const cx = fitContext({ W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics }, target, { px: c.px, front: FRONT });
+  let best = null;
+  for (const up of model.isObj ? ['y', 'z'] : ['y']) { // OBJ は上の向きが決まっていないので、両方試して合うほうを使う
+    const pts = meshPoints(model.meshes, 12000, { up }), f = fitModel(pts, cx, { manual: adj.yaw * Math.PI / 180, scaleMul: adj.scale });
+    if (!best || f.auto.iou > best.auto.iou) best = { ...f, up, height: pts.size[1] * f.scale, hasColor: pts.hasColor, area: pts.area };
+  }
+  let r = 0, g = 0, b = 0, k = 0; // 物体の絵の色の平均（モデルに色が無いときの、見えていない側の色）
+  for (let o = 0; o < cx.mask.length; o++) if (cx.mask[o] === 1) { r += cx.pc[o * 3]; g += cx.pc[o * 3 + 1]; b += cx.pc[o * 3 + 2]; k++; }
+  best.fallback = k ? [r / k, g / k, b / k] : [128, 128, 128];
+  model.fit = best; model.key = key;
+  return best;
+}
+function objectSplats() {
+  objs.lines = [];
+  if (!data || (!objs.models.size && !ui.objects.inflate) || !centerView().hasTypes) return [];
+  const v = centerView(), c = colorOf(v, ui.colorSrc), view = { W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics, near: v.near, far: v.far }, out = [];
+  for (const target of objectTargetList()) {
+    const model = objs.models.get(target.id), kind = TYPE_BY_ID.get(target.typeId) || {};
+    if (!model) { // モデルが無い物体：輪郭をふくらませた形（入れてあれば）
+      if (!ui.objects.inflate) continue;
+      const board = !!data.painting; // 絵から作った場面は、物体が 1 枚の板として置いてある
+      const p = inflateSplats(view, target, c.px, { stride: ui.stride, board, sway: Math.round((kind.sway || 0) * 255), viewId: objectViewIndex(), maxStretch: Math.min(ui.stretch, 6), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+      objs.lines.push(`物体 ${target.id}（${kind.name || '?'}）：輪郭をふくらませた形（厚み 最大 ${(p.half * 2).toFixed(2)} m${board ? '' : '。裏側だけ足しました'}）`);
+      if (ui.objects.show) out.push({ ...p, id: board ? target.id : 0 });
+      continue;
+    }
+    if (!model.meshes) { objs.lines.push(`物体 ${target.id}：${model.name} を読めませんでした（${model.error}）`); continue; }
+    try {
+      const fit = objectFit(target, model), spacing = target.depth / view.intr.fx * ui.stride, n = Math.max(3000, Math.min(400000, Math.round(fit.area * fit.scale * fit.scale / (spacing * spacing))));
+      const type = TYPE_BY_ID.get(target.typeId) || {};
+      objs.lines.push(`物体 ${target.id}（${type.name || '?'}）：${model.name}。輪郭の重なり ${Math.round(fit.iou * 100)}%${fit.hasColor ? `、色の近さ ${Math.round(fit.colorSim * 100)}%` : '（モデルに色なし）'}、向き ${Math.round(fit.offset * 180 / Math.PI)}°、高さ ${fit.height.toFixed(2)} m${fit.up === 'z' ? '（+Z を上として読みました）' : ''}`);
+      if (!ui.objects.show) continue;
+      const pts = meshPoints(model.meshes, n, { up: fit.up, seed: 2 });
+      const p = modelSplats(pts, fit, view, target, { spacing, px: c.px, paint: ui.objects.paint, sway: Math.round((type.sway || 0) * 255), viewId: objectViewIndex(), fallback: fit.fallback, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+      out.push({ ...p, id: target.id });
+    } catch (e) { console.error(e); objs.lines.push(`物体 ${target.id}：${model.name} を置けませんでした（${e.message}）`); }
+  }
+  return out;
+}
+const OBJ_SIDE = (t, W) => { const x = (t.x0 + t.x1) / 2 / W; return x < 0.33 ? '絵の左' : x > 0.67 ? '絵の右' : '絵のまん中'; };
+function showObjects() {
+  const box = $('objBox'); if (!box || !data) return;
+  const targets = objectTargetList(), pick = $('objPick'), v = centerView();
+  $('objNone').hidden = targets.length > 0; box.hidden = !targets.length;
+  if (!targets.length) return;
+  const cur = pick.value;
+  pick.replaceChildren(...targets.map((t) => { const o = document.createElement('option'); o.value = String(t.id); o.textContent = `物体 ${t.id}：${(TYPE_BY_ID.get(t.typeId) || {}).name || '?'}（${OBJ_SIDE(t, v.W)}、${t.depth.toFixed(1)} m 先${t.cut ? '、絵の端で切れている' : ''}）${objs.models.has(t.id) ? ' ●' : ''}`; return o; }));
+  if (targets.some((t) => String(t.id) === cur)) pick.value = cur;
+  const id = Number(pick.value), adj = objectAdjust(id), has = objs.models.has(id);
+  $('objShow').checked = ui.objects.show; $('objReplace').checked = ui.objects.replace; $('objPaint').checked = ui.objects.paint; $('objInflate').checked = ui.objects.inflate;
+  $('objAdjust').hidden = !has;
+  $('objYaw').value = String(adj.yaw); $('oObjYaw').textContent = `${adj.yaw > 0 ? '+' : ''}${adj.yaw}°`;
+  $('objScale').value = String(Math.log2(adj.scale)); $('oObjScale').textContent = `${adj.scale.toFixed(2)} 倍`;
+  $('objInfo').textContent = objs.busy || (objs.lines.length ? objs.lines.join('\n') : `手前の物が ${targets.length} 個あります。まだモデルはありません。`);
+}
+// 物体ごとの切り抜きの絵（物体の外は透明）を paint-out に書く。外の道具（絵 1 枚 → 3D モデル）に渡す
+async function exportObjectCutouts() {
+  const v = centerView(), c = colorOf(v, ui.colorSrc), targets = objectTargetList(), list = [];
+  for (const [k, t] of targets.entries()) {
+    objs.busy = `切り抜きを書いています…（${k + 1} / ${targets.length}）`; showObjects();
+    const cut = cutoutImage(v, t, c.px), name = `object_${t.id}.png`;
+    const res = await fetch(`/api/paint-out/${name}`, { method: 'POST', body: await pngBlob(cut.rgba, cut.w, cut.h) });
+    if (!res.ok) throw new Error(`${name} を保存できませんでした`);
+    list.push({ id: t.id, image: name, model: `object_${t.id}.glb`, type: (TYPE_BY_ID.get(t.typeId) || {}).key, bbox: [t.bx0, t.by0, t.bx1, t.by1], depth_m: Math.round(t.depth * 100) / 100, cut_by_frame: t.cut });
+    await sleep(0);
+  }
+  await fetch('/api/paint-out/objects.json', { method: 'POST', body: JSON.stringify({ note: 'object_<id>.png is the cut-out of one object (transparent outside). Save the 3D model made from it as object_<id>.glb (or .obj) in this folder.', source: c.key, objects: list }, null, 1) });
+  objs.busy = ''; showObjects();
+  $('objInfo').textContent = `切り抜きを ${list.length} 枚、paint-out フォルダに書きました（object_<番号>.png）。それぞれから作った 3D モデルを、同じフォルダに object_<番号>.glb の名前で置くか、下で選んでください。\n${objs.lines.join('\n')}`;
+}
+async function addObjectModel(id, file) {
+  const ext = (/\.(glb|obj)$/i.exec(file.name) || [])[1];
+  if (!ext) throw new Error('.glb か .obj のファイルを選んでください');
+  const buffer = await file.arrayBuffer(), model = await loadModelMeshes(buffer, file.name);
+  objs.models.set(id, model);
+  // 次に開いたときも使えるように、paint-out に置く（大きすぎて置けなければ、この場だけ）
+  try {
+    await fetch(`/api/paint-out/object_${id}.${ext.toLowerCase() === 'glb' ? 'obj' : 'glb'}`, { method: 'DELETE' });
+    const res = await fetch(`/api/paint-out/object_${id}.${ext.toLowerCase()}`, { method: 'POST', body: buffer });
+    if (res.ok) model.name = `object_${id}.${ext.toLowerCase()}`;
+  } catch (e) { console.warn(e); }
+}
+async function forgetObjectModel(id) {
+  objs.models.delete(id);
+  for (const ext of ['glb', 'obj']) await fetch(`/api/paint-out/object_${id}.${ext}`, { method: 'DELETE' }).catch(() => {});
+}
+
+// ---- AI に形の配置を書かせる（Codex。絵は作らず、文だけ。studio/layoutai.js） ----
+// 絵・奥行きの絵・カメラと奥行きの表を見せて、箱と円柱の一覧（layout_ai.json）を書いてもらう。
+// 「見比べて直す」回は、今の配置を絵に線で重ねた絵と、奥行き・物の輪郭との見比べの文を見せて、書き直してもらう。いちばん合った回の配置を残す。
+const layoutAi = { loaded: false, layout: null }; // layout = { objects, view, scores: [{ score, covered, precise, n }], best }
+async function loadLayoutAi() {
+  if (layoutAi.loaded) return layoutAi.layout;
+  layoutAi.loaded = true;
+  if (data.layoutAiFile) { try { const r = await fetch('/files/paint-out/layout_ai.json', { cache: 'no-store' }); layoutAi.layout = r.ok ? await r.json() : null; } catch { layoutAi.layout = null; } }
+  if (layoutAi.layout && !Array.isArray(layoutAi.layout.objects)) layoutAi.layout = null;
+  return layoutAi.layout;
+}
+const STONE_TYPE = typeByKey('stone').id;
+function layoutContext() {
+  const v = centerView(), baseY = data.baseY !== undefined ? data.baseY : (data.baseY = estimateModel().baseY);
+  let thing = null;
+  if (v.hasTypes) { thing = new Uint8Array(v.W * v.H); for (let i = 0; i < thing.length; i++) { const t = v.type[i]; thing[i] = !v.z[i] || !FRONT[t] ? 0 : (TYPE_BY_ID.get(t) || {}).solid === 'none' ? 2 : 1; } }
+  return { v, frame: layoutFrame(v.c2w, baseY), view: { W: v.W, H: v.H, z: v.z, c2w: v.c2w, w2c: v.w2c, intr: v.def.intrinsics }, thing, object: v.hasTypes ? v.object : null, baseY };
+}
+// 当たりの形にする：背景の面は推定のもの、物は AI が書いた箱と円柱
+function layoutModel() {
+  const cx = layoutContext(), est = estimateModel();
+  return { grounds: est.grounds, baseY: est.baseY, boxes: worldShapes(layoutAi.layout, cx.frame).map((s, i) => ({ ...s, typeId: STONE_TYPE, objectId: 1000 + i })) };
+}
+function scoreLayout(layout, cx) {
+  const shapes = worldShapes(layout, cx.frame), cmp = compareLayout(shapes, rasterLayout(shapes, cx.view), cx.view, { thing: cx.thing, object: cx.object });
+  return { shapes, cmp, row: { score: cmp.score, covered: cmp.covered, precise: cmp.precise, n: shapes.length } };
+}
+const LAYOUT_COLORS = ['#ff3b30', '#34c759', '#0a84ff', '#ffd60a', '#ff2d92', '#30d5c8', '#ff9f0a', '#bf5af2'];
+// 絵に、今の配置を線で重ねる（形ごとに色と番号）
+function layoutOverlay(cx, shapes, px) {
+  const { W, H } = cx.view, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), a = [0, 0, 0], b = [0, 0, 0], NEAR = 0.1;
+  g.putImageData(new ImageData(px instanceof Uint8ClampedArray ? px : new Uint8ClampedArray(px.buffer, px.byteOffset, px.length), W, H), 0, 0);
+  g.lineJoin = 'round'; g.font = `bold ${Math.round(W / 34)}px sans-serif`; g.textBaseline = 'top';
+  shapes.forEach((s, k) => {
+    const color = LAYOUT_COLORS[k % LAYOUT_COLORS.length];
+    let x0 = Infinity, y0 = Infinity;
+    for (const pass of [0, 1]) { // 先に黒いふち、次に色
+      g.strokeStyle = pass ? color : 'rgba(0,0,0,0.75)'; g.lineWidth = pass ? Math.max(2, W / 400) : Math.max(4, W / 200);
+      g.beginPath();
+      for (const [p, q] of shapeEdges(s)) {
+        projectTo(cx.view, p, a); projectTo(cx.view, q, b);
+        if (a[2] <= NEAR && b[2] <= NEAR) continue;
+        let P = p, Q = q;
+        if (a[2] <= NEAR || b[2] <= NEAR) { // カメラの後ろへ回る辺は、手前の面で切る
+          const t = (NEAR * 1.01 - a[2]) / (b[2] - a[2]), m = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t];
+          if (a[2] <= NEAR) P = m; else Q = m;
+          projectTo(cx.view, P, a); projectTo(cx.view, Q, b);
+        }
+        g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]);
+        if (a[0] >= 0 && a[0] < W && a[1] >= 0 && a[1] < H && (a[1] < y0 || (a[1] === y0 && a[0] < x0))) { x0 = a[0]; y0 = a[1]; }
+      }
+      g.stroke();
+    }
+    if (x0 === Infinity) return;
+    const label = String(k + 1), tw = g.measureText(label).width + 8, th = Math.round(W / 34) + 6, lx = Math.max(0, Math.min(W - tw, x0)), ly = Math.max(0, Math.min(H - th, y0 - th));
+    g.fillStyle = 'rgba(0,0,0,0.8)'; g.fillRect(lx, ly, tw, th); g.fillStyle = color; g.fillText(label, lx + 4, ly + 3);
+  });
+  return new Promise((ok) => c.toBlob(ok, 'image/png'));
+}
+// AI に見せる奥行きの絵：近い = 白、遠い = 黒に近い灰色、空 = まっ黒
+function layoutDepthImage(v) {
+  const n = v.W * v.H, out = new Uint8ClampedArray(n * 4);
+  let lo = Infinity, hi = 0; for (let i = 0; i < n; i++) { const z = v.z[i]; if (z) { if (z < lo) lo = z; if (z > hi) hi = z; } }
+  const k = hi > lo ? 1 / Math.log(hi / lo) : 0;
+  for (let i = 0; i < n; i++) { const z = v.z[i], g = z ? 40 + 215 * (1 - Math.log(z / lo) * k) : 0; out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = g; out[i * 4 + 3] = 255; }
+  return out;
+}
+function showLayoutAi() {
+  if (!data || layoutJob) return;
+  const L = layoutAi.layout, fixes = Number($('layoutFixes').value), pc = (x) => `${Math.round(100 * x)}%`;
+  $('layoutPlan').textContent = `押すと、Codex を ${1 + fixes} 回呼びます（最初に書く 1 回${fixes ? ` + 見比べて直す ${fixes} 回` : ''}。絵は作らず文だけで、1 回 1〜3 分）。ChatGPT の利用枠を使います。`;
+  $('layoutMore').disabled = !L; $('layoutForget').disabled = !L;
+  const aiBtn = document.querySelector('#walkShape button[data-v=ai]'); if (aiBtn) aiBtn.disabled = !L;
+  if (!L) { $('layoutInfo').textContent = 'AI が書いた配置はまだありません。'; return; }
+  const cx = layoutContext(), now = scoreLayout(L, cx).row, hist = (L.scores || []).map((r, i) => `${i ? `直し ${i}` : '最初'} ${pc(r.score)}`).join(' → ');
+  $('layoutInfo').textContent = `AI が書いた配置：形 ${L.objects.length} 個。${cx.thing ? `絵の物の輪郭との重なり ${pc(now.score)}（物の画素の ${pc(now.covered)} を覆い、形の画素の ${pc(now.precise)} が物の上）` : `奥行きの合う割合 ${pc(now.score)}`}。${hist ? `回ごと：${hist}。いちばん合った回を残しています。` : ''}当たりの形の「AI が書いた形」で使えます。重ねた絵は paint-out の layout_overlay.png。`;
+}
+let layoutJob = false, layoutStop = false;
+const LAYOUT_BUTTONS = ['layoutRun', 'layoutMore', 'layoutDry', 'layoutForget'];
+async function runLayoutAi({ fresh, fixes, dryRun }) {
+  if (layoutJob || !app || !data) return;
+  if (!fresh && !layoutAi.layout) return;
+  const log = (t) => { $('layoutLog').hidden = false; $('layoutLog').textContent = t; };
+  layoutJob = true; layoutStop = false; for (const id of LAYOUT_BUTTONS) $(id).disabled = true; $('layoutStopBtn').hidden = false;
+  let done = 0, changed = false;
+  try {
+    const cx = layoutContext(), px = colorOf(cx.v, ui.colorSrc).px, brief = briefText(cx.view, cx.frame), total = (fresh ? 1 : 0) + fixes;
+    await api('/api/paint-out/layout_picture.png', await pngBlob(px, cx.view.W, cx.view.H));
+    await api('/api/paint-out/layout_depth.png', await pngBlob(layoutDepthImage(cx.v), cx.view.W, cx.view.H));
+    let cur = fresh ? null : { objects: layoutAi.layout.objects }, scores = fresh ? [] : (layoutAi.layout.scores || []).slice(), best = fresh ? null : { layout: cur, score: scoreLayout(cur, cx).row.score, at: layoutAi.layout.best || 0 };
+    if (!fresh) await api('/api/paint-out/layout_ai.json', new Blob([JSON.stringify(cur, null, 1)], { type: 'application/json' })); // 直しのもとは、点数の記録を外した配置だけ
+    for (let r = 0; r < total && !layoutStop; r++) {
+      const refine = !(fresh && r === 0), head = `${refine ? `見比べて直す（${fresh ? r : r + 1} / ${fixes}）` : '最初の配置を書く'}：`;
+      let report = '';
+      if (refine) {
+        if (!cur) break; // 文と絵だけ用意したときは、直しのもとになる配置が無い
+        const now = scoreLayout(cur, cx);
+        await api('/api/paint-out/layout_overlay.png', await layoutOverlay(cx, now.shapes, px));
+        report = now.cmp.text;
+      }
+      log(head + (dryRun ? '文と絵を用意しています' : 'Codex が書いています（1〜3 分）'));
+      await api('/api/paint/layout', { brief, report, refine, dryRun });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (layoutStop) await api('/api/paint/stop'); else log(`${head}Codex が書いています（${st.seconds} 秒）`); }
+      if (layoutStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
+      done++;
+      if (dryRun) break;
+      cur = await (await fetch('/files/paint-out/layout_ai.json', { cache: 'no-store' })).json();
+      const row = scoreLayout(cur, cx).row;
+      scores.push(row); changed = true;
+      if (!best || row.score >= best.score) best = { layout: cur, score: row.score, at: scores.length - 1 };
+    }
+    if (changed && best) { // いちばん合った回の配置を、点数の記録と一緒に残す。最後の配置を重ねた絵も作り直す
+      const final = { objects: best.layout.objects, view: cx.v.def.name, scores, best: best.at };
+      await api('/api/paint-out/layout_ai.json', new Blob([JSON.stringify(final, null, 1)], { type: 'application/json' }));
+      await api('/api/paint-out/layout_overlay.png', await layoutOverlay(cx, scoreLayout(final, cx).shapes, px));
+      layoutAi.layout = final; layoutAi.loaded = true; data.layoutAiFile = true;
+    } else if (!fresh && layoutAi.layout) await api('/api/paint-out/layout_ai.json', new Blob([JSON.stringify(layoutAi.layout, null, 1)], { type: 'application/json' })); // 止めたときや、用意だけのとき：もとの記録に戻す
+    log(layoutStop ? '止めました。' : dryRun ? '文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。' : `Codex を ${done} 回呼びました。`);
+  } catch (e) { console.error(e); log(`止まりました：${e.message}`); }
+  finally {
+    layoutJob = false; for (const id of LAYOUT_BUTTONS) $(id).disabled = false; $('layoutStopBtn').hidden = true;
+    if (changed && ui.walkShape === 'ai') rebuild(); else showLayoutAi();
+  }
+}
+async function forgetLayoutAi() {
+  if (layoutJob || !data) return;
+  try { await api('/api/paint-out/layout_ai.json', null, 'DELETE'); } catch (e) { $('layoutLog').hidden = false; $('layoutLog').textContent = e.message; return; }
+  layoutAi.layout = null; data.layoutAiFile = false; $('layoutLog').hidden = true;
+  if (ui.walkShape === 'ai') { ui.walkShape = 'auto'; press($('walkShape'), 'auto'); rebuild(); } else showLayoutAi();
+}
+
+// ---- 絵と奥行きから推定したプレビズのモデル（studio/estimate.js） ----
+// 背景の面（手前の物を消した後ろの奥行きのメッシュ）と、手前の物を囲む箱。歩くときの当たりの形と、OBJ の書き出しに使う。
+const GROUND_TYPE = typeByKey('grass').id;
+// 当たりの形のもと：previz = プレビズの形、estimate = 絵から推定した形、ai = AI が書いた形（背景の面は推定のものを使う）
+const shapeMode = () => (ui.walkShape === 'auto' ? (data && data.painting ? 'estimate' : 'previz') : ui.walkShape === 'ai' && !layoutAi.layout ? 'estimate' : ui.walkShape);
+function estimateModel() {
+  const objName = new Map(((data.cams.labels && data.cams.labels.objects) || []).map((o) => [o.id, o.name]));
+  const grounds = [], seen = [];
+  for (const v of data.views) {
+    if (v.onlyNew) continue; // 足した視点（穴の所だけの絵）は使わない
+    const n = v.W * v.H, bz = new Float32Array(n), fill = new Uint8Array(n), bt = new Uint8Array(n).fill(GROUND_TYPE);
+    const back = v.hasTypes ? backOf(v, ui.colorSrc) : null;
+    for (let i = 0; i < n; i++) {
+      if (!back) { bz[i] = v.z[i]; continue; }
+      if (back.kind[i] === BACK_BEHIND) { bz[i] = back.z2[i]; const s = back.from[i], t = s >= 0 ? v.type[s] : 0; if (t && !FRONT[t]) bt[i] = t; } // 物の後ろ：背後の層の奥行き
+      else if (back.thing[i]) fill[i] = 1;                                                                                               // 物の足もとなど：まわりから埋める
+      else { bz[i] = v.z[i]; bt[i] = v.type[i] || GROUND_TYPE; }
+    }
+    grounds.push({ name: `background_${v.def.name}`, mesh: backgroundMesh({ W: v.W, H: v.H, bz, fill, btype: bt, c2w: v.c2w, intr: v.def.intrinsics }) });
+    if (v.hasTypes) seen.push({ W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, intr: v.def.intrinsics });
+  }
+  const boxes = objectBoxes(seen, { front: FRONT }).map((b) => ({ ...b, name: `${objName.get(b.objectId) || (TYPE_BY_ID.get(b.typeId) || {}).key || 'object'}_${b.objectId}` }));
+  // 土台の平面：歩ける面の高さのまん中。推定した面の外へ出たときや、面に穴がある所で、下へ落ちないようにする
+  const ys = [];
+  for (const g of grounds) { const { positions, indices, triType } = g.mesh; for (let k = 0; k < triType.length; k += 7) if ((TYPE_BY_ID.get(triType[k]) || {}).solid === 'walk') ys.push(positions[indices[k * 3] * 3 + 1]); }
+  ys.sort((p, q) => p - q);
+  return { grounds, boxes, baseY: ys.length ? ys[ys.length >> 1] : 0 };
+}
+// 推定したモデルを、当たり判定に渡せる形（shared/collision.js の solids）にする
+function estimateSolids(model) {
+  const solids = [];
+  for (const g of model.grounds) {
+    const { positions, indices, triType } = g.mesh;
+    for (const t of new Set(triType)) { // 種類ごとに 1 つのメッシュ
+      const idx = []; for (let k = 0; k < triType.length; k++) if (triType[k] === t) idx.push(indices[k * 3], indices[k * 3 + 1], indices[k * 3 + 2]);
+      const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(positions, 3)); geo.setIndex(idx);
+      solids.push({ mesh: new THREE.Mesh(geo), typeId: t, objectId: 0 });
+    }
+  }
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200)); base.rotation.x = -Math.PI / 2; base.position.y = model.baseY - 0.02;
+  solids.push({ mesh: base, typeId: GROUND_TYPE, objectId: 0 });
+  for (const b of model.boxes) {
+    const mesh = new THREE.Mesh(b.shape === 'cylinder' ? new THREE.CylinderGeometry(b.half[0], b.half[0], b.half[1] * 2, 16) : new THREE.BoxGeometry(b.half[0] * 2, b.half[1] * 2, b.half[2] * 2));
+    mesh.position.fromArray(b.center); mesh.rotation.y = b.yaw;
+    solids.push({ mesh, typeId: b.typeId, objectId: b.objectId });
+  }
+  return solids;
+}
+async function exportEstimate() {
+  if (!data) return;
+  const note = (t) => { $('estimateNote').textContent = t; };
+  try {
+    const model = estimateModel(), obj = toObj(model, (t) => (TYPE_BY_ID.get(t) || {}).key || `type${t}`);
+    await api('/api/previz-export/estimated_model.obj', new Blob([obj], { type: 'text/plain' }));
+    await api('/api/previz-export/estimated_model.json', new Blob([JSON.stringify({ units: 'metres, +Y up', base_y: model.baseY, boxes: model.boxes.map((b) => ({ name: b.name, part: b.part, object: b.objectId, type: (TYPE_BY_ID.get(b.typeId) || {}).key, center: b.center, half: b.half, yaw: b.yaw })) }, null, 1)], { type: 'application/json' }));
+    note(`previz-export に estimated_model.obj（背景の面 ${model.grounds.reduce((s, g) => s + g.mesh.triType.length, 0)} 三角形、物体 ${new Set(model.boxes.map((b) => b.name)).size} 個を箱 ${model.boxes.length} 個で）と estimated_model.json（箱の一覧）を書き出しました。`);
+  } catch (e) { console.error(e); note('書き出せませんでした：' + e.message); }
+}
+
 // ---- AI（Codex）に、手前の物を消した背景の絵を描いてもらう（背後の層の色） ----
 // 視点ごとに 1 枚：手前の物とその縁をマゼンタの穴にした絵を見せ、後ろの背景だけ描いてもらう。できた絵は paint-out の <視点>_plate_<色のもと>.png。
 const PLATE_GROW = 6; // 層のます（物とその縁）から、さらに何画素ひろげて描いてもらうか（絵と札のずれのぶん）
 let plateJob = false, plateStop = false;
+const PLATE_BUTTONS = ['platePaint', 'plateDry', 'plateForget', 'plateSharp'];
 // まだ背景の絵が無い視点（いまの色のもとで、手前の物がある視点）
 function plateTodo() {
   if (!data || !data.hasTypes) return [];
@@ -720,11 +1352,44 @@ function showPlatePlan() {
   $('platePlan').textContent = todo.length
     ? `まだ描いてもらっていない視点：${todo.map((v) => v.def.name).join('、')}。押すと ChatGPT の利用枠を ${todo.length} 枚ぶん使います（1 視点 1 枚、1 枚 1〜2 分）。`
     : have.length ? `いまの色のもとでは、全部の視点（${have.map((v) => v.def.name).join('、')}）に AI が描いた背景があります。押しても Codex は呼びません。` : '手前の物がある視点がありません。';
+  const withDepth = have.filter((v) => v.plates[colorOf(v, ui.colorSrc).key].sharp);
+  $('plateSharp').disabled = !have.length || withDepth.length === have.length;
+  for (const b of $('backDepth').children) b.disabled = b.dataset.v === 'plate' && !withDepth.length;
+  press($('backDepth'), withDepth.length ? ui.backDepth : 'calc');
+  $('plateSharpNote').textContent = !have.length ? 'AI が描いた背景の絵ができると、押せるようになります。'
+    : withDepth.length === have.length ? `奥行きを推定済み：${withDepth.map((v) => v.def.name).join('、')}。` : `まだ推定していない視点：${have.filter((v) => !withDepth.includes(v)).map((v) => v.def.name).join('、')}（1 視点 数秒〜数十秒。Codex は使いません）。`;
+}
+// AI が描いた背景の絵を SHARP に通し、背後の層の位置に使う奥行きを作る（視点ごと。この PC の sharp/ の用意が要る。Codex は使わない）
+async function sharpPlate() {
+  if (plateJob || !app || !data) return;
+  const log = (t) => { $('plateLog').hidden = false; $('plateLog').textContent = t; };
+  plateJob = true; plateStop = false; for (const id of PLATE_BUTTONS) $(id).disabled = true; $('plateStopBtn').hidden = false;
+  let done = 0;
+  try {
+    for (const v of plateHave()) {
+      const key = colorOf(v, ui.colorSrc).key, p = v.plates[key], name = v.def.name;
+      if (p.sharp || plateStop) continue;
+      log(`視点 ${name}：SHARP で奥行きを推定しています`);
+      await api('/api/sharp/plate', { view: name, src: key });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (plateStop) await api('/api/paint/stop'); else log(`視点 ${name}：SHARP で奥行きを推定しています（${st.seconds} 秒）`); }
+      if (plateStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'SHARP が失敗しました');
+      p.sharp = await loadPlateSharp(name, key); p.depth = undefined; p.version = ++plateVersion;
+      if (!p.sharp) throw new Error(`${name}_plate_${key}_sharp.ply を読めませんでした`);
+      done++;
+    }
+    log(plateStop ? '止めました。' : done ? `${done} 視点の奥行きを推定しました。背後の層の位置に使っています。` : '推定する視点がありません。');
+  } catch (e) { console.error(e); log('止まりました：' + e.message); }
+  finally {
+    plateJob = false; for (const id of PLATE_BUTTONS) $(id).disabled = false; $('plateStopBtn').hidden = true;
+    if (done) { ui.backDepth = 'plate'; rebuild(); } else showPlatePlan();
+  }
 }
 async function paintPlate(dryRun) {
   if (plateJob || !app || !data) return;
   const log = (t) => { $('plateLog').hidden = false; $('plateLog').textContent = t; };
-  const buttons = ['platePaint', 'plateDry', 'plateForget'];
+  const buttons = PLATE_BUTTONS;
   plateJob = true; plateStop = false; for (const id of buttons) $(id).disabled = true; $('plateStopBtn').hidden = false;
   let done = 0;
   try {
@@ -743,7 +1408,7 @@ async function paintPlate(dryRun) {
       if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
       done++;
       if (dryRun) continue;
-      v.plates[c.key] = { px: await loadImage(`/files/paint-out/${name}_plate_${c.key}.png`, v.W, v.H), mask: req.mask, version: ++plateVersion };
+      v.plates[c.key] = { px: await loadImage(`/files/paint-out/${name}_plate_${c.key}.png`, v.W, v.H), mask: req.mask, version: ++plateVersion, sharp: null };
     }
     log(plateStop ? '止めました。' : !done ? '頼む視点がありません。' : dryRun ? `${done} 枚ぶんの文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。` : `${done} 枚描いてもらいました。背後の層の色に使っています。`);
   } catch (e) { console.error(e); log('止まりました：' + e.message); }
@@ -777,6 +1442,10 @@ async function start(useGL) {
   forceGL = useGL;
   stage.prepend(renderer.domElement);
 
+  if (ui.surround) await groundAiLayer(); // 周囲の地面：AI が描いた層があれば先に読む
+  await loadLayoutAi();                    // AI が書いた形の配置があれば読む
+  await loadWorldFile();                   // paint-out/world.ply（外で作った世界）があれば読む
+  await loadObjectFiles();                 // paint-out/object_<番号>.glb（物体ごとの 3D モデル）があれば読む
   cloud = buildCloud();
   const n = cloud.n;
   const scene = new THREE.Scene();
@@ -798,7 +1467,10 @@ async function start(useGL) {
   a.wire = new THREE.Group();
   const wireMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.5, depthTest: false });
   a.previz = buildScene(); a.labels = labelScene(a.previz); // 太陽を動かしたときの影の計算にも使う
-  a.walk = createWalk(scene, a.labels.solids, a.labels.objects); // 歩くときの当たり判定（プレビズの形そのもの）
+  // 歩くときの当たり判定：プレビズの形そのものか、絵と奥行きから推定したモデル（プレビズの無い場面）
+  const mode = shapeMode();
+  a.estimate = mode === 'estimate' ? estimateModel() : mode === 'ai' ? layoutModel() : null;
+  a.walk = createWalk(scene, a.estimate ? estimateSolids(a.estimate) : a.labels.solids, a.estimate ? [{ id: 0, name: '推定した背景の面' }, ...(mode === 'ai' ? a.estimate.boxes.map((b) => ({ id: b.objectId, name: b.name })) : (data.cams.labels && data.cams.labels.objects) || [])] : a.labels.objects);
   a.walk.setEye(Number($('eye').value)); a.walk.setSpeed(Number($('speed').value)); a.walk.wk.noclip = !$('collide').checked;
   a.previz.traverse((o) => { if (o.isMesh && o.name !== 'ground') { const m = new THREE.Mesh(o.geometry, wireMat); o.updateWorldMatrix(true, false); m.applyMatrix4(o.matrixWorld); m.renderOrder = 2; a.wire.add(m); } });
   a.frusta = new THREE.Group();
@@ -831,7 +1503,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo(); showLayerInfo();
+  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi(); showWorld(); showObjects();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -849,7 +1521,7 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, sky, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
+  window.__splat = { app: a, cloud, data, ui, sky, surround, refreshSky, paintSky, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
     setMode,
     // 確かめ用：表示 mode での全粒の色（リニア）を返す
     colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
@@ -1024,7 +1696,7 @@ function showSharpInfo() {
 const pct = (a, b) => `${b ? Math.round(a / b * 1000) / 10 : 0}%`;
 // 背後の層の結果
 function showLayerInfo() {
-  const lines = backInfo.views.map((b) => `${b.name}：${b.count < 1000 ? `${b.count} 粒` : `${(b.count / 10000).toFixed(1)} 万粒`}${b.ai ? '（色は AI が描いた背景）' : ''}${b.covered ? `（ほかの視点の絵に写っている ${(b.covered / 10000).toFixed(1)} 万粒は置かない）` : ''}`);
+  const lines = backInfo.views.map((b) => `${b.name}：${b.count < 1000 ? `${b.count} 粒` : `${(b.count / 10000).toFixed(1)} 万粒`}${b.ai ? '（色は AI が描いた背景）' : ''}${b.refined !== undefined ? `（位置は背景の絵から推定：${Math.round(100 * b.refined / Math.max(1, b.refined + b.kept))}%）` : ''}${b.covered ? `（ほかの視点の絵に写っている ${(b.covered / 10000).toFixed(1)} 万粒は置かない）` : ''}`);
   $('layerInfo').textContent = !data.hasTypes ? '種類の札（X_type.png）が無いので、背後の層は作れません。' : !ui.back ? '' : lines.length ? lines.join('\n') : '背後の層を作れる視点がありません。';
   $('layerInfo').classList.toggle('warn', !data.hasTypes);
   showPlatePlan();
@@ -1043,6 +1715,9 @@ function setupViewButtons() {
     const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(i); b.textContent = `${v.def.name} だけ`; b.setAttribute('aria-pressed', 'false'); src.append(b);
     const j = document.createElement('button'); j.type = 'button'; j.className = 'plain'; j.dataset.v = String(i); j.textContent = `カメラ${v.def.name}`; jumpEl.append(j);
   });
+  { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(surroundViewIndex()); b.textContent = '（周囲の地面）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
+  { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(worldViewIndex()); b.textContent = '（取り込んだ世界）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
+  { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(objectViewIndex()); b.textContent = '（物体のモデル）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
   ui.source = 'all'; press(src, 'all');
   // 色のもと：どの視点にも無い絵は選べなくする。いま選んでいる絵が無くなっていたら、ある絵へ移す。
   const has = (key) => data.views.some((v) => v.colors[key]);
@@ -1145,6 +1820,57 @@ $('platePaint').addEventListener('click', () => paintPlate(false));
 $('plateDry').addEventListener('click', () => paintPlate(true));
 $('plateStopBtn').addEventListener('click', () => { plateStop = true; });
 $('plateForget').addEventListener('click', forgetPlate);
+$('plateSharp').addEventListener('click', sharpPlate);
+seg('walkShape', (v) => { ui.walkShape = v; rebuild(); });
+for (const [id, key] of [['surround', 'surround'], ['surroundFill', 'surroundFill'], ['surroundAi', 'surroundAi']]) $(id).addEventListener('change', () => { ui[key] = $(id).checked; rebuild(); });
+$('groundPaint').addEventListener('click', () => paintGround(false));
+$('groundDry').addEventListener('click', () => paintGround(true));
+$('groundStopBtn').addEventListener('click', () => { groundStop = true; });
+$('groundForget').addEventListener('click', forgetGround);
+$('estimateExport').addEventListener('click', exportEstimate);
+$('objExport').addEventListener('click', () => { exportObjectCutouts().catch((e) => { console.error(e); objs.busy = ''; $('objInfo').textContent = `書き出せませんでした：${e.message}`; }); });
+$('objPick').addEventListener('change', showObjects);
+$('objFile').addEventListener('change', async () => {
+  const file = $('objFile').files[0], id = Number($('objPick').value); if (!file || !id) return;
+  objs.busy = '読み込んでいます…'; showObjects();
+  try { await addObjectModel(id, file); objs.busy = ''; ui.objects.show = true; rebuild(); }
+  catch (e) { console.error(e); objs.busy = ''; showObjects(); $('objInfo').textContent = `読めませんでした：${e.message}`; }
+  $('objFile').value = '';
+});
+for (const [id, key] of [['objShow', 'show'], ['objReplace', 'replace'], ['objPaint', 'paint'], ['objInflate', 'inflate']]) $(id).addEventListener('change', () => { ui.objects[key] = $(id).checked; saveObjects(); rebuild(); });
+for (const [id, set] of [['objYaw', (a, x) => { a.yaw = x; }], ['objScale', (a, x) => { a.scale = Math.round(2 ** x * 100) / 100; }]]) {
+  const read = () => { const k = Number($('objPick').value), a = { ...objectAdjust(k) }; set(a, Number($(id).value)); ui.objects.adjust[k] = a; };
+  $(id).addEventListener('input', () => { read(); showObjects(); });
+  $(id).addEventListener('change', () => { read(); saveObjects(); rebuild(); });
+}
+$('objAuto').addEventListener('click', () => { delete ui.objects.adjust[Number($('objPick').value)]; saveObjects(); rebuild(); });
+$('objForget').addEventListener('click', async () => { await forgetObjectModel(Number($('objPick').value)); rebuild(); });
+$('worldFile').addEventListener('change', async () => {
+  const file = $('worldFile').files[0]; if (!file) return;
+  $('worldInfo').textContent = '読み込んでいます…';
+  try { setWorldPly(await file.arrayBuffer(), file.name); ui.world.show = true; rebuild(); }
+  catch (e) { console.error(e); world.ply = null; world.error = e.message; showWorld(); }
+});
+$('worldShow').addEventListener('change', () => { ui.world.show = $('worldShow').checked; saveWorld(); rebuild(); });
+seg('worldFrame', (v) => { ui.world.frame = v; saveWorld(); rebuild(); });
+for (const [id, set] of [['worldScale', (x) => { ui.world.scale = 10 ** x; }], ['worldYaw', (x) => { ui.world.yaw = x; }], ['worldX', (x) => { ui.world.x = x; }], ['worldY', (x) => { ui.world.y = x; }], ['worldZ', (x) => { ui.world.z = x; }], ['worldPoint', (x) => { ui.world.point = x; }]]) {
+  $(id).addEventListener('input', () => { set(Number($(id).value)); showWorld(); });
+  $(id).addEventListener('change', () => { set(Number($(id).value)); saveWorld(); rebuild(); });
+}
+$('worldFit').addEventListener('click', () => {
+  if (!world.ply || !data) return;
+  const v = centerView(), k = fitWorldScale(world.ply, worldPlacement(), { W: v.W, H: v.H, z: v.z, w2c: v.w2c, intr: v.def.intrinsics });
+  ui.world.scale = Math.max(0.001, Math.min(1000, ui.world.scale * k)); saveWorld(); rebuild();
+});
+$('worldReset').addEventListener('click', () => { Object.assign(ui.world, WORLD_DEFAULT); saveWorld(); rebuild(); });
+$('worldForget').addEventListener('click', () => { world.ply = null; world.name = ''; world.kind = ''; world.bounds = null; world.tried = true; $('worldFile').value = ''; rebuild(); });
+$('layoutRun').addEventListener('click', () => runLayoutAi({ fresh: true, fixes: Number($('layoutFixes').value), dryRun: false }));
+$('layoutMore').addEventListener('click', () => runLayoutAi({ fresh: false, fixes: 1, dryRun: false }));
+$('layoutDry').addEventListener('click', () => runLayoutAi({ fresh: !layoutAi.layout, fixes: layoutAi.layout ? 1 : 0, dryRun: true }));
+$('layoutStopBtn').addEventListener('click', () => { layoutStop = true; });
+$('layoutForget').addEventListener('click', forgetLayoutAi);
+$('layoutFixes').addEventListener('change', showLayoutAi);
+seg('backDepth', (v) => { ui.backDepth = v; rebuild(); });
 showLayerUi();
 seg('order', (v) => {
   ui.order = v; if (!app) return;

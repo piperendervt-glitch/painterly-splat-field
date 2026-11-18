@@ -153,6 +153,7 @@ export const BACK_NONE = 0, BACK_BEHIND = 1, BACK_RING = 2;
  *   z2      背景の奥行き（0 = 空）
  *   rgb     背景の色（W × H × 3）
  *   from    札（種類・物体・面の向きなど）を引き継ぐ元のます（−1 = 無し）
+ *   thing   手前の物（か膜）だったます（1）。背景のほうが手前になって置かなかった所も含む
  *   stats   { behind, ring, sky, skipped（背景のほうが手前になった）, noSource（左右にも上下にも背景が無かった） }
  * 作り方：
  *   奥行き … 行ごとに、埋める区間の左右にある背景を見る。両方が面なら 1 / z をまっすぐつなぐ（平らな地面なら正しい奥行きになる）。
@@ -164,10 +165,11 @@ export function backLayer({ W, H, z, type, rgba, front, cut = null, halo = 3, bl
   const n = W * H;
   const kind = new Uint8Array(n);
   let things = 0;
-  for (let i = 0; i < n; i++) if ((z[i] > 0 && front[type[i]]) || (cut && cut[i])) { kind[i] = BACK_BEHIND; things++; }
+  const thing = new Uint8Array(n); // 1 = 手前の物（か膜）のます。後で「置かない」と決めた所も含む
+  for (let i = 0; i < n; i++) if ((z[i] > 0 && front[type[i]]) || (cut && cut[i])) { kind[i] = BACK_BEHIND; thing[i] = 1; things++; }
   const stats = { behind: 0, ring: 0, sky: 0, skipped: 0, noSource: 0 };
   const z2 = new Float32Array(n), rgb = new Uint8ClampedArray(n * 3), from = new Int32Array(n).fill(-1);
-  if (!things) return { kind, z2, rgb, from, stats };
+  if (!things) return { kind, z2, rgb, from, stats, thing };
 
   // 縁：物からの距離が halo 以内の背景
   if (halo > 0) {
@@ -262,7 +264,7 @@ export function backLayer({ W, H, z, type, rgba, front, cut = null, halo = 3, bl
     z2[i] = zb; kind[i] = BACK_BEHIND; stats.behind++;
   }
   for (let i = 0; i < n; i++) if (kind[i] && !done[i]) { kind[i] = BACK_NONE; stats.noSource++; }
-  return { kind, z2, rgb, from, stats };
+  return { kind, z2, rgb, from, stats, thing };
 }
 const STEP4 = [1, 0, -1, 0, 0, 1, 0, -1];
 // 筆あとの強さをなだらかに抑える（±DETAIL_MAX まで）。札から漏れた物の輪郭のような強い差を、背景へ写さないため
@@ -332,7 +334,7 @@ export function backSplats(v, back, viewId, stride, { skyZ, typeOf, edgeMax, lab
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) if (back.kind[y * W + x]) max++;
   const col = {
     position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax),
-    sky: new Uint8Array(max), view: new Uint8Array(max).fill(viewId), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),
+    sky: new Uint8Array(max), view: new Uint16Array(max).fill(viewId), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),
   };
   if (v.hasTypes) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max).fill(labelEdgeMax) });
   if (v.hasLabels) Object.assign(col, { normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), lift: new Float32Array(max) });
@@ -394,14 +396,14 @@ export function paintedIn(o, x, y, z) {
  */
 export function plateRequest(back, rgba, W, H, grow = 6) {
   const n = W * H, d = new Uint8Array(n).fill(255);
-  for (let i = 0; i < n; i++) if (back.kind[i]) d[i] = 0;
+  for (let i = 0; i < n; i++) if (back.kind[i] || back.thing[i]) d[i] = 0; // 物そのものは、背後の層を置かなかった所（足もとなど）も消してもらう
   spread(d, W, H);
   const mask = new Uint8ClampedArray(n * 4), guide = new Uint8ClampedArray(rgba);
   let holes = 0;
   for (let i = 0; i < n; i++) {
     const hole = d[i] <= grow; if (hole) holes++;
     mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = hole ? 255 : 0; mask[i * 4 + 3] = guide[i * 4 + 3] = 255;
-    if (back.kind[i]) { guide[i * 4] = back.rgb[i * 3]; guide[i * 4 + 1] = back.rgb[i * 3 + 1]; guide[i * 4 + 2] = back.rgb[i * 3 + 2]; }
+    if (back.kind[i] || back.thing[i]) { guide[i * 4] = back.rgb[i * 3]; guide[i * 4 + 1] = back.rgb[i * 3 + 1]; guide[i * 4 + 2] = back.rgb[i * 3 + 2]; }
   }
   return { mask, guide, holes: holes / n };
 }
@@ -421,4 +423,58 @@ export function withPlate(back, plate, mask, pixel = null) {
     rgb[s * 3] = plate[i * 4]; rgb[s * 3 + 1] = plate[i * 4 + 1]; rgb[s * 3 + 2] = plate[i * 4 + 2]; used++;
   }
   return { ...back, rgb, used };
+}
+
+// ---- 背景の絵から推定した奥行きを、背後の層の位置に使う ----
+
+/**
+ * 穴のある値の地図を、粗い段から順に埋める（pull-push）。known が 1 のますの値はそのまま、0 のますを埋めた新しい配列を返す。
+ * 境目からなめらかに広がる値になる（穴が大きくても速い）。
+ */
+export function pullPush(val, known, W, H) {
+  const out = new Float32Array(val);
+  let any = false, all = true;
+  for (let i = 0; i < W * H; i++) { if (known[i]) any = true; else all = false; }
+  if (all || !any || (W === 1 && H === 1)) return out;
+  const w2 = (W + 1) >> 1, h2 = (H + 1) >> 1, v2 = new Float32Array(w2 * h2), k2 = new Uint8Array(w2 * h2), c2 = new Uint8Array(w2 * h2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (!known[i]) continue; const j = (y >> 1) * w2 + (x >> 1); v2[j] += val[i]; c2[j]++; }
+  for (let j = 0; j < w2 * h2; j++) if (c2[j]) { v2[j] /= c2[j]; k2[j] = 1; }
+  const low = pullPush(v2, k2, w2, h2);
+  // 粗い段の値を、まわり 4 ますの間でなめらかにつないで戻す
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x; if (known[i]) continue;
+    const fx = (x - 0.5) / 2, fy = (y - 0.5) / 2, x0 = Math.max(0, Math.min(w2 - 1, Math.floor(fx))), y0 = Math.max(0, Math.min(h2 - 1, Math.floor(fy)));
+    const x1 = Math.min(w2 - 1, x0 + 1), y1 = Math.min(h2 - 1, y0 + 1), tx = Math.max(0, Math.min(1, fx - x0)), ty = Math.max(0, Math.min(1, fy - y0));
+    out[i] = (low[y0 * w2 + x0] * (1 - tx) + low[y0 * w2 + x1] * tx) * (1 - ty) + (low[y1 * w2 + x0] * (1 - tx) + low[y1 * w2 + x1] * tx) * ty;
+  }
+  return out;
+}
+
+/**
+ * 背後の層の奥行きを、「手前の物を消した背景の絵」から推定した奥行き（zp）に替えたものを返す（元の層は変えない）。
+ *   z   もとの奥行き（層と同じます目。0 = 空）、zp  背景の絵から推定した奥行き（同じます目。0 = 無い）
+ * 推定は絵ごとに全体の倍率や傾きがずれるので、そのままは使わない。物の外（背景が見えている所）で
+ * 「もとの奥行き ÷ 推定の奥行き」の比を取り、それを物の中へなめらかに広げて掛ける。
+ * こうすると、穴の縁ではもとの背景とつながり、穴の中の起伏だけが推定に従う。
+ * 背景が手前の物より手前に出る所（min 倍より近い所）は、計算の値のまま。refined = 替えた数、kept = 計算のままにした数。
+ */
+export function refineBackDepth(back, { W, H, z, zp, min = 1.03, maxLog = 1 }) {
+  const n = W * H, c = new Float32Array(n), known = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (!back.kind[i] && !back.thing[i] && z[i] > 0 && zp[i] > 0) { c[i] = Math.log(z[i] / zp[i]); known[i] = 1; }
+  const f = pullPush(c, known, W, H), z2 = new Float32Array(back.z2);
+  let refined = 0, kept = 0;
+  for (let i = 0; i < n; i++) {
+    if (back.kind[i] !== BACK_BEHIND || !(back.z2[i] > 0)) continue;
+    const zn = zp[i] > 0 ? zp[i] * Math.exp(Math.max(-maxLog, Math.min(maxLog, f[i]))) : 0;
+    if (!(zn > 0) || (z[i] > 0 && back.thing[i] && zn < z[i] * min)) { kept++; continue; }
+    z2[i] = zn; refined++;
+  }
+  return { ...back, z2, refined, kept };
+}
+
+/** g × g のます目の値を、W × H の画素へ写す（いちばん近います）。 */
+export function gridToPixels(grid, g, W, H) {
+  const out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) { const r = Math.min(g - 1, Math.floor((y + 0.5) / H * g)) * g; for (let x = 0; x < W; x++) out[y * W + x] = grid[r + Math.min(g - 1, Math.floor((x + 0.5) / W * g))]; }
+  return out;
 }

@@ -3,6 +3,7 @@
     python psf_sharp.py --scene jatte                 # scenes/jatte の視点 J
     python psf_sharp.py                               # previz-export/ と paint/out/ の最初の視点
     python psf_sharp.py --scene jatte --view J --image my.png --device cpu
+    python psf_sharp.py --scene jatte --view J --plate painted   # 手前の物を消した背景の絵（J_plate_painted.png）を通す
 
 入力：<previz-export>/cameras.json の視点（画像の大きさ・焦点距離・光学中心・camera_to_world）と、
       <paint-out>/<視点>_painted.png（--image で別の絵も可。視点の大きさに合わせて伸ばす）。
@@ -46,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scene", default="", help="scenes/<名前> を使う（空なら previz-export/ と paint/out/）")
     p.add_argument("--view", default="", help="視点の名前（既定：cameras.json の最初の視点）")
     p.add_argument("--image", default="", help="絵のファイル（既定：<paint-out>/<視点>_painted.png）")
+    p.add_argument("--plate", default="", help="手前の物を消した背景の絵（<視点>_plate_<色のもと>.png）を通す。値は色のもとの名前（例：painted）。出力は <視点>_plate_<色のもと>_sharp.ply")
     p.add_argument("--out", default="", help="書き出す .ply（既定：<paint-out>/<視点>_sharp.ply）")
     p.add_argument("--checkpoint", default=str(MODEL_FILE), help="学習済みモデル（無ければ取得する）")
     p.add_argument("--device", default="auto", help="auto / cuda / cpu / mps")
@@ -122,7 +124,8 @@ def main() -> int:
         print(f"視点 {a.view} が cameras.json にありません（あるのは {', '.join(v['name'] for v in views)}）", file=sys.stderr)
         return 1
     W, H, name = int(view["width"]), int(view["height"]), view["name"]
-    image_file = Path(a.image) if a.image else paint_dir / f"{name}_painted.png"
+    stem = f"{name}_plate_{a.plate}" if a.plate else name  # --plate：背景の絵を通す（背後の層の奥行き用）
+    image_file = Path(a.image) if a.image else paint_dir / (f"{stem}.png" if a.plate else f"{name}_painted.png")
     if not image_file.exists():
         print(f"絵 {image_file} がありません。", file=sys.stderr)
         return 1
@@ -131,7 +134,7 @@ def main() -> int:
         print(f"絵の大きさ {img.size[0]}x{img.size[1]} を視点の大きさ {W}x{H} に合わせます")
         img = img.resize((W, H), Image.BICUBIC)
     image = np.asarray(img)
-    out_file = Path(a.out) if a.out else paint_dir / f"{name}_sharp.ply"
+    out_file = Path(a.out) if a.out else paint_dir / f"{stem}_sharp.ply"
 
     device = pick_device(a.device)
     print(f"視点 {name}（{W}x{H}、fx {view['intrinsics']['fx']:.1f}）、絵 {image_file.name}、計算 {device}")
@@ -149,7 +152,10 @@ def main() -> int:
     out_file.parent.mkdir(parents=True, exist_ok=True)
     save_ply(world, float(view["intrinsics"]["fx"]), (H, W), out_file)
     print(f"書き出しました：{out_file}（{out_file.stat().st_size / 1e6:.0f} MB、{time.time() - t2:.1f} 秒）")
-    print("GUI の「粒の空間」で「ファイルを読み直す」を押し、「粒の置き方」で SHARP を選んでください。")
+    if a.plate:
+        print("GUI の「粒の空間」で「ファイルを読み直す」を押すと、背後の層の位置にこの奥行きが使われます。")
+    else:
+        print("GUI の「粒の空間」で「ファイルを読み直す」を押し、「粒の置き方」で SHARP を選んでください。")
     return 0
 
 

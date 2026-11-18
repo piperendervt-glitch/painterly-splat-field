@@ -6,8 +6,10 @@
 //   POST /api/paint/run             paint/paint.mjs views を起動（{ views, style, dryRun, light }）
 //   POST /api/paint-out/<名>        「視点を足す」画面からの保存（写した絵・穴の印）
 //   POST /api/paint/fill            paint/paint.mjs fill を起動（{ view, style, dryRun, light }）。足した視点の穴だけ描く
+//   POST /api/paint/layout          paint/paint.mjs layout を起動（{ brief, report, refine, dryRun }）。形の配置（箱と円柱の一覧）を layout_ai.json に書いてもらう
 //   POST /api/paint/sky             paint/paint.mjs fill --sky を起動（{ face, sfx, light, styleRef, dryRun }）。空の天球の穴だけ描く
 //   POST /api/paint/plate           paint/paint.mjs fill --plate を起動（{ view, src, dryRun }）。手前の物を消した背景の絵（背後の層の色）を描く
+//   POST /api/sharp/plate           sharp/psf_sharp.py --plate を起動（{ view, src }）。背景の絵を SHARP に通して、奥行き用の粒を作る
 //   POST /api/view/forget           足した視点の絵を消す（{ view }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
@@ -22,8 +24,8 @@ const SCENE = /^[A-Za-z0-9_-]+$/.test(process.env.PSF_SCENE || '') ? process.env
 const DIRS = SCENE
   ? { 'previz-export': path.join(ROOT, 'scenes', SCENE, 'previz-export'), 'paint-out': path.join(ROOT, 'scenes', SCENE, 'paint-out') }
   : { 'previz-export': path.join(ROOT, 'previz-export'), 'paint-out': path.join(ROOT, 'paint', 'out') };
-const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json|ply)$/;
-const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.ply': 'application/octet-stream' };
+const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json|ply|obj|glb)$/;
+const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.ply': 'application/octet-stream', '.obj': 'text/plain; charset=utf-8', '.glb': 'model/gltf-binary' };
 const WIN = process.platform === 'win32';
 
 const job = { child: null, running: false, log: '', code: null, startedAt: 0, dryRun: false };
@@ -44,6 +46,16 @@ function readBody(req, limit = 64 * 1024 * 1024) {
 }
 const stat = (file) => { try { const s = fs.statSync(file); return { size: s.size, mtime: Math.round(s.mtimeMs) }; } catch { return null; } };
 
+// 物体ごとの 3D モデル：paint-out の object_<番号>.glb（無ければ .obj）。{ 番号: ファイル名 }
+const OBJECT_MODEL = /^object_(\d{1,5})\.(glb|obj)$/;
+function objectModels() {
+  const out = {};
+  let names = [];
+  try { names = fs.readdirSync(DIRS['paint-out']); } catch { return out; }
+  for (const n of names.sort()) { const m = OBJECT_MODEL.exec(n); if (m && (!out[m[1]] || m[2] === 'glb')) out[m[1]] = n; }
+  return out;
+}
+
 function state() {
   const out = { scene: SCENE, previz: null, views: [], paintReady: fs.existsSync(path.join(ROOT, 'paint', 'node_modules', 'pngjs')) };
   const camFile = path.join(DIRS['previz-export'], 'cameras.json');
@@ -51,6 +63,10 @@ function state() {
   let cams;
   try { cams = JSON.parse(fs.readFileSync(camFile, 'utf8')); } catch { return out; }
   out.previz = stat(camFile);
+  out.ground_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`ground_ai${sfx}`, stat(path.join(DIRS['paint-out'], `ground_ai${sfx}.png`))])); // AI が描いた周囲の地面
+  out.world = stat(path.join(DIRS['paint-out'], 'world.ply')); // 外で作った世界の粒（取り込み用。studio/worldimport.js）
+  out.objects = objectModels(); // 物体ごとの 3D モデル（object_<番号>.glb / .obj。studio/objectmodel.js）
+  out.layout_ai = stat(path.join(DIRS['paint-out'], 'layout_ai.json')); // AI が書いた形の配置
   out.sky_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`sky_ai${sfx}`, stat(path.join(DIRS['paint-out'], `sky_ai${sfx}.png`))])); // AI が描いた空（天球の層）
   out.views = (cams.views || []).map((v) => ({
     name: v.name,
@@ -72,6 +88,7 @@ function state() {
     painted_lit: stat(path.join(DIRS['paint-out'], `${v.name}_painted_lit.png`)),
     overlay_lit: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_lit.png`)),
     sharp: stat(path.join(DIRS['paint-out'], `${v.name}_sharp.ply`)), // SHARP の粒（sharp/psf_sharp.py）
+    plate_sharp: PLATE_SRC.filter((k) => fs.existsSync(plateFiles(v.name, k).sharp)), // その絵を SHARP に通した粒（背後の層の位置に使う）
     plates: PLATE_SRC.filter((k) => { const f = plateFiles(v.name, k); return fs.existsSync(f.out) && fs.existsSync(f.mask); }), // AI が描いた、手前の物を消した背景の絵（色のもとごと）
   }));
   return out;
@@ -87,8 +104,11 @@ function runPaint({ views, style, dryRun, light }) {
 }
 function startJob(args, dryRun) {
   if (process.env.PAINT_CODEX) args.push('--codex', process.env.PAINT_CODEX); // 確かめ用：にせの codex に差し替える
+  startProcess(process.execPath, args, path.join(ROOT, 'paint'), dryRun);
+}
+function startProcess(command, args, cwd, dryRun = false) {
   Object.assign(job, { running: true, log: '', code: null, startedAt: Date.now(), dryRun: !!dryRun });
-  const child = spawn(process.execPath, args, { cwd: path.join(ROOT, 'paint'), windowsHide: true });
+  const child = spawn(command, args, { cwd, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' } });
   job.child = child;
   const add = (c) => { job.log = (job.log + c.toString('utf8')).slice(-20000); };
   child.stdout.on('data', add); child.stderr.on('data', add);
@@ -113,13 +133,13 @@ function runFill({ view, style, dryRun, light }) {
 }
 // 空の天球の穴を描く。空の絵（sky_face<向き><光>.png）と穴の印（…_holes.png）は「粒の空間」の画面が先に保存している。
 const SKY_SFX = ['', '_flat', '_lit'];
-function skyFiles(face, sfx) {
-  const out = (name) => path.join(DIRS['paint-out'], `sky_face${face}${sfx}${name}.png`);
+function skyFiles(face, sfx, kind = 'sky') { // kind = 'ground' は周囲の地面（同じ仕組みで、30° 見下ろした絵）
+  const out = (name) => path.join(DIRS['paint-out'], `${kind === 'ground' ? 'ground' : 'sky'}_face${face}${sfx}${name}.png`);
   return { image: out(''), mask: out('_holes'), out: out('_painted') };
 }
-function runSky({ face, sfx, light, styleRef, style, dryRun }) {
-  const f = skyFiles(face, sfx);
-  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--sky', '--image', f.image, '--mask', f.mask, '--out', f.out];
+function runSky({ kind, face, sfx, light, styleRef, style, dryRun }) {
+  const f = skyFiles(face, sfx, kind);
+  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', kind === 'ground' ? '--ground' : '--sky', '--image', f.image, '--mask', f.mask, '--out', f.out];
   if (light === 'flat' || light === 'previz') args.push('--light', light);
   const ref = typeof styleRef === 'string' && /^[A-Za-z0-9]+_painted(_flat|_lit)?$/.test(styleRef) ? path.join(DIRS['paint-out'], `${styleRef}.png`) : null;
   if (ref && fs.existsSync(ref)) args.push('--style-ref', ref); // 画風の見本にする、同じ場面の絵
@@ -131,13 +151,20 @@ function runSky({ face, sfx, light, styleRef, style, dryRun }) {
 const PLATE_SRC = ['painted', 'painted_flat', 'painted_lit', 'previz', 'flat', 'lit']; // 色のもと（studio/splat.js の SOURCES の名前）
 function plateFiles(view, src) {
   const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}_${src}.png`);
-  return { image: out('platein'), mask: out('platemask'), guide: out('plateguide'), out: out('plate') };
+  return { image: out('platein'), mask: out('platemask'), guide: out('plateguide'), out: out('plate'), sharp: path.join(DIRS['paint-out'], `${view}_plate_${src}_sharp.ply`) };
 }
 function runPlate({ view, src, dryRun }) {
   const f = plateFiles(view, src);
   const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--plate', '--image', f.image, '--mask', f.mask, '--guide', f.guide, '--out', f.out, '--grow', '0'];
   if (dryRun) args.push('--dry-run');
   startJob(args, dryRun);
+}
+// 背景の絵を SHARP に通す（sharp/setup.bat で作った Python を使う）。確かめ用に PSF_SHARP_PYTHON で差し替えられる
+const sharpPython = () => process.env.PSF_SHARP_PYTHON || path.join(ROOT, 'sharp', '.venv', WIN ? 'Scripts' : 'bin', WIN ? 'python.exe' : 'python');
+function runSharpPlate({ view, src }) {
+  const args = [path.join(ROOT, 'sharp', 'psf_sharp.py'), '--view', view, '--plate', src];
+  if (SCENE) args.push('--scene', SCENE);
+  startProcess(sharpPython(), args, path.join(ROOT, 'sharp'));
 }
 function stopPaint() {
   const child = job.child; if (!child) return;
@@ -196,9 +223,23 @@ export async function handle(req, res, next) {
       if (job.running) return json(res, 409, { error: 'いま実行中です' });
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
       if (![0, 1, 2, 3].includes(body.face) || !SKY_SFX.includes(body.sfx)) return json(res, 400, { error: '空の向きが使えません' });
-      const need = skyFiles(body.face, body.sfx);
+      const need = skyFiles(body.face, body.sfx, body.kind);
       for (const f of [need.image, need.mask]) if (!fs.existsSync(f)) return json(res, 400, { error: `${path.basename(f)} がありません` });
       runSky(body);
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/paint/layout' && req.method === 'POST') { // 形の配置を書いてもらう。絵（layout_picture.png、layout_depth.png、直しの回は layout_overlay.png）は画面が先に保存している
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 2e6)).toString('utf8') || '{}');
+      const f = (name) => path.join(DIRS['paint-out'], name), refine = !!body.refine;
+      if (typeof body.brief !== 'string' || !body.brief.trim()) return json(res, 400, { error: 'カメラの説明の文がありません' });
+      for (const name of refine ? ['layout_picture.png', 'layout_overlay.png', 'layout_ai.json'] : ['layout_picture.png']) if (!fs.existsSync(f(name))) return json(res, 400, { error: `${name} がありません` });
+      fs.writeFileSync(f('layout_brief.txt'), body.brief.slice(0, 20000));
+      const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'layout', '--image', f('layout_picture.png'), '--brief', f('layout_brief.txt'), '--out', f('layout_ai.json')];
+      if (fs.existsSync(f('layout_depth.png'))) args.push('--depth', f('layout_depth.png'));
+      if (refine) { fs.writeFileSync(f('layout_report.txt'), String(body.report || '').slice(0, 20000)); args.push('--prev', f('layout_ai.json'), '--overlay', f('layout_overlay.png'), '--report', f('layout_report.txt')); }
+      if (body.dryRun) args.push('--dry-run');
+      startJob(args, body.dryRun);
       return json(res, 200, { ok: true });
     }
     if (p === '/api/paint/plate' && req.method === 'POST') {
@@ -210,11 +251,22 @@ export async function handle(req, res, next) {
       runPlate(body);
       return json(res, 200, { ok: true });
     }
+    if (p === '/api/sharp/plate' && req.method === 'POST') {
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[A-Za-z0-9]+$/.test(body.view || '') || !PLATE_SRC.includes(body.src)) return json(res, 400, { error: '視点か色のもとの名前が使えません' });
+      if (!fs.existsSync(plateFiles(body.view, body.src).out)) return json(res, 400, { error: 'AI が描いた背景の絵がまだありません' });
+      if (!fs.existsSync(sharpPython())) return json(res, 400, { error: 'SHARP の用意がまだです。sharp フォルダの setup.bat を先に実行してください。' });
+      runSharpPlate(body);
+      return json(res, 200, { ok: true });
+    }
     if (p.startsWith('/api/paint-out/') && req.method === 'DELETE') { // 埋めた絵を消す（写し直す前）
       const name = p.slice('/api/paint-out/'.length);
       if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
-      if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
-      if (/^sky_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
+      if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); fs.rmSync(path.join(DIRS['paint-out'], name.replace('.png', '_sharp.ply')), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
+      if (OBJECT_MODEL.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // 物体ごとの 3D モデル
+      if (name === 'layout_ai.json') { for (const n of ['layout_ai.json', 'layout_best.json', 'layout_brief.txt', 'layout_report.txt', 'layout_picture.png', 'layout_depth.png', 'layout_overlay.png']) fs.rmSync(path.join(DIRS['paint-out'], n), { force: true }); return json(res, 200, { ok: true }); } // AI が書いた形の配置
+      if (/^(sky|ground)_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
       if (!/^[A-Za-z0-9]+_painted(_flat|_lit)?\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
       if (!fs.existsSync(path.join(DIRS['paint-out'], name.replace('_painted', '_reproj')))) return json(res, 400, { error: '足した視点の絵だけ消せます' }); // もとの視点の絵は消さない
       fs.rmSync(path.join(DIRS['paint-out'], name), { force: true });
@@ -223,8 +275,9 @@ export async function handle(req, res, next) {
     }
     if (p.startsWith('/api/paint-out/') && req.method === 'POST') {
       const name = p.slice('/api/paint-out/'.length);
-      if (!/^[A-Za-z0-9_-]+\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
-      const body = await readBody(req);
+      const model = OBJECT_MODEL.test(name); // 物体ごとの 3D モデル（画面で選んだファイルを、次も使えるように置く）
+      if (!/^[A-Za-z0-9_-]+\.png$/.test(name) && name !== 'layout_ai.json' && name !== 'objects.json' && !model) return json(res, 400, { error: 'ファイル名が使えません' }); // layout_ai.json は、いちばん合った回の配置を書き戻すため
+      const body = await readBody(req, model ? 300 * 1024 * 1024 : undefined);
       fs.mkdirSync(DIRS['paint-out'], { recursive: true });
       fs.writeFileSync(path.join(DIRS['paint-out'], name), body);
       return json(res, 200, { ok: true, size: body.length });

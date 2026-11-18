@@ -7,8 +7,8 @@ import { quatCov, roundCov, surfelCov, sheetDistance, backLayer, SIGMA_K, BACK_B
 const C0 = 0.28209479177387814; // 0 次の球面調和の係数
 const PLY_TYPES = { float: 4, float32: 4, double: 8, float64: 8, uchar: 1, uint8: 1, char: 1, int8: 1, ushort: 2, uint16: 2, short: 2, int16: 2, uint: 4, uint32: 4, int: 4, int32: 4 };
 
-/** バイナリ（little endian）の .ply から vertex の列を読む。戻り値は { count, props: { 名前: Float32Array } }。 */
-export function parsePly(buffer) {
+/** バイナリ（little endian）の .ply から vertex の列を読む。戻り値は { count, props: { 名前: Float32Array } }。only（名前の配列）を渡すと、その列だけ読む。 */
+export function parsePly(buffer, only = null) {
   const bytes = new Uint8Array(buffer);
   const tail = [101, 110, 100, 95, 104, 101, 97, 100, 101, 114]; // "end_header"
   let end = -1;
@@ -24,7 +24,7 @@ export function parsePly(buffer) {
     const w = line.trim().split(/\s+/);
     if (w[0] === 'element') { el = { name: w[1], count: Number(w[2]), props: [] }; elements.push(el); }
     else if (w[0] === 'property' && el) {
-      if (w[1] === 'list') throw new Error('.ply の list の列は読めません');
+      if (w[1] === 'list') { if (elements.length === 1) throw new Error('.ply の list の列は読めません'); continue; } // 面（face）の list は読まないので、そのまま通す
       el.props.push({ name: w[2], type: w[1], size: PLY_TYPES[w[1]] });
     }
   }
@@ -35,6 +35,7 @@ export function parsePly(buffer) {
   if (view.byteLength < n * stride) throw new Error('.ply が途中で切れています');
   let off = 0;
   for (const p of vertex.props) {
+    if (only && !only.includes(p.name)) { off += p.size; continue; }
     const out = new Float32Array(n), get = getter(view, p.type);
     for (let i = 0, o = off; i < n; i++, o += stride) out[i] = get(o);
     props[p.name] = out; off += p.size;
@@ -105,7 +106,7 @@ export function splatsFromSharp(ply, v, vi, { keep = 1, scale = 1, inv, cam, typ
   const { W, H, z } = v, { fx, fy, cx, cy } = v.def.intrinsics, e = inv.elements;
   const col = {
     position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax),
-    sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max), opacity: new Uint8Array(max),
+    sky: new Uint8Array(max), view: new Uint16Array(max).fill(vi), depthGray: new Uint8Array(max), opacity: new Uint8Array(max),
     type: new Uint8Array(max), object: new Uint16Array(max), normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max).fill(255),
     sway: new Uint8Array(max), labelEdge: new Uint8Array(max).fill(labelEdgeMax), lift: new Float32Array(max).fill(0.05),
     cov: new Float32Array(max * 6),
@@ -247,7 +248,7 @@ export function sharpBackSplats(ply, v, grid, back, viewId, { step = 1, scale = 
   for (let r = step >> 1; r < g; r += step) for (let c = step >> 1; c < g; c += step) if (use(r * g + c)) max++;
   const col = {
     position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max).fill(edgeMax),
-    sky: new Uint8Array(max), view: new Uint8Array(max).fill(viewId), depthGray: new Uint8Array(max), opacity: new Uint8Array(max).fill(255),
+    sky: new Uint8Array(max), view: new Uint16Array(max).fill(viewId), depthGray: new Uint8Array(max), opacity: new Uint8Array(max).fill(255),
     type: new Uint8Array(max), object: new Uint16Array(max), normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max).fill(255),
     sway: new Uint8Array(max), labelEdge: new Uint8Array(max).fill(labelEdgeMax), lift: new Float32Array(max).fill(0.05),
     cov: new Float32Array(max * 6), layer: new Uint8Array(max).fill(layerId),

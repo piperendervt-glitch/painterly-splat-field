@@ -15,14 +15,21 @@
 //     穴をマゼンタで塗った絵を見せて「マゼンタの所だけ描いて」と頼み、できた絵の穴の所だけを元の絵に貼る。
 //     穴の外は 1 画素も変えない。
 //     --sky を付けると、空だけの絵（空の天球の一部）として頼む：地面や物を描かせない。--style-ref <絵> は画風の見本（同じ場面の絵）。
+//     --ground を付けると、周囲の地面の絵（30° 見下ろした広い画角の一部）として頼む：人や物を描かせない。--sky と同じく --style-ref が使える。
 //     --plate を付けると、手前の物を消した背景の絵（背後の層の色）として頼む：穴は手前の物があった所で、その後ろの背景だけを描かせる。
 //       --guide <絵> は、穴をツール内の計算で埋めた絵（どこに何の背景が来るかの目安）。
+//
+//   node paint.mjs layout --image <絵> --brief <カメラと奥行きの説明の文> --out <layout.json> [--depth <奥行きの絵>] [--dry-run]
+//                         [--prev <今の layout.json> --overlay <絵に今の形を線で重ねた絵> --report <見比べた結果の文>]
+//     絵を見せて、場面の大まかな形（箱と円柱の一覧）を layout.json に書いてもらう。絵は作らない（文だけ）。
+//     --prev・--overlay・--report を付けると「直し」の回：今の形を絵に重ねたものと、奥行きとの見比べを見せて、書き直してもらう。
+//     座標は、カメラの真下の地面を原点、+x = 絵の右、+y = 上、+z = 奥（m）。「粒の空間」の「AI に形の配置を書かせる」が使う。
 //
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
 // --dry-run は Codex を呼ばず、作業フォルダに送る文（prompt.txt）と条件の絵だけを作る。利用枠は減らない。
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildPrompt, generate } from './codex.mjs';
+import { buildPrompt, generate, askJson } from './codex.mjs';
 import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange } from './image.mjs';
 
 const DEFAULT_STYLE = 'a loose, painterly oil painting with visible brush strokes, soft atmospheric perspective, warm late-afternoon light';
@@ -108,6 +115,19 @@ function skyInstructions({ style, hasStyleRef, lightLines = [] }) {
   ].filter(Boolean).join('\n');
 }
 
+// 周囲の地面を描いてもらうときの文。絵は、目の高さから 30° 見下ろした広い画角。上の方が地平線とその上、下の端が足もと。
+function groundInstructions({ style, hasStyleRef }) {
+  return [
+    `references/holes.png is one part of a painted ground backdrop for a 3D scene, painted as ${style}. It is seen from eye height, looking down at about 30 degrees with a very wide lens: the horizon is in the upper part of the image, and the bottom edge is the ground right at the viewer's feet.`,
+    'The bright magenta (#FF00FF) areas are holes with no paint yet. Paint ONLY inside the magenta areas, continuing the existing ground naturally in every direction: the same kind of ground (grass, earth, sand, shore, water) with the same colours, the same light and the same brush style, in correct perspective (texture gets smaller towards the horizon).',
+    'This image is EMPTY GROUND ONLY. Do not paint people, animals, trees, bushes with trunks, rocks larger than pebbles, buildings, fences, paths with objects, shadows of objects, text or a frame.',
+    'The plain flat band at the top of the image (above the horizon) is only a placeholder for the sky. Leave it exactly as it is, and let the ground fade softly into haze just below it.',
+    'Everything outside the magenta areas must stay exactly as it is. Do not crop, zoom or shift the image. No magenta may remain in the result.',
+    'guide.png shows the same image with the holes filled by a blurry automatic guess. Use it only as a rough guide for the overall colour at each distance; paint real ground texture and brush strokes instead of its blur.',
+    hasStyleRef ? 'style.png is a painting of the scene that this ground belongs to. Match the colours and brushwork of its ground. Do not copy its people, trees or objects.' : '',
+  ].filter(Boolean).join('\n');
+}
+
 // 手前の物を消した背景の絵（背後の層の色）を描いてもらうときの文。穴は、手前の物（人・幹・柱など）があった所。
 function plateInstructions({ hasGuide }) {
   return [
@@ -181,15 +201,15 @@ async function runFill(o) {
   const holesFile = path.join(workDir, 'holes-input.png');
   writePng(holesFile, paintHoles(original, mask));
   const references = [{ name: 'holes.png', file: holesFile, note: o.plate ? 'picture with the foreground objects cut out (magenta holes to fill with background)' : 'painting with magenta holes to fill' }];
-  const sky = !!o.sky, hasStyleRef = sky && typeof o['style-ref'] === 'string';
+  const ground = !!o.ground, sky = !!o.sky || ground, hasStyleRef = sky && typeof o['style-ref'] === 'string'; // 周囲の地面は、空と同じ形（目安の絵・画風の見本）で頼む
   if (sky) references.push({ name: 'guide.png', file: o.image, note: 'the same image with the holes filled by a blurry automatic guess (rough colour guide only)' });
-  if (hasStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: 'painting of the scene this sky belongs to (style and sky colours to match)' });
+  if (hasStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: ground ? 'painting of the scene this ground belongs to (style and ground colours to match)' : 'painting of the scene this sky belongs to (style and sky colours to match)' });
   const plate = !sky && !!o.plate, hasGuide = plate && typeof o.guide === 'string';
   if (hasGuide) references.push({ name: 'guide.png', file: o.guide, note: 'the same picture with the holes filled by a blurry automatic guess (rough guide only)' });
   const hasPreviz = !sky && !plate && typeof o.previz === 'string';
   if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
   if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
-  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
+  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: ground ? groundInstructions({ style, hasStyleRef }) : sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
   console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}`);
   const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (!file) { console.log(`  → ${workDir}`); return; }
@@ -201,10 +221,93 @@ async function runFill(o) {
   console.log(`  → ${o.out}（穴の外の変わり具合 ${drift.toFixed(1)}/255。${drift > 25 ? '大きい：Codex が絵全体を描き直したかも。継ぎ目を見てください' : '小さい：位置は合っていそう'}）`);
 }
 
+// ---- 形の配置（箱と円柱の一覧）を書いてもらう ----
+function layoutPrompt({ brief, hasDepth, refine, report }) {
+  return [
+    'You are estimating a simple 3D blockout (a previz model) of the scene shown in a painting, as a list of primitive shapes. Do not generate any image.',
+    '',
+    'Files in your working directory (load the images with view_image):',
+    '  - references/picture.png : the painting',
+    hasDepth ? '  - references/depth.png : estimated depth of the same view (white = near, black = far, pure black = sky)' : null,
+    refine ? '  - references/overlay.png : the painting with the CURRENT layout drawn over it (each shape as a coloured wireframe with its number; the legend of numbers is in the report below)' : null,
+    refine ? '  - references/layout.json : the CURRENT layout' : null,
+    '',
+    'Camera and measurements:',
+    brief.trim(),
+    '',
+    'Coordinate system (metres): the origin is the point on the ground directly below the camera. +x = towards the right of the picture, +y = up, +z = forward, away from the camera along the ground. The ground is the plane y = 0.',
+    '',
+    'Task: write a file named layout.json in the current working directory with this exact structure:',
+    '{',
+    '  "objects": [',
+    '    { "name": "short_snake_case_name", "shape": "box", "center": [x, y, z], "size": [width_along_x, height_along_y, depth_along_z], "yaw_deg": 0 },',
+    '    { "name": "another_name", "shape": "cylinder", "center": [x, y, z], "radius": 0.5, "height": 2.0 }',
+    '  ]',
+    '}',
+    '',
+    'Rules:',
+    '- List every solid thing a walking person could bump into: people, animals, tree trunks, pillars, walls, towers, buildings, boats, large rocks. An arch or gate is two leg boxes plus one lintel box across the top, so the opening stays open. Between 1 and 40 objects.',
+    '- Do NOT list the ground, water, sky, clouds, shadows, grass or leaves.',
+    '- "center" is the centre of the shape: a 1.7 m tall person standing on the ground is a box with center y = 0.85 and height 1.7. Shapes rest on the ground (bottom at y = 0) unless they are clearly raised.',
+    '- "yaw_deg" turns a box about the vertical axis (0 = its sides are parallel to x and z; positive = counter-clockwise seen from above). Cylinders are upright.',
+    '- Place every object with the depth table: it gives the 3D position (x, y, z) of what is seen at sample pixels. Find the samples on the object (and where it touches the ground), interpolate between them, and take the width and height from the positions of its left, right, top and bottom edges.',
+    '- The side of a shape that faces away from the camera cannot be seen: guess a plausible depth (a person about 0.5 m, a wall or arch about one fifth of its width).',
+    refine ? '- This is a correction round. overlay.png shows where the current shapes land in the picture, and the report below compares every shape with the depth map and with the outlines of the objects in the picture. Move, resize, split, add or delete shapes so that each wireframe sits exactly on its object. Then write the COMPLETE corrected layout.json (all objects, not only the changed ones).' : null,
+    refine ? '' : null,
+    refine ? 'Report on the current layout:' : null,
+    refine ? report.trim() : null,
+    '',
+    'Write only valid JSON into layout.json (no comments, no trailing commas). Do not modify the files under references/. Do not ask for confirmation: write the file, then stop.',
+  ].filter((l) => l !== null).join('\n');
+}
+const num = (v, lo, hi) => (Number.isFinite(Number(v)) ? Math.max(lo, Math.min(hi, Number(v))) : null);
+/** Codex が書いた配置を、決まった形に整える（読めない物は捨てる）。 */
+function cleanLayout(raw) {
+  const list = Array.isArray(raw) ? raw : raw && Array.isArray(raw.objects) ? raw.objects : [];
+  const objects = [], names = new Set();
+  for (const it of list.slice(0, 60)) {
+    if (!it || typeof it !== 'object' || !Array.isArray(it.center)) continue;
+    const center = [num(it.center[0], -2000, 2000), num(it.center[1], -200, 500), num(it.center[2], -2000, 2000)];
+    if (center.includes(null)) continue;
+    let name = String(it.name || 'object').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'object';
+    for (let k = 2, base = name; names.has(name); k++) name = `${base}_${k}`;
+    if (it.shape === 'cylinder') {
+      const radius = num(it.radius, 0.02, 300), height = num(it.height, 0.02, 600);
+      if (radius === null || height === null) continue;
+      objects.push({ name, shape: 'cylinder', center, radius, height });
+    } else {
+      const sz = Array.isArray(it.size) ? [num(it.size[0], 0.02, 1000), num(it.size[1], 0.02, 600), num(it.size[2], 0.02, 1000)] : [null];
+      if (sz.includes(null)) continue;
+      objects.push({ name, shape: 'box', center, size: sz, yaw_deg: num(it.yaw_deg, -360, 360) || 0 });
+    }
+    names.add(name);
+  }
+  return { objects };
+}
+async function runLayout(o) {
+  if (!o.image || !o.brief || !o.out) throw new Error('使い方：node paint.mjs layout --image <絵> --brief <説明の文> --out <layout.json> [--depth <奥行きの絵>] [--prev <今の layout.json> --overlay <重ねた絵> --report <見比べの文>]');
+  const refine = typeof o.prev === 'string' && typeof o.overlay === 'string' && typeof o.report === 'string';
+  const workDir = path.join(path.dirname(path.resolve(o.out)), 'work', `layout-${stamp()}`);
+  fs.mkdirSync(workDir, { recursive: true });
+  const references = [{ name: 'picture.png', file: o.image }];
+  const hasDepth = typeof o.depth === 'string';
+  if (hasDepth) references.push({ name: 'depth.png', file: o.depth });
+  if (refine) references.push({ name: 'overlay.png', file: o.overlay }, { name: 'layout.json', file: o.prev });
+  const prompt = layoutPrompt({ brief: fs.readFileSync(o.brief, 'utf8'), hasDepth, refine, report: refine ? fs.readFileSync(o.report, 'utf8') : '' });
+  console.log(`${refine ? '形の配置を直してもらいます' : '形の配置を書いてもらいます'}：${o['dry-run'] ? '文と絵を用意します（Codex は呼びません）' : 'Codex に頼んでいます'}`);
+  const raw = await askJson({ workDir, prompt, references, resultName: 'layout.json', command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
+  if (!raw) { console.log(`  → ${workDir}`); return; }
+  const layout = cleanLayout(raw);
+  if (!layout.objects.length) throw new Error(`layout.json に使える形が 1 つもありません。記録：${workDir}`);
+  fs.writeFileSync(o.out, JSON.stringify(layout, null, 1));
+  console.log(`  → ${o.out}（形 ${layout.objects.length} 個）`);
+}
+
 const o = parseArgs(process.argv.slice(2));
 try {
   if (o._ === 'views') await runViews(o);
   else if (o._ === 'fill') await runFill(o);
+  else if (o._ === 'layout') await runLayout(o);
   else { console.log(fs.readFileSync(new URL(import.meta.url)).toString().split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n')); process.exit(2); }
 } catch (e) {
   console.error(`止まりました：${e.message}`);

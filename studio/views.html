@@ -136,6 +136,31 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
   </div>
 
   <div class="group">
+    <h2>3. 連続で進める</h2>
+    <div class="label">進み方</div>
+    <div class="seg" id="autoKind">
+      <button type="button" data-v="orbit" aria-pressed="true">見る先のまわりを回る</button>
+      <button type="button" data-v="pan" aria-pressed="false">その場で向きを変える</button>
+    </div>
+    <div class="seg" id="autoDir">
+      <button type="button" data-v="right" aria-pressed="true">右回り</button>
+      <button type="button" data-v="left" aria-pressed="false">左回り</button>
+    </div>
+    <div class="label"><span>1 歩の角度</span><output id="oAutoStep"></output></div>
+    <input type="range" id="autoStep" min="5" max="90" step="1" value="30">
+    <p class="note" id="autoHint"></p>
+    <div class="label">穴の埋め方</div>
+    <div class="seg" id="autoFill">
+      <button type="button" data-v="codex" aria-pressed="true">Codex で描き足す</button>
+      <button type="button" data-v="local" aria-pressed="false">ツール内で埋める</button>
+    </div>
+    <button type="button" class="main" id="autoRun">連続で進める</button>
+    <p class="note" id="autoCount"></p>
+    <pre id="autoLog"></pre>
+    <p class="note">いまの候補の視点から、1 歩ずつ角度を進めて「視点を足す → 穴を埋める」を繰り返します。埋めた絵は、次の 1 歩の土台になります。押すとボタンが「止める」に変わり、もう一度押すまで続きます。回数の上限はありません（1 周を過ぎても続きます）。「Codex で描き足す」では、1 歩につき Codex を 1 回（絵 1 枚）使います。穴が 1 画素も無い 1 歩では Codex を呼ばずに次へ進みます。Codex が利用枠に当たったときや失敗したときは、そこで止まります。角度・向き・埋め方は、進めている途中でも変えられます（次の 1 歩から効きます）。</p>
+  </div>
+
+  <div class="group">
     <div class="label"><span>進み具合</span><output id="status">–</output></div>
     <pre id="log"></pre>
     <p class="note">埋めた後は「粒の空間」のタブで「ファイルを読み直す」を押すと、足した分の粒が加わります（「視点別」の表示で色が分かれます）。</p>

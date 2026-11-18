@@ -39,7 +39,7 @@ async function reload() {
   problem(painted().length ? '' : `「${LIGHTS[light].name}」の絵画がまだありません。先に「絵画化」のタブで、この光の描き方の絵を作ってください（穴かどうかは、絵がある視点を基準に決めます）。`);
   if (selected && !D.views.some((v) => v.name === selected)) selected = null;
   if (v3) { v3.setViews(D.views); v3.setCandidate(cand); }
-  renderAdded(); drawMap(); show();
+  renderAdded(); drawMap(); show(); showAuto();
 }
 
 // ---- 地図 ----
@@ -231,34 +231,42 @@ async function addView() {
   if (busy) return;
   if (!painted().length) return problem('まだ絵画がありません。先に「絵画化」のタブで絵を作ってください。');
   busy = true; $('add').disabled = true; $('log').textContent = '';
-  try {
-    const name = nextName(), round = (a) => a.map((x) => +x.toFixed(3));
-    say('プレビズを書き出しています'); log(`視点 ${name} を足します：位置 ${round(cand.position).join(', ')} → 見る先 ${round(cand.target).join(', ')}`);
-    await api('/api/view/forget', { view: name });
-    await saveExtra([...(await extraCameras()).filter((c) => c.name !== name), { name, position: round(cand.position), target: round(cand.target) }]);
-    await reexport(); log('プレビズを書き出し直しました（色・奥行き・カメラ情報）。');
-    say('絵を写しています');
-    let wroteNew = false;
-    for (const L of Object.keys(LIGHTS)) wroteNew = (await warpView(name, L, !wroteNew)) || wroteNew; // 絵のある描き方すべてについて写す
-    if (!wroteNew) throw new Error('写せる絵がありませんでした');
-    selected = name; stage = 'reproj'; press($('stage'), stage);
-    await reload(); say('穴を埋める方法を選んでください');
-  } catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
+  try { await addViewCore(); say('穴を埋める方法を選んでください'); }
+  catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
   finally { busy = false; $('add').disabled = false; }
 }
-// 視点 name へ、光の描き方 L の絵を写す。写した絵・穴の印を保存する。絵が無ければ何もしない。
+// いまの候補の視点を足す：プレビズを書き出し直し、すでにある絵を写す。返すのは { name, holes（いまの光の描き方での穴の画素数。絵が無ければ null）, pixels }
+async function addViewCore() {
+  const name = nextName(), round = (a) => a.map((x) => +x.toFixed(3));
+  say('プレビズを書き出しています'); log(`視点 ${name} を足します：位置 ${round(cand.position).join(', ')} → 見る先 ${round(cand.target).join(', ')}`);
+  await api('/api/view/forget', { view: name });
+  await saveExtra([...(await extraCameras()).filter((c) => c.name !== name), { name, position: round(cand.position), target: round(cand.target) }]);
+  await reexport(); log('プレビズを書き出し直しました（色・奥行き・カメラ情報）。');
+  say('絵を写しています');
+  let wroteNew = false, holes = null;
+  for (const L of Object.keys(LIGHTS)) { // 絵のある描き方すべてについて写す
+    const h = await warpView(name, L, !wroteNew);
+    if (h !== null) { wroteNew = true; if (L === light) holes = h; }
+  }
+  if (!wroteNew) throw new Error('写せる絵がありませんでした');
+  selected = name; stage = 'reproj'; press($('stage'), stage);
+  await reload();
+  const v = D.views.find((x) => x.name === name);
+  return { name, holes, pixels: v ? v.W * v.H : 1 };
+}
+// 視点 name へ、光の描き方 L の絵を写す。写した絵・穴の印を保存する。返すのは穴の画素数。絵が無ければ何もせず null。
 async function warpView(name, L, writeNew) {
   const data = await loadViews(L), v = data.views.find((x) => x.name === name), x = LIGHTS[L].sfx;
   if (!v) throw new Error('書き出しに新しい視点が入っていません');
   const sources = data.views.filter((s) => s.painted && s !== v && !(s.added && !s.st[`painted${x}`]));
-  if (!sources.length) return false;
+  if (!sources.length) return null;
   await new Promise((r) => setTimeout(r));
   const w = warpInto(v, sources);
   await savePng(`${name}_reproj${x}.png`, w.reproj, v.W, v.H);
   await savePng(`${name}_holes${x}.png`, w.holes, v.W, v.H);
   if (writeNew) await savePng(`${name}_new.png`, w.holes, v.W, v.H); // 粒にするのは穴だった画素だけ
   log(`「${LIGHTS[L].name}」の絵を写しました。穴は絵の ${(100 * w.holeCount / (v.W * v.H)).toFixed(1)}%。`);
-  return true;
+  return w.holeCount;
 }
 async function rewarp() {
   if (busy || !selected) return; busy = true;
@@ -267,7 +275,7 @@ async function rewarp() {
     const v = D.views.find((x) => x.name === selected);
     // 埋めた絵が残っていると、それ自身が「すでにある絵」として写ってしまうので、先に消す
     await fetch(`/api/paint-out/${selected}_painted${sfx()}.png`, { method: 'DELETE' });
-    if (!(await warpView(selected, light, !v.st.new_mask))) log(`「${LIGHTS[light].name}」の絵がまだありません。`);
+    if ((await warpView(selected, light, !v.st.new_mask)) === null) log(`「${LIGHTS[light].name}」の絵がまだありません。`);
     stage = 'reproj'; press($('stage'), stage); await reload(); say('–');
   } catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
   finally { busy = false; }
@@ -287,19 +295,20 @@ async function removeView(name) {
 // ---- 穴を埋める ----
 async function fillLocal() {
   if (busy || !selected) return; busy = true;
-  try {
-    const v = D.views.find((x) => x.name === selected), t0 = performance.now();
-    say('ツール内で埋めています');
-    if (!v.st[`reproj${sfx()}`]) throw new Error('まだ絵を写していません。「すでにある絵を写し直す」を押してください。');
-    const [reproj, holes] = await Promise.all([loadImage(`/files/paint-out/${v.name}_reproj${sfx()}.png`, v.W, v.H), loadImage(`/files/paint-out/${v.name}_holes${sfx()}.png`, v.W, v.H)]);
-    await new Promise((r) => setTimeout(r, 30));
-    const f = localFill(v, reproj, holes, { meshes, sources: painted().filter((s) => s !== v) });
-    await savePng(`${v.name}_painted${sfx()}.png`, f.rgba, v.W, v.H);
-    const all = Math.max(1, f.spread + f.fromPalette);
-    log(`視点 ${v.name}：ツール内で埋めました（${((performance.now() - t0) / 1000).toFixed(1)} 秒）。穴のうち ${(100 * f.spread / all).toFixed(0)}% はまわりの色を広げ、${(100 * f.fromPalette / all).toFixed(0)}% は${f.byLabels ? '同じ物体・種類の札の' : '同じ形の'}平均の色で塗りました。`);
-    stage = 'painted'; press($('stage'), stage); await reload(); say('埋めました');
-  } catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
+  try { await fillLocalCore(selected); stage = 'painted'; press($('stage'), stage); await reload(); say('埋めました'); }
+  catch (e) { log(`止まりました：${e.message}`); say('止まりました'); }
   finally { busy = false; }
+}
+async function fillLocalCore(name) {
+  const v = D.views.find((x) => x.name === name), t0 = performance.now();
+  say('ツール内で埋めています');
+  if (!v.st[`reproj${sfx()}`]) throw new Error('まだ絵を写していません。「すでにある絵を写し直す」を押してください。');
+  const [reproj, holes] = await Promise.all([loadImage(`/files/paint-out/${v.name}_reproj${sfx()}.png`, v.W, v.H), loadImage(`/files/paint-out/${v.name}_holes${sfx()}.png`, v.W, v.H)]);
+  await new Promise((r) => setTimeout(r, 30));
+  const f = localFill(v, reproj, holes, { meshes, sources: painted().filter((s) => s !== v) });
+  await savePng(`${v.name}_painted${sfx()}.png`, f.rgba, v.W, v.H);
+  const all = Math.max(1, f.spread + f.fromPalette);
+  log(`視点 ${v.name}：ツール内で埋めました（${((performance.now() - t0) / 1000).toFixed(1)} 秒）。穴のうち ${(100 * f.spread / all).toFixed(0)}% はまわりの色を広げ、${(100 * f.fromPalette / all).toFixed(0)}% は${f.byLabels ? '同じ物体・種類の札の' : '同じ形の'}平均の色で塗りました。`);
 }
 let watching = false;
 async function fillCodex(dryRun) {
@@ -317,6 +326,78 @@ async function poll() {
     if (!st.running) { watching = false; if (st.code === 0 && !st.dryRun) { stage = 'painted'; press($('stage'), stage); } await reload(); return; }
   } catch { say('サーバーに届きません'); }
   setTimeout(poll, 1500);
+}
+
+// ---- 連続で進める：1 歩ずつ角度を進めて「視点を足す → 穴を埋める」を繰り返す。止めるまで続く（回数の上限は無い） ----
+const auto = { running: false, stop: false, steps: 0, codex: 0, lines: [], kind: 'orbit', dir: 'right', fill: 'codex' };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const autoLog = (text) => { auto.lines.push(text); const el = $('autoLog'); el.textContent = auto.lines.join('\n'); el.scrollTop = el.scrollHeight; };
+const fovX = () => 2 * Math.atan(Math.tan(fovY() * Math.PI / 360) * D.views[0].W / D.views[0].H) * 180 / Math.PI;
+function showAuto() {
+  const b = $('autoRun'), deg = Number($('autoStep').value);
+  b.textContent = !auto.running ? '連続で進める' : auto.stop ? '止めています…' : '止める';
+  b.disabled = auto.running && auto.stop;
+  $('oAutoStep').textContent = `${deg}°（1 周 ${Math.ceil(360 / deg)} 歩）`;
+  if (!D) return;
+  const fx = fovX();
+  $('autoHint').textContent = auto.kind === 'pan'
+    ? `絵の横の画角は ${fx.toFixed(0)}°。1 歩がこれより大きいと、前の絵と重ならず、画風と位置を合わせる手がかりが無くなります。${deg >= fx ? 'いまの角度では重なりません。' : `いまの角度では、絵の ${Math.round(100 * (1 - deg / fx))}% ほどが前の絵と重なります。`}`
+    : '見る先（白い印）を中心に、同じ高さ・同じ距離で回ります。1 歩を大きくすると枚数は減りますが、前の絵に斜めから浅く写っていた面は穴と数えないので、粗い色のまま残りやすくなります。';
+  $('autoCount').textContent = auto.running || auto.steps ? `これまで ${auto.steps} 歩。Codex を ${auto.codex} 回呼びました。` : '';
+}
+// 候補の視点を deg 度ぶん進める（上から見て時計回りが正）。orbit = 見る先のまわりを回る、pan = その場で向きを変える
+function turnCandidate(deg, kind) {
+  const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a), [px, py, pz] = cand.position, [tx, ty, tz] = cand.target;
+  if (kind === 'pan') { const dx = tx - px, dz = tz - pz; cand = { position: [px, py, pz], target: [px + dx * c - dz * s, ty, pz + dx * s + dz * c] }; }
+  else { const dx = px - tx, dz = pz - tz; cand = { position: [tx + dx * c - dz * s, py, tz + dx * s + dz * c], target: [tx, ty, tz] }; }
+}
+// Codex で 1 枚描いてもらい、終わるまで待つ。返すのは /api/paint/status の結果
+async function codexFillWait(name) {
+  await api('/api/paint/fill', { view: name, dryRun: false, light });
+  for (;;) {
+    await sleep(1500);
+    let st; try { st = await api('/api/paint/status'); } catch { say('サーバーに届きません'); continue; }
+    say(st.running ? `Codex で描いています ${st.seconds} 秒（視点 ${name}）` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
+    $('log').textContent = st.log;
+    if (!st.running) return st;
+  }
+}
+async function autoRun() {
+  if (auto.running) { // 止める：いまの 1 歩の途中でも止める（Codex が動いていれば、それも止める）
+    auto.stop = true; showAuto(); api('/api/paint/stop', {}).catch(() => {}); return;
+  }
+  if (busy) return;
+  if (!painted().length) return problem('まだ絵画がありません。先に「絵画化」のタブで絵を作ってください。');
+  Object.assign(auto, { running: true, stop: false, steps: 0, codex: 0, lines: [] }); busy = true; $('add').disabled = true; $('log').textContent = ''; showAuto();
+  let last = '';
+  try {
+    while (!auto.stop) {
+      // 角度・向き・埋め方は 1 歩ごとに読む（進めている途中で変えられる）
+      const deg = Number($('autoStep').value), useCodex = auto.fill === 'codex';
+      turnCandidate(auto.dir === 'right' ? deg : -deg, auto.kind);
+      selected = null; sliders(); drawMap(); if (v3) v3.setCandidate(cand);
+      autoLog(`${auto.steps + 1} 歩目：${auto.dir === 'right' ? '右' : '左'}へ ${deg}°（${auto.kind === 'pan' ? 'その場で向きを変える' : '見る先のまわりを回る'}）`);
+      const { name, holes, pixels } = await addViewCore();
+      last = name;
+      if (holes === null) throw new Error(`「${LIGHTS[light].name}」の絵がありません`);
+      autoLog(`  視点 ${name} を足しました。穴は絵の ${(100 * holes / pixels).toFixed(1)}%。`);
+      if (auto.stop) break;
+      if (holes === 0) autoLog('  穴が無いので、描き足さずに次へ進みます。');
+      else if (useCodex) {
+        auto.codex++; showAuto();
+        const st = await codexFillWait(name);
+        if (auto.stop) break;
+        if (st.code !== 0) throw new Error(`Codex が止まりました（終了コード ${st.code}）。下の「進み具合」に Codex の出力があります`);
+        autoLog(`  Codex で描き足しました（${st.seconds} 秒）。`);
+      } else { await fillLocalCore(name); autoLog('  ツール内で埋めました。'); }
+      last = ''; auto.steps++; showAuto();
+      stage = 'painted'; press($('stage'), stage); await reload();
+    }
+  } catch (e) { autoLog(`止まりました：${e.message}`); }
+  if (last) autoLog(`視点 ${last} は穴が残ったままです。「2. 穴を埋める」で埋めるか、取り消してください。`);
+  autoLog(`終わりました。${auto.steps} 歩進み、Codex を ${auto.codex} 回呼びました。`);
+  auto.running = false; auto.stop = false; busy = false; $('add').disabled = false; showAuto(); say('–');
+  await reload().catch(() => {});
 }
 
 // ---- 操作 ----
@@ -351,11 +432,15 @@ seg('light', (v) => { if (busy) return press($('light'), light); light = v; relo
 $('rewarp').addEventListener('click', rewarp);
 $('search').addEventListener('click', () => search().catch((e) => { log(e.message); busy = false; $('search').disabled = false; }));
 $('add').addEventListener('click', addView);
+$('autoRun').addEventListener('click', () => { autoRun().catch((e) => { autoLog(`止まりました：${e.message}`); auto.running = false; auto.stop = false; busy = false; $('add').disabled = false; showAuto(); }); });
+$('autoStep').addEventListener('input', showAuto);
+for (const key of ['kind', 'dir', 'fill']) seg(`auto${key[0].toUpperCase()}${key.slice(1)}`, (v) => { auto[key] = v; showAuto(); });
 $('fillLocal').addEventListener('click', fillLocal);
 $('fillCodex').addEventListener('click', () => fillCodex(false));
 $('fillDry').addEventListener('click', () => fillCodex(true));
 $('stop').addEventListener('click', () => api('/api/paint/stop', {}).catch(() => {}));
 window.addEventListener('focus', () => { if (!busy && !watching) reload().catch(() => {}); });
+window.__auto = auto;
 
 
 // ---- 3D の画面 ----
