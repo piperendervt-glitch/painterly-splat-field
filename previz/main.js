@@ -2,8 +2,13 @@ import * as THREE from 'three/webgpu';
 import { positionView, instancedBufferAttribute, float, vec2, vec3, vec4 } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { zipSync, strToU8 } from 'fflate';
-import { buildScene, EXPORT, SKY } from './scene.js';
+import { buildScene, EXPORT, SKY, PAINT_SUN } from './scene.js';
 import { DEPTH_FORMULA, zFromValue } from './depth.js';
+import { labelScene, captureLabels, renderSunMap, shadeView } from './gbuffer.js';
+import { TYPES, hexToRgb, objectColor } from '../shared/labels.js';
+import { sunDirection, FLAT_LIGHT, LIT_LIGHT } from '../shared/light.js';
+
+const SUN_DIR = sunDirection(PAINT_SUN.azimuth, PAINT_SUN.elevation);
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage'), msg = $('msg');
@@ -12,7 +17,7 @@ const say = (text) => { msg.textContent = text; msg.style.display = text ? 'flex
 const { width: W, height: H, fovY, near: NEAR, far: FAR } = EXPORT;
 const FY = (H / 2) / Math.tan(THREE.MathUtils.degToRad(fovY / 2)), FX = FY, CX = W / 2, CY = H / 2;
 const CLOUD_STRIDE = 3;
-const FRUSTUM_COLORS = [0xffa23a, 0x4fd2ff];
+const FRUSTUM_COLORS = [0xffa23a, 0x4fd2ff, 0xc78cff, 0x99e666, 0xff6f91, 0xffe066];
 
 const ui = { view: 'overview', mode: 'color', source: 'all' };
 let app = null, starting = false, forceGL = new URLSearchParams(location.search).has('gl');
@@ -91,7 +96,8 @@ async function capture(a, cam) {
       rgba[o] = srgb(lin(half[s])); rgba[o + 1] = srgb(lin(half[s + 1])); rgba[o + 2] = srgb(lin(half[s + 2])); rgba[o + 3] = 255;
     }
   }
-  return { name: cam.name, cam, rgba, depth, flip, errMedian: med(e), errP99: e[Math.floor(e.length * 0.99)], samples: e.length };
+  const labels = await captureLabels(renderer, scene, cam, a.depthRT, a.labels, flip); // 種類・物体・面の向き
+  return { name: cam.name, cam, rgba, depth, ...labels, flip, errMedian: med(e), errP99: e[Math.floor(e.length * 0.99)], samples: e.length };
 }
 
 // 形に光線を当てて求めた正解の距離（画素の中心を通る光線）。
@@ -149,11 +155,36 @@ function camerasJson(caps) {
     pixel_coords: 'origin at top-left, +x right, +y down, pixel centers at +0.5',
     projection: 'x_cam = (px - cx) / fx * z, y_cam = -(py - cy) / fy * z, z_cam = -z, then world = camera_to_world * [x_cam, y_cam, z_cam, 1]',
     depth: { ...DEPTH_FORMULA, near: NEAR, far: FAR },
+    // 画素ごとの札。どの絵も color.png と同じ大きさ・同じ画素の並び。空（何も無い画素）は type 0・object 0。
+    labels: {
+      type_png: 'R = G = B = type id (see types). 0 = sky / nothing rendered',
+      object_png: 'object id = R * 256 + G (see objects). 0 = no object',
+      normal_png: 'world-space unit normal n = rgb / 127.5 - 1. Meaningless where type is 0',
+      sun_png: 'sun visibility at paint time: 255 = sunlit, 0 = in cast shadow (does not include n.l). 255 where type is 0',
+      types: TYPES,
+      objects: app.labels.objects.map(({ id, name, type, type_id, base_color, bounds }) => ({ id, name, type, type_id, base_color, bounds })),
+    },
+    // 下絵の光。粒の光を付け替えるときの「描いたときの光」。式は shared/light.js。
+    paint_light: {
+      formula: 'L = ambient * (0.8 + 0.2 * n.y) + sun * max(dot(n, sun_direction), 0) * sun_visibility',
+      sun_direction: SUN_DIR.map((v) => +v.toFixed(6)),
+      sun_direction_meaning: 'unit vector from the surface toward the sun, world space',
+      sun_azimuth_deg: PAINT_SUN.azimuth, sun_elevation_deg: PAINT_SUN.elevation,
+      flat: { ...FLAT_LIGHT, image: 'X_flat.png = base colour * L, no sun, no cast shadows' },
+      lit: { ...LIT_LIGHT, image: 'X_lit.png = base colour * L, neutral white sun with cast shadows' },
+    },
     views: caps.map((c, i) => ({
       name: c.name,
       color: `${c.name}_color.png`,
       depth: `${c.name}_depth.png`,
       depth_view: `${c.name}_depth_view.png`,
+      type: `${c.name}_type.png`,
+      type_view: `${c.name}_type_view.png`,
+      object: `${c.name}_object.png`,
+      normal: `${c.name}_normal.png`,
+      sun: `${c.name}_sun.png`,
+      flat: `${c.name}_flat.png`,
+      lit: `${c.name}_lit.png`,
       width: W, height: H,
       intrinsics: { fx: +FX.toFixed(6), fy: +FY.toFixed(6), cx: CX, cy: CY, fov_y_deg: fovY, K: [[+FX.toFixed(6), 0, CX], [0, +FY.toFixed(6), CY], [0, 0, 1]] },
       extrinsics: {
@@ -165,6 +196,24 @@ function camerasJson(caps) {
       },
     })),
   };
+}
+
+// 札や下絵を、書き出す絵（RGBA）にする。画面で見る用の 'object_view' もここで作る。
+const TYPE_RGB = new Map(TYPES.map((t) => [t.id, hexToRgb(t.color)]));
+function picture(c, kind) {
+  if (kind === 'flat' || kind === 'lit') return c[kind];
+  const out = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    const o = i * 4; let r = 0, g = 0, b = 0;
+    if (kind === 'type') r = g = b = c.type[i];
+    else if (kind === 'type_view') [r, g, b] = TYPE_RGB.get(c.type[i]) || [255, 0, 255];
+    else if (kind === 'object') { r = c.object[i] >> 8; g = c.object[i] & 255; }
+    else if (kind === 'object_view') [r, g, b] = objectColor(c.object[i]);
+    else if (kind === 'normal') { if (c.object[i]) { r = c.normal[i * 3] / 127 * 127.5 + 127.5; g = c.normal[i * 3 + 1] / 127 * 127.5 + 127.5; b = c.normal[i * 3 + 2] / 127 * 127.5 + 127.5; } }
+    else if (kind === 'sun') r = g = b = c.sun[i];
+    out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = 255;
+  }
+  return out;
 }
 
 async function png(rgba) {
@@ -185,6 +234,7 @@ async function exportFiles(caps) {
     files[`${c.name}_color.png`] = await png(c.rgba);
     files[`${c.name}_depth.png`] = await png(packed);
     files[`${c.name}_depth_view.png`] = await png(view);
+    for (const kind of ['type', 'type_view', 'object', 'normal', 'sun', 'flat', 'lit']) files[`${c.name}_${kind}.png`] = await png(picture(c, kind));
   }
   files['cameras.json'] = strToU8(JSON.stringify(camerasJson(caps), null, 2));
   return files;
@@ -205,12 +255,13 @@ async function start(useGL) {
   const scene = buildScene();
   const solids = []; scene.traverse((o) => { if (o.isMesh) solids.push(o); });
   scene.updateMatrixWorld(true);
+  const labels = labelScene(scene);
   const exportCams = EXPORT.cameras.map(makeExportCamera);
 
   const extras = new THREE.Group(), frusta = new THREE.Group();
   exportCams.forEach((cam, i) => { // 視錐台は見やすいよう手前 60m までで描く
     const short = cam.clone(); short.near = 1; short.far = 60; short.updateProjectionMatrix(); short.updateMatrixWorld(true);
-    const h = new THREE.CameraHelper(short); const c = new THREE.Color(FRUSTUM_COLORS[i]);
+    const h = new THREE.CameraHelper(short); const c = new THREE.Color(FRUSTUM_COLORS[i % FRUSTUM_COLORS.length]);
     h.setColors(c, c, c, c, c); frusta.add(h);
   });
   extras.add(frusta); scene.add(extras);
@@ -221,7 +272,7 @@ async function start(useGL) {
   controls.target.set(0, 12, -35); controls.maxPolarAngle = Math.PI * 0.495; controls.update();
 
   const a = app = {
-    renderer, scene, solids, exportCams, extras, frusta, overview, controls, clouds: [], caps: null,
+    renderer, scene, solids, labels, exportCams, extras, frusta, overview, controls, clouds: [], caps: null,
     packMat: makePackMaterial(), viewMat: makeDepthViewMaterial(),
     colorRT: new THREE.RenderTarget(W, H, { type: THREE.HalfFloatType, samples: 4 }),
     depthRT: new THREE.RenderTarget(W, H, { type: THREE.UnsignedByteType, samples: 0, magFilter: THREE.NearestFilter, minFilter: THREE.NearestFilter }),
@@ -229,6 +280,11 @@ async function start(useGL) {
 
   a.caps = [];
   for (const cam of exportCams) a.caps.push(await capture(a, cam));
+  // 日なた・影と、下絵の2枚（光なし・影つき）。太陽の向きは scene.js の PAINT_SUN。
+  a.sunMap = await renderSunMap(renderer, scene, labels, SUN_DIR);
+  for (const c of a.caps) {
+    Object.assign(c, shadeView({ W, H, depth: c.depth, type: c.type, object: c.object, normal: c.normal, matrixWorld: c.cam.matrixWorld.elements, fx: FX, fy: FY, cx: CX, cy: CY, near: NEAR, far: FAR }, labels, a.sunMap, SUN_DIR));
+  }
   a.clouds = a.caps.map(buildCloud); extras.add(...a.clouds);
 
   const gpu = !!(renderer.backend && renderer.backend.isWebGPUBackend);
@@ -238,7 +294,7 @@ async function start(useGL) {
   const worst = a.caps.reduce((p, c) => (c.errP99 > p.errP99 ? c : p));
   $('sErr').textContent = `中央値 ${(Math.max(...a.caps.map((c) => c.errMedian)) * 100).toFixed(3)}% ・ 99% が ${(worst.errP99 * 100).toFixed(2)}% 以内`;
 
-  layout(); say('');
+  layout(); showShot(); say('');
   let frames = 0, t0 = performance.now();
   renderer.setAnimationLoop(() => {
     draw();
@@ -251,6 +307,7 @@ async function start(useGL) {
 
 function draw() {
   const a = app; if (!a) return;
+  if (SHOT_MODES[ui.mode] && ui.view !== 'overview') return; // 書き出す絵を重ねて見せている間は描かない
   const over = ui.view === 'overview', depth = ui.mode === 'depth', hide = $('hide').checked && $('cloud').checked && !depth;
   const cam = over ? a.overview : a.exportCams[Number(ui.view)];
   if (over) a.controls.update();
@@ -264,6 +321,21 @@ function draw() {
   a.scene.overrideMaterial = null; a.scene.background = bg;
 }
 
+// 書き出す札・下絵（種類、物体、面の向き、日なた、光なし、影つき）は、書き出す絵そのものを重ねて見せる。
+const SHOT_MODES = { type: 'type_view', object: 'object_view', normal: 'normal', sun: 'sun', flat: 'flat', lit: 'lit' };
+function showShot() {
+  const shot = $('shot'), kind = SHOT_MODES[ui.mode], a = app;
+  if (!kind || !a || !a.caps) { shot.style.display = 'none'; return; }
+  if (ui.view === 'overview') { // 書き出す絵はカメラの視点にしか無いので、カメラAへ移す
+    ui.view = '0';
+    for (const x of $('view').children) x.setAttribute('aria-pressed', x.dataset.v === '0' ? 'true' : 'false');
+    layout();
+  }
+  shot.width = W; shot.height = H;
+  shot.getContext('2d').putImageData(new ImageData(picture(a.caps[Number(ui.view)], kind), W, H), 0, 0);
+  shot.style.display = 'block';
+}
+
 function layout() {
   const a = app; if (!a) return;
   const sw = stage.clientWidth, sh = stage.clientHeight; if (!sw || !sh) return;
@@ -272,6 +344,7 @@ function layout() {
   if (!over) { const k = Math.min(sw / W, sh / H); w = Math.floor(W * k); h = Math.floor(H * k); }
   a.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   a.renderer.setSize(w, h);
+  $('shot').style.width = w + 'px'; $('shot').style.height = h + 'px';
   a.overview.aspect = w / h; a.overview.updateProjectionMatrix();
   a.controls.enabled = over;
   $('hint').textContent = over ? 'ドラッグで回す ・ ホイールで前後 ・ 橙の枠がカメラA、水色がカメラB' : '';
@@ -282,8 +355,8 @@ function seg(id, fn) {
   el.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return;
     for (const x of el.children) x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); fn(b.dataset.v); });
 }
-seg('view', (v) => { ui.view = v; layout(); });
-seg('mode', (v) => { ui.mode = v; });
+seg('view', (v) => { ui.view = v; layout(); showShot(); });
+seg('mode', (v) => { ui.mode = v; showShot(); });
 seg('source', (v) => { ui.source = v; });
 $('swap').addEventListener('click', () => start(!forceGL));
 new ResizeObserver(layout).observe(stage);
@@ -300,6 +373,15 @@ $('export').addEventListener('click', async () => {
   } finally { btn.disabled = false; }
 });
 
+async function saveToFolder() {
+  const files = await exportFiles(app.caps);
+  for (const [name, bytes] of Object.entries(files)) {
+    const res = await fetch(`/api/previz-export/${name}`, { method: 'POST', body: bytes });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存できませんでした（${res.status}）`);
+  }
+  return Object.keys(files).length;
+}
+
 // GUI（start.bat / npm run dev）から開いたときは、previz-export フォルダへ直接保存できる。
 fetch('/api/state').then((r) => (r.ok ? r.json() : null)).then((s) => {
   if (!s || !('views' in s)) return;
@@ -309,12 +391,8 @@ fetch('/api/state').then((r) => (r.ok ? r.json() : null)).then((s) => {
     if (!app || !app.caps) return;
     btn.disabled = true;
     try {
-      const files = await exportFiles(app.caps);
-      for (const [name, bytes] of Object.entries(files)) {
-        const res = await fetch(`/api/previz-export/${name}`, { method: 'POST', body: bytes });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存できませんでした（${res.status}）`);
-      }
-      note.textContent = `保存しました（${Object.keys(files).length} ファイル、${new Date().toLocaleTimeString()}）。`;
+      const count = await saveToFolder();
+      note.textContent = `保存しました（${count} ファイル、${new Date().toLocaleTimeString()}）。`;
     } catch (e) { note.textContent = e.message; } finally { btn.disabled = false; }
   });
 }).catch(() => {});
@@ -325,4 +403,23 @@ if (import.meta.env.VITE_NO_DOWNLOAD) {
   $('exportNote').textContent = 'このページは表示の確認用です。zip の書き出しは、リポジトリを手元で動かしたとき（npm run dev）に使えます。';
 }
 
-start(forceGL).catch((e) => { console.error(e); say('表示中に問題が起きました：' + e.message); });
+// GUI の「視点を足す」で足したカメラ（previz-export/extra_cameras.json）も、同じように書き出す。
+try {
+  const res = await fetch('/files/previz-export/extra_cameras.json', { cache: 'no-store' });
+  const extra = res.ok ? await res.json() : [];
+  for (const c of Array.isArray(extra) ? extra : []) {
+    if (!c || !/^[A-Za-z0-9]+$/.test(c.name || '') || EXPORT.cameras.some((x) => x.name === c.name)) continue;
+    EXPORT.cameras.push({ name: c.name, position: c.position, target: c.target });
+    const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(EXPORT.cameras.length - 1); b.textContent = c.name; b.setAttribute('aria-pressed', 'false');
+    $('view').append(b);
+  }
+} catch { /* GUI のサーバーが無いときは A・B だけ */ }
+
+await start(forceGL).catch((e) => { console.error(e); say('表示中に問題が起きました：' + e.message); });
+
+// ?autosave つきで開かれたら（GUI の「視点を足す」から）、保存まで済ませて親の画面に知らせる。
+if (new URLSearchParams(location.search).has('autosave')) {
+  let ok = false, error = '';
+  try { if (!app || !app.caps) throw new Error('プレビズを描けませんでした'); await saveToFolder(); ok = true; } catch (e) { error = e.message; }
+  window.parent.postMessage({ type: 'previz-saved', ok, error }, location.origin);
+}

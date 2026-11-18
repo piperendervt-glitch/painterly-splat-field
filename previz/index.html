@@ -16,6 +16,10 @@ body{background:var(--room);color:var(--text);font-family:var(--font);font-size:
   display:grid;grid-template-columns:minmax(0,1fr) 300px;overflow:hidden}
 #stage{position:relative;min-height:0;min-width:0;overflow:hidden;touch-action:none}
 #stage canvas{display:block;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
+#mode{grid-auto-flow:row;grid-template-columns:repeat(4,1fr)}
+#mode button:nth-child(4n+1){border-left:0}
+#mode button:nth-child(n+5){border-top:1px solid var(--line)}
+#stage #shot{display:none}
 #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--muted);pointer-events:none}
 #hint{position:absolute;left:16px;bottom:14px;color:var(--muted);font-size:12px;pointer-events:none;text-shadow:0 1px 3px #000}
 aside{background:var(--panel);border-left:1px solid var(--line);padding:20px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:18px}
@@ -46,6 +50,7 @@ dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 </head>
 <body>
 <main id="stage">
+  <canvas id="shot"></canvas>
   <div id="msg">準備しています…</div>
   <div id="hint"></div>
 </main>
@@ -70,8 +75,14 @@ dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
     <div class="seg" id="mode">
       <button type="button" data-v="color" aria-pressed="true">色</button>
       <button type="button" data-v="depth" aria-pressed="false">奥行き</button>
+      <button type="button" data-v="type" aria-pressed="false">種類</button>
+      <button type="button" data-v="object" aria-pressed="false">物体</button>
+      <button type="button" data-v="normal" aria-pressed="false">面の向き</button>
+      <button type="button" data-v="sun" aria-pressed="false">日なた</button>
+      <button type="button" data-v="flat" aria-pressed="false">光なし</button>
+      <button type="button" data-v="lit" aria-pressed="false">影つき</button>
     </div>
-    <p class="note">「奥行き」は明るいほど手前（距離の対数）。空は黒です。</p>
+    <p class="note">「奥行き」は明るいほど手前（距離の対数）。空は黒です。「種類」から右は、書き出す絵そのものをカメラの視点で見せます。「面の向き」は法線を色にしたもの（右が赤、上が緑、手前が青）。「日なた」は白が日なた、黒が影。「光なし」「影つき」は絵画化の下絵です。</p>
   </div>
 
   <div class="group">
@@ -90,7 +101,7 @@ dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
     <button type="button" class="main" id="save" hidden>previz-export に保存</button>
     <p class="note" id="saveNote" hidden>リポジトリの previz-export フォルダへ直接書きます。「絵画化」と「粒の空間」はここを読みます。</p>
     <button type="button" class="main" id="export">2視点を書き出す（zip）</button>
-    <p class="note" id="exportNote">A・Bそれぞれの color.png、depth.png（16bit を R・G に格納）、depth_view.png（目で見る用）と cameras.json。</p>
+    <p class="note" id="exportNote">A・Bそれぞれの色、奥行き、種類、物体、面の向き、日なた、下絵2枚（光なし・影つき）と cameras.json。</p>
   </div>
 
   <dl>
