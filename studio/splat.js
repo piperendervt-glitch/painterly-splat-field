@@ -7,7 +7,7 @@ import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, SKY_TYPE, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
 import { parsePly, checkSharp, sharpScale, splatsFromSharp, sharpGrid, sharpBack, sharpBackSplats } from './sharp.js';
-import { SIGMA_K, BACK_RING, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate } from './layers.js';
+import { SIGMA_K, BACK_RING, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate, refineBackDepth, gridToPixels } from './layers.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
@@ -40,9 +40,10 @@ const SOURCES = {
 // sfx は、AI が描いた空の絵（paint/out/sky_ai<sfx>.png）の名前の後ろ。paint は、空を描いてもらうときの光の描かせ方（paint.mjs の --light）。
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, skyMode: 'dome', skyStep: 0.2 };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, backDepth: 'plate', skyMode: 'dome', skyStep: 0.2 };
 // 角度を変えたときの崩れを減らす設定（計算は studio/layers.js）：shape = 粒の形（round 丸 / surfel 面に沿う楕円）、stretch = 面に沿って伸ばす上限（倍）、
-// back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う
+// back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う、
+// backDepth = 背後の層の位置（calc 計算で延ばす / plate AI が描いた背景の絵を SHARP に通した奥行き。あれば）
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
 
 // 実在の絵から作った場面（painting/build.mjs）の種類の名前を、shared/labels.js の種類へ読み替える
@@ -77,6 +78,12 @@ async function loadImage(url, w, h) {
 
 async function tryImage(url, w, h) { try { return await loadImage(url, w, h); } catch { return null; } }
 
+// AI が描いた背景の絵を SHARP に通した粒（<視点>_plate_<色のもと>_sharp.ply）。無ければ null
+async function loadPlateSharp(name, key) {
+  const res = await fetch(`/files/paint-out/${name}_plate_${key}_sharp.ply`, { cache: 'no-store' });
+  if (!res.ok) return null;
+  try { const ply = parsePly(await res.arrayBuffer()); checkSharp(ply); return ply; } catch (e) { console.warn(e); return null; }
+}
 let plateVersion = 0; // AI が描いた背景の絵を読むたびに増やす（作り置きの層を作り直す目印）
 async function loadData() {
   const [camsRes, stateRes] = await Promise.all([fetch('/files/previz-export/cameras.json', { cache: 'no-store' }), fetch('/api/state', { cache: 'no-store' })]);
@@ -125,7 +132,9 @@ async function loadData() {
     const plates = {};
     for (const key of st.plates || []) {
       const px = await tryImage(`/files/paint-out/${v.name}_plate_${key}.png`, W, H), mask = px && await tryImage(`/files/paint-out/${v.name}_platemask_${key}.png`, W, H);
-      if (px && mask) plates[key] = { px, mask, version: ++plateVersion };
+      if (!px || !mask) continue;
+      plates[key] = { px, mask, version: ++plateVersion, sharp: null };
+      if ((st.plate_sharp || []).includes(key)) plates[key].sharp = await loadPlateSharp(v.name, key); // その絵を SHARP に通した粒（奥行きに使う）
     }
     views.push({
       plates,
@@ -279,14 +288,37 @@ const FRONT = frontTable(TYPES);            // 種類 → 手前の物かどう�
 const backInfo = { on: false, views: [] };  // 背後の層の作り方の結果（画面に出す）
 const SPLAT_OPTS = () => ({ skyZ: SKY_Z, typeOf: (t) => TYPE_BY_ID.get(t), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, maxStretch: ui.stretch, emitSky: ui.skyMode === 'wall' });
 // 視点 v の背後の層（画素ごと）。色のもとと縁の幅が同じなら作り直さない
+// 背景の絵を SHARP に通した粒から、視点 v のます目（g × g）の奥行きを作る（1 回だけ）。倍率は合わせない（refineBackDepth が縁で合わせる）
+function plateDepth(v, p) {
+  if (!p || !p.sharp) return null;
+  if (p.depth === undefined) {
+    const inv = v.matrix.clone().invert(), cam = new THREE.Vector3().setFromMatrixPosition(v.matrix).toArray();
+    const grid = sharpGrid(p.sharp, { scale: 1, inv, cam, edgeMax: EDGE_MAX });
+    p.depth = grid ? { g: grid.g, z: grid.z[0], px: null } : null;
+  }
+  return p.depth;
+}
+// 計算で作った層に、AI が描いた背景の色（withPlate）と、その絵から推定した奥行き（refineBackDepth）を重ねる。作ったものは holder.variants に取っておく
+function dressBack(holder, v, key, { pixel = null, W, H, z, zp }) {
+  const p = ui.plate ? v.plates[key] : null, depth = ui.backDepth === 'plate' && zp ? 1 : 0;
+  if (!p && !depth) return holder.layer;
+  const id = `${p ? p.version : '-'}:${depth}`;
+  if (!holder.variants.has(id)) {
+    let layer = holder.layer;
+    if (depth) layer = refineBackDepth(layer, { W, H, z, zp });
+    if (p) layer = withPlate(layer, p.px, p.mask, pixel);
+    holder.variants.clear(); holder.variants.set(id, layer);
+  }
+  return holder.variants.get(id);
+}
 // plated = false にすると、AI が描いた背景の絵を使わない、計算だけの層を返す（AI に頼むときの目安の絵に使う）
 function backOf(v, src, plated = true) {
   const c = colorOf(v, src), key = `${c.key}:${ui.halo}`;
-  if (!v.back || v.back.key !== key) v.back = { key, layer: backLayer({ W: v.W, H: v.H, z: v.z, type: v.type, rgba: c.px, front: FRONT, halo: ui.halo }), plated: null };
-  const p = plated && ui.plate ? v.plates[c.key] : null;
-  if (!p) return v.back.layer;
-  if (!v.back.plated || v.back.plated.version !== p.version) v.back.plated = { version: p.version, layer: withPlate(v.back.layer, p.px, p.mask) };
-  return v.back.plated.layer;
+  if (!v.back || v.back.key !== key) v.back = { key, layer: backLayer({ W: v.W, H: v.H, z: v.z, type: v.type, rgba: c.px, front: FRONT, halo: ui.halo }), variants: new Map() };
+  if (!plated) return v.back.layer;
+  const d = plateDepth(v, v.plates[c.key]);
+  if (d && !d.px) d.px = gridToPixels(d.z, d.g, v.W, v.H);
+  return dressBack(v.back, v, c.key, { W: v.W, H: v.H, z: v.z, zp: d && d.px });
 }
 function sharpParts(withBack) {
   const out = [];
@@ -304,13 +336,13 @@ function sharpParts(withBack) {
     out.push(p);
     if (withBack && grid && v.hasTypes) { // 背後の層：SHARP の奥行きのます目から作る（SHARP の地面とずれないように）
       const c = colorOf(v, ui.colorSrc), key = `${c.key}:${ui.halo}:${scale}`;
-      if (!v.sharpBack || v.sharpBack.key !== key) v.sharpBack = { key, layer: sharpBack(v.sharp, v, grid, c.px, { scale, inv, cam, front: FRONT, halo: Math.max(1, Math.round(ui.halo / 2)) }), plated: null };
-      const pl = ui.plate ? v.plates[c.key] : null; // AI が描いた背景の絵があれば、色はそこから
-      if (pl && (!v.sharpBack.plated || v.sharpBack.plated.version !== pl.version)) v.sharpBack.plated = { version: pl.version, layer: withPlate(v.sharpBack.layer, pl.px, pl.mask, v.sharpBack.layer.pixel) };
-      const layer = pl ? v.sharpBack.plated.layer : v.sharpBack.layer;
+      if (!v.sharpBack || v.sharpBack.key !== key) v.sharpBack = { key, layer: sharpBack(v.sharp, v, grid, c.px, { scale, inv, cam, front: FRONT, halo: Math.max(1, Math.round(ui.halo / 2)) }), variants: new Map() };
+      const pl = ui.plate ? v.plates[c.key] : null, base = v.sharpBack.layer; // AI が描いた背景の絵があれば、色はそこから
+      const pd = plateDepth(v, v.plates[c.key]);                              // その絵を SHARP に通してあれば、位置もそこから（ます目は同じ並び）
+      const layer = dressBack(v.sharpBack, v, c.key, { pixel: base.pixel, W: grid.g, H: grid.g, z: base.gridZ, zp: pd && pd.g === grid.g ? pd.z : null });
       const b = sharpBackSplats(v.sharp, v, grid, layer, backViewIndex(vi), { ...opts, step: Math.max(1, ui.stride >> 1), scale, inv, cam });
       out.push(b);
-      backInfo.views.push({ name: `${v.def.name}（SHARP）`, count: b.count, covered: 0, stats: v.sharpBack.layer.stats, ai: !!pl });
+      backInfo.views.push({ name: `${v.def.name}（SHARP）`, count: b.count, covered: 0, stats: v.sharpBack.layer.stats, ai: !!pl, refined: layer.refined, kept: layer.kept });
     }
   });
   return out;
@@ -326,7 +358,7 @@ function buildCloud() {
     if (!back) return;
     const b = backSplats(v, back, backViewIndex(vi), ui.stride, { ...SPLAT_OPTS(), others: data.views.filter((o) => o !== v) });
     parts.push(b);
-    backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined });
+    backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined, refined: back.refined, kept: back.kept });
   });
   if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp'));
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
@@ -706,6 +738,7 @@ async function forgetSky() {
 // 視点ごとに 1 枚：手前の物とその縁をマゼンタの穴にした絵を見せ、後ろの背景だけ描いてもらう。できた絵は paint-out の <視点>_plate_<色のもと>.png。
 const PLATE_GROW = 6; // 層のます（物とその縁）から、さらに何画素ひろげて描いてもらうか（絵と札のずれのぶん）
 let plateJob = false, plateStop = false;
+const PLATE_BUTTONS = ['platePaint', 'plateDry', 'plateForget', 'plateSharp'];
 // まだ背景の絵が無い視点（いまの色のもとで、手前の物がある視点）
 function plateTodo() {
   if (!data || !data.hasTypes) return [];
@@ -720,11 +753,44 @@ function showPlatePlan() {
   $('platePlan').textContent = todo.length
     ? `まだ描いてもらっていない視点：${todo.map((v) => v.def.name).join('、')}。押すと ChatGPT の利用枠を ${todo.length} 枚ぶん使います（1 視点 1 枚、1 枚 1〜2 分）。`
     : have.length ? `いまの色のもとでは、全部の視点（${have.map((v) => v.def.name).join('、')}）に AI が描いた背景があります。押しても Codex は呼びません。` : '手前の物がある視点がありません。';
+  const withDepth = have.filter((v) => v.plates[colorOf(v, ui.colorSrc).key].sharp);
+  $('plateSharp').disabled = !have.length || withDepth.length === have.length;
+  for (const b of $('backDepth').children) b.disabled = b.dataset.v === 'plate' && !withDepth.length;
+  press($('backDepth'), withDepth.length ? ui.backDepth : 'calc');
+  $('plateSharpNote').textContent = !have.length ? 'AI が描いた背景の絵ができると、押せるようになります。'
+    : withDepth.length === have.length ? `奥行きを推定済み：${withDepth.map((v) => v.def.name).join('、')}。` : `まだ推定していない視点：${have.filter((v) => !withDepth.includes(v)).map((v) => v.def.name).join('、')}（1 視点 数秒〜数十秒。Codex は使いません）。`;
+}
+// AI が描いた背景の絵を SHARP に通し、背後の層の位置に使う奥行きを作る（視点ごと。この PC の sharp/ の用意が要る。Codex は使わない）
+async function sharpPlate() {
+  if (plateJob || !app || !data) return;
+  const log = (t) => { $('plateLog').hidden = false; $('plateLog').textContent = t; };
+  plateJob = true; plateStop = false; for (const id of PLATE_BUTTONS) $(id).disabled = true; $('plateStopBtn').hidden = false;
+  let done = 0;
+  try {
+    for (const v of plateHave()) {
+      const key = colorOf(v, ui.colorSrc).key, p = v.plates[key], name = v.def.name;
+      if (p.sharp || plateStop) continue;
+      log(`視点 ${name}：SHARP で奥行きを推定しています`);
+      await api('/api/sharp/plate', { view: name, src: key });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (plateStop) await api('/api/paint/stop'); else log(`視点 ${name}：SHARP で奥行きを推定しています（${st.seconds} 秒）`); }
+      if (plateStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'SHARP が失敗しました');
+      p.sharp = await loadPlateSharp(name, key); p.depth = undefined; p.version = ++plateVersion;
+      if (!p.sharp) throw new Error(`${name}_plate_${key}_sharp.ply を読めませんでした`);
+      done++;
+    }
+    log(plateStop ? '止めました。' : done ? `${done} 視点の奥行きを推定しました。背後の層の位置に使っています。` : '推定する視点がありません。');
+  } catch (e) { console.error(e); log('止まりました：' + e.message); }
+  finally {
+    plateJob = false; for (const id of PLATE_BUTTONS) $(id).disabled = false; $('plateStopBtn').hidden = true;
+    if (done) { ui.backDepth = 'plate'; rebuild(); } else showPlatePlan();
+  }
 }
 async function paintPlate(dryRun) {
   if (plateJob || !app || !data) return;
   const log = (t) => { $('plateLog').hidden = false; $('plateLog').textContent = t; };
-  const buttons = ['platePaint', 'plateDry', 'plateForget'];
+  const buttons = PLATE_BUTTONS;
   plateJob = true; plateStop = false; for (const id of buttons) $(id).disabled = true; $('plateStopBtn').hidden = false;
   let done = 0;
   try {
@@ -743,7 +809,7 @@ async function paintPlate(dryRun) {
       if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
       done++;
       if (dryRun) continue;
-      v.plates[c.key] = { px: await loadImage(`/files/paint-out/${name}_plate_${c.key}.png`, v.W, v.H), mask: req.mask, version: ++plateVersion };
+      v.plates[c.key] = { px: await loadImage(`/files/paint-out/${name}_plate_${c.key}.png`, v.W, v.H), mask: req.mask, version: ++plateVersion, sharp: null };
     }
     log(plateStop ? '止めました。' : !done ? '頼む視点がありません。' : dryRun ? `${done} 枚ぶんの文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。` : `${done} 枚描いてもらいました。背後の層の色に使っています。`);
   } catch (e) { console.error(e); log('止まりました：' + e.message); }
@@ -1024,7 +1090,7 @@ function showSharpInfo() {
 const pct = (a, b) => `${b ? Math.round(a / b * 1000) / 10 : 0}%`;
 // 背後の層の結果
 function showLayerInfo() {
-  const lines = backInfo.views.map((b) => `${b.name}：${b.count < 1000 ? `${b.count} 粒` : `${(b.count / 10000).toFixed(1)} 万粒`}${b.ai ? '（色は AI が描いた背景）' : ''}${b.covered ? `（ほかの視点の絵に写っている ${(b.covered / 10000).toFixed(1)} 万粒は置かない）` : ''}`);
+  const lines = backInfo.views.map((b) => `${b.name}：${b.count < 1000 ? `${b.count} 粒` : `${(b.count / 10000).toFixed(1)} 万粒`}${b.ai ? '（色は AI が描いた背景）' : ''}${b.refined !== undefined ? `（位置は背景の絵から推定：${Math.round(100 * b.refined / Math.max(1, b.refined + b.kept))}%）` : ''}${b.covered ? `（ほかの視点の絵に写っている ${(b.covered / 10000).toFixed(1)} 万粒は置かない）` : ''}`);
   $('layerInfo').textContent = !data.hasTypes ? '種類の札（X_type.png）が無いので、背後の層は作れません。' : !ui.back ? '' : lines.length ? lines.join('\n') : '背後の層を作れる視点がありません。';
   $('layerInfo').classList.toggle('warn', !data.hasTypes);
   showPlatePlan();
@@ -1145,6 +1211,8 @@ $('platePaint').addEventListener('click', () => paintPlate(false));
 $('plateDry').addEventListener('click', () => paintPlate(true));
 $('plateStopBtn').addEventListener('click', () => { plateStop = true; });
 $('plateForget').addEventListener('click', forgetPlate);
+$('plateSharp').addEventListener('click', sharpPlate);
+seg('backDepth', (v) => { ui.backDepth = v; rebuild(); });
 showLayerUi();
 seg('order', (v) => {
   ui.order = v; if (!app) return;

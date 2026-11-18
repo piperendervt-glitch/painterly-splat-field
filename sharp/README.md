@@ -22,6 +22,17 @@ Apple の [SHARP](https://github.com/apple/ml-sharp)（Sharp Monocular View Synt
 sharp\.venv\Scripts\python.exe sharp\psf_sharp.py --scene jatte --view J [--image 別の絵.png] [--device cpu]
 ```
 
+### 手前の物を消した背景の絵を通す（背後の層の位置）
+
+「粒の空間」で AI に背景の絵（`<視点>_plate_<色のもと>.png`）を描いてもらった後、同じ欄の「AI が描いた背景から奥行きを推定する（SHARP）」を押すと、その絵を SHARP に通します。手で動かすなら：
+
+```
+sharp\run.bat --plate painted                     （start.bat の場面の最初の視点）
+sharp\run.bat --scene jatte --view J --plate painted
+```
+
+出力は `<視点>_plate_<色のもと>_sharp.ply`。粒そのものは置かず、奥行きだけを背後の層の位置に使います（`docs/angle-artifacts.md` の 3c）。
+
 ## `psf_sharp.py` がしていること
 
 SHARP の CLI（`sharp predict`）とは次が違う。

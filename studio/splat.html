@@ -88,8 +88,15 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" class="plain" id="plateStopBtn" hidden>止める</button>
       <button type="button" class="plain" id="plateDry">文と絵だけ用意する（利用枠を使わない）</button>
       <button type="button" class="plain" id="plateForget">AI が描いた背景を消す</button>
+      <div class="label">背後の層の位置</div>
+      <div class="seg" id="backDepth">
+        <button type="button" data-v="calc" aria-pressed="true">計算で延ばす</button>
+        <button type="button" data-v="plate" aria-pressed="false" disabled>背景の絵から推定</button>
+      </div>
+      <p class="note" id="plateSharpNote"></p>
+      <button type="button" class="plain" id="plateSharp" disabled>AI が描いた背景から奥行きを推定する（SHARP）</button>
       <p class="note" id="plateLog" hidden style="white-space:pre-wrap"></p>
-      <p class="note">視点ごとに 1 枚、いまの色のもとの絵から、手前の物（人・木・石壁など）とその縁をマゼンタの穴にした絵を見せ、「物の後ろにある背景だけ」を描いてもらいます。できた絵（paint-out の「視点_plate_色のもと.png」）は次からは読むだけです。背後の層の粒の位置は計算のまま、色だけがこの絵になります。上のチェックを外すと計算の色に戻るので、押し比べてください。足した視点（穴埋めの視点）には頼みません。</p>
+      <p class="note">視点ごとに 1 枚、いまの色のもとの絵から、手前の物（人・木・石壁など）とその縁をマゼンタの穴にした絵を見せ、「物の後ろにある背景だけ」を描いてもらいます。できた絵（paint-out の「視点_plate_色のもと.png」）は次からは読むだけです。背後の層の粒の位置は計算のまま、色だけがこの絵になります。上のチェックを外すと計算の色に戻るので、押し比べてください。足した視点（穴埋めの視点）には頼みません。「奥行きを推定する」は、その背景の絵を SHARP に通して、物の無い背景そのものの形を求めます（sharp フォルダの setup.bat が済んでいること。Codex は使いません）。推定した奥行きは、物の外でもとの奥行きに合わせてから、物の後ろの起伏にだけ使います。「背後の層の位置」で計算と押し比べてください。</p>
     </div>
   </div>
 

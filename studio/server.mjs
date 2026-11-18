@@ -8,6 +8,7 @@
 //   POST /api/paint/fill            paint/paint.mjs fill を起動（{ view, style, dryRun, light }）。足した視点の穴だけ描く
 //   POST /api/paint/sky             paint/paint.mjs fill --sky を起動（{ face, sfx, light, styleRef, dryRun }）。空の天球の穴だけ描く
 //   POST /api/paint/plate           paint/paint.mjs fill --plate を起動（{ view, src, dryRun }）。手前の物を消した背景の絵（背後の層の色）を描く
+//   POST /api/sharp/plate           sharp/psf_sharp.py --plate を起動（{ view, src }）。背景の絵を SHARP に通して、奥行き用の粒を作る
 //   POST /api/view/forget           足した視点の絵を消す（{ view }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
@@ -72,6 +73,7 @@ function state() {
     painted_lit: stat(path.join(DIRS['paint-out'], `${v.name}_painted_lit.png`)),
     overlay_lit: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_lit.png`)),
     sharp: stat(path.join(DIRS['paint-out'], `${v.name}_sharp.ply`)), // SHARP の粒（sharp/psf_sharp.py）
+    plate_sharp: PLATE_SRC.filter((k) => fs.existsSync(plateFiles(v.name, k).sharp)), // その絵を SHARP に通した粒（背後の層の位置に使う）
     plates: PLATE_SRC.filter((k) => { const f = plateFiles(v.name, k); return fs.existsSync(f.out) && fs.existsSync(f.mask); }), // AI が描いた、手前の物を消した背景の絵（色のもとごと）
   }));
   return out;
@@ -87,8 +89,11 @@ function runPaint({ views, style, dryRun, light }) {
 }
 function startJob(args, dryRun) {
   if (process.env.PAINT_CODEX) args.push('--codex', process.env.PAINT_CODEX); // 確かめ用：にせの codex に差し替える
+  startProcess(process.execPath, args, path.join(ROOT, 'paint'), dryRun);
+}
+function startProcess(command, args, cwd, dryRun = false) {
   Object.assign(job, { running: true, log: '', code: null, startedAt: Date.now(), dryRun: !!dryRun });
-  const child = spawn(process.execPath, args, { cwd: path.join(ROOT, 'paint'), windowsHide: true });
+  const child = spawn(command, args, { cwd, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' } });
   job.child = child;
   const add = (c) => { job.log = (job.log + c.toString('utf8')).slice(-20000); };
   child.stdout.on('data', add); child.stderr.on('data', add);
@@ -131,13 +136,20 @@ function runSky({ face, sfx, light, styleRef, style, dryRun }) {
 const PLATE_SRC = ['painted', 'painted_flat', 'painted_lit', 'previz', 'flat', 'lit']; // 色のもと（studio/splat.js の SOURCES の名前）
 function plateFiles(view, src) {
   const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}_${src}.png`);
-  return { image: out('platein'), mask: out('platemask'), guide: out('plateguide'), out: out('plate') };
+  return { image: out('platein'), mask: out('platemask'), guide: out('plateguide'), out: out('plate'), sharp: path.join(DIRS['paint-out'], `${view}_plate_${src}_sharp.ply`) };
 }
 function runPlate({ view, src, dryRun }) {
   const f = plateFiles(view, src);
   const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--plate', '--image', f.image, '--mask', f.mask, '--guide', f.guide, '--out', f.out, '--grow', '0'];
   if (dryRun) args.push('--dry-run');
   startJob(args, dryRun);
+}
+// 背景の絵を SHARP に通す（sharp/setup.bat で作った Python を使う）。確かめ用に PSF_SHARP_PYTHON で差し替えられる
+const sharpPython = () => process.env.PSF_SHARP_PYTHON || path.join(ROOT, 'sharp', '.venv', WIN ? 'Scripts' : 'bin', WIN ? 'python.exe' : 'python');
+function runSharpPlate({ view, src }) {
+  const args = [path.join(ROOT, 'sharp', 'psf_sharp.py'), '--view', view, '--plate', src];
+  if (SCENE) args.push('--scene', SCENE);
+  startProcess(sharpPython(), args, path.join(ROOT, 'sharp'));
 }
 function stopPaint() {
   const child = job.child; if (!child) return;
@@ -210,10 +222,19 @@ export async function handle(req, res, next) {
       runPlate(body);
       return json(res, 200, { ok: true });
     }
+    if (p === '/api/sharp/plate' && req.method === 'POST') {
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[A-Za-z0-9]+$/.test(body.view || '') || !PLATE_SRC.includes(body.src)) return json(res, 400, { error: '視点か色のもとの名前が使えません' });
+      if (!fs.existsSync(plateFiles(body.view, body.src).out)) return json(res, 400, { error: 'AI が描いた背景の絵がまだありません' });
+      if (!fs.existsSync(sharpPython())) return json(res, 400, { error: 'SHARP の用意がまだです。sharp フォルダの setup.bat を先に実行してください。' });
+      runSharpPlate(body);
+      return json(res, 200, { ok: true });
+    }
     if (p.startsWith('/api/paint-out/') && req.method === 'DELETE') { // 埋めた絵を消す（写し直す前）
       const name = p.slice('/api/paint-out/'.length);
       if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
-      if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
+      if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); fs.rmSync(path.join(DIRS['paint-out'], name.replace('.png', '_sharp.ply')), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
       if (/^sky_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
       if (!/^[A-Za-z0-9]+_painted(_flat|_lit)?\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
       if (!fs.existsSync(path.join(DIRS['paint-out'], name.replace('_painted', '_reproj')))) return json(res, 400, { error: '足した視点の絵だけ消せます' }); // もとの視点の絵は消さない
