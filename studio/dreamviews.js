@@ -19,6 +19,8 @@ function typeTable(cams) {
 export const fillStyle = (cams) => (cams.source && typeof cams.source.style === 'string' && cams.source.style.trim()) || 'a painting; match the technique, brushwork, palette and light of the painted parts around the holes exactly';
 /** 穴の中に描く物についての指示。奥行きを後から推定するので、絵の外へ続く地面・水・木・空を描いてもらい、人や動物は増やさない。 */
 export const FILL_HINT = 'The magenta areas are parts of the same place that lie outside or behind what the original painting shows. Continue the ground, water, trees, far bank and sky that are already there, with the same horizon line and the same scale. Do not add any new people, animals, boats or buildings: only complete a figure or object that is cut off at the edge of a magenta area.';
+// 別視点のモデルの絵を下絵にして Codex に頼むとき：何を描くかは下絵が決めるので、「人を増やさない」とは言わず、つながりだけを頼む
+export const LAYOUT_HINT = 'The magenta areas are parts of the same place that lie outside or behind what the original painting shows. Keep the same horizon line, the same scale and the same eye height as the painted parts, so that ground, water and far bank continue without a seam.';
 
 /** もとの視点（足した視点ではない、最初の視点）。 */
 export const baseView = (D) => D.views.find((v) => !v.added) || D.views[0];

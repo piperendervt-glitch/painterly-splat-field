@@ -388,11 +388,13 @@ let watching = false, watchName = '';
 // 絵 1 枚の場面で Codex に頼むときの追加：形の見本（プレビズ）は無し、画風は場面の物、人を増やさない指示
 const fillExtra = () => (painting ? { noPreviz: true, style: dream.fillStyle(D.cams), hint: dream.FILL_HINT } : {});
 // 描き手：nvs = 別視点の絵を生成するモデル（もとの絵とカメラから、その視点の絵を作る。利用枠なし）、
-//         model = 手元の PC の画像生成モデル（穴をまわりから描く。利用枠なし）、codex = ChatGPT（Codex、利用枠を使う）
-const ENGINES = { nvs: { name: '別視点の生成モデル' }, model: { name: 'PC の生成モデル' }, codex: { name: 'Codex' } };
+//         model = 手元の PC の画像生成モデル（穴をまわりから描く。利用枠なし）、codex = ChatGPT（Codex、利用枠を使う）、
+//         nvscodex = 別視点の生成モデルの絵を下絵にして、Codex に、もとの絵の画風で描いてもらう（視点は下絵、画風は Codex。利用枠を使う）
+const ENGINES = { nvs: { name: '別視点の生成モデル', uses: ['nvs'] }, nvscodex: { name: '別視点の生成モデルと Codex', uses: ['nvs', 'codex'] }, model: { name: 'PC の生成モデル', uses: ['model'] }, codex: { name: 'Codex', uses: ['codex'] } };
 const engineBody = (engine) => {
   const m = $('modelName').value.trim(), nm = $('nvsName').value.trim();
   if (engine === 'model') return { engine: 'local', ...(m ? { model: m } : {}) };
+  if (engine === 'nvscodex') return { engine: 'nvs', repaint: true, ...(nm ? { model: nm } : {}), ...(painting ? { hint: dream.LAYOUT_HINT } : {}) };
   if (engine === 'nvs') return { engine: 'nvs', ...(nm ? { model: nm } : {}), ...($('refineOn').checked ? { refine: Number($('refineStrength').value), ...(m ? { refineModel: m } : {}) } : {}) };
   return {};
 };
@@ -408,7 +410,7 @@ async function poll() {
     const st = await api('/api/paint/status');
     say(st.running ? `${ENGINES[watchEngine].name}で描いています ${st.seconds} 秒` : st.code === 0 ? '終わりました' : `止まりました（${st.code}）`);
     $('log').textContent = st.log; $('stop').disabled = !st.running;
-    $('fillCodex').disabled = $('fillModel').disabled = $('fillNvs').disabled = $('fillDry').disabled = $('fillLocal').disabled = st.running;
+    $('fillCodex').disabled = $('fillModel').disabled = $('fillNvs').disabled = $('fillNvsCodex').disabled = $('fillDry').disabled = $('fillLocal').disabled = st.running;
     if (!st.running) {
       watching = false;
       if (st.code === 0 && !st.dryRun) {
@@ -481,7 +483,8 @@ async function autoRun() {
       if (auto.stop) break;
       if (holes === 0) autoLog('  穴が無いので、描き足さずに次へ進みます。');
       else if (engine) {
-        auto[engine]++; showAuto();
+        for (const k of ENGINES[engine].uses) auto[k]++;
+        showAuto();
         const st = await codexFillWait(name, engine);
         if (auto.stop) break;
         if (st.code !== 0) throw new Error(`${ENGINES[engine].name}が止まりました（終了コード ${st.code}）。下の「進み具合」に出力があります`);
@@ -537,6 +540,7 @@ $('fillLocal').addEventListener('click', fillLocal);
 $('fillCodex').addEventListener('click', () => fillCodex(false));
 $('fillModel').addEventListener('click', () => fillCodex(false, 'model'));
 $('fillNvs').addEventListener('click', () => fillCodex(false, 'nvs'));
+$('fillNvsCodex').addEventListener('click', () => fillCodex(false, 'nvscodex'));
 $('refineStrength').addEventListener('input', () => { $('oRefine').textContent = Number($('refineStrength').value).toFixed(2); });
 $('fillDry').addEventListener('click', () => fillCodex(true));
 $('stop').addEventListener('click', () => api('/api/paint/stop', {}).catch(() => {}));

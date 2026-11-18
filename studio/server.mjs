@@ -135,7 +135,7 @@ function fillFiles(view, light) {
   const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}${sfx}.png`), pre = (name) => path.join(DIRS['previz-export'], `${view}_${name}.png`);
   return { image: out('reproj'), mask: out('holes'), out: out('painted'), overlay: out('overlay'), previz: pre(ref), depth: pre('depth_view') };
 }
-function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, refine, refineModel }) {
+function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, refine, refineModel, repaint }) {
   const f = fillFiles(view, light);
   const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', f.image, '--mask', f.mask, '--out', f.out];
   if (!noPreviz) args.push('--previz', f.previz, '--depth', f.depth, '--overlay', f.overlay); // 絵 1 枚から作った場面には、穴の中の形の見本が無い
@@ -151,7 +151,8 @@ function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, re
     if (process.env.PSF_NVS) args.push('--nvs', process.env.PSF_NVS); else args.push('--nvs');
     args.push('--export-dir', DIRS['previz-export'], '--view', view);
     if (typeof model === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(model)) args.push('--nvs-model', model);
-    if (refine !== undefined && refine !== null && refine !== false) { // 仕上げ：穴の中を PC の画像生成モデルで描き直す（強さ 0〜1）
+    if (repaint) args.push('--repaint'); // 生成した絵を下絵にして、Codex に、もとの絵の画風で穴を描いてもらう（利用枠を使う）
+    else if (refine !== undefined && refine !== null && refine !== false) { // 仕上げ：穴の中を PC の画像生成モデルで描き直す（強さ 0〜1）
       args.push('--refine', String(Math.min(1, Math.max(0.05, Number(refine) || 0.45))));
       if (process.env.PSF_INPAINT) args.push('--local', process.env.PSF_INPAINT);
       if (typeof refineModel === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(refineModel)) args.push('--local-model', refineModel);
@@ -325,7 +326,7 @@ export async function handle(req, res, next) {
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
       if (!/^[A-Za-z0-9]+$/.test(body.view || '')) return json(res, 400, { error: '視点の名前が使えません' });
       for (const kind of ['painted', 'overlay', 'reproj', 'holes']) for (const sfx of ['', '_flat', '_lit']) fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_${kind}${sfx}.png`), { force: true });
-      for (const kind of ['new', 'disp']) fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_${kind}.png`), { force: true });
+      for (const kind of ['new', 'disp', 'layout']) fs.rmSync(path.join(DIRS['paint-out'], `${body.view}_${kind}.png`), { force: true });
       if (addedViews().some((v) => v.name === body.view)) { // 絵 1 枚の場面で足した視点：画面が書いた奥行き・札・下絵も消す（もとの視点の物は消さない）
         for (const kind of ['color', 'depth', 'depth_view', 'labels', 'objects']) fs.rmSync(path.join(DIRS['previz-export'], `${body.view}_${kind}.png`), { force: true });
       }

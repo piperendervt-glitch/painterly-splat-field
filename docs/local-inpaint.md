@@ -46,6 +46,23 @@
 
 道具は、できた絵を穴にはめた後、絵全体の奥行きを Depth Anything V2 Small で推定し、すでに位置の分かっている面に合わせて、穴の奥行きを決める（Codex のときと同じ）。
 
+## 別視点のモデルの絵を下絵にして、ChatGPT（Codex）で描く
+
+別視点のモデルは「その視点から何がどこに見えるか」は出せるが、絵が粗く、点描の画風も崩れやすい。ChatGPT の画像生成は画風に強いが、視点を言葉で指定することはできない。そこで両方を組にする：別視点のモデルの絵で視点と構図を決め、ChatGPT には、その構図のまま、もとの絵の画風で描いてもらう。プレビズの絵を下絵にして絵画化するのと同じ考え方で、下絵が 3D の絵から別視点のモデルの絵に替わっただけ。
+
+- 画面：「2. 穴を埋める」の「別視点のモデルの絵を下絵に、Codex で描く」。連続モードでは「別視点の生成モデル＋Codex」。1 回につき、別視点のモデルを 1 回と Codex を 1 回（絵 1 枚、ChatGPT の利用枠）使う
+- Codex に見せる絵は 3 枚：`holes.png`（今の絵。穴はマゼンタ）、`layout.png`（同じ視点で、穴に別視点のモデルの絵をはめた物。穴の中の物の位置と形はこれに従う）、`style.png`（もとの絵。画風・色・光の見本）
+- できた絵は、穴の所だけを使う（穴の外はもとの絵のまま）。下絵は `<視点>_layout.png` に残るので、Codex だけをやり直せる
+
+```
+node paint/paint.mjs fill --image <視点>_reproj.png --mask <視点>_holes.png --out <視点>_painted.png \
+     --nvs --export-dir <previz-export> --view <視点> --repaint          # 別視点のモデル → Codex
+node paint/paint.mjs fill ... --layout <視点>_layout.png --export-dir <previz-export>   # 下絵はそのまま、Codex だけ
+node paint/paint.mjs repaint --image <別視点の絵> --style-ref <もとの絵> --out <出す絵>   # 穴だけでなく 1 枚まるごと描き直す
+```
+
+`--dry-run` を付けると、Codex は呼ばずに、送る文と条件の絵だけを作業フォルダに作る（別視点のモデルは動く）。
+
 ## PC の画像生成モデルとの約束（`paint/localinpaint.mjs`）
 
 ```
@@ -62,5 +79,5 @@
 モデルも GPU も無しで、呼び出しの形だけを確かめる物。穴を鏡写しで埋めるので、**絵の出来を見るための物ではない**。
 
 ```
-PSF_SCENE=jatte PSF_NVS=paint/test/fake-nvs.sh PSF_INPAINT=paint/test/fake-inpaint.sh npx vite
+PSF_SCENE=jatte PSF_NVS=$PWD/paint/test/fake-nvs.sh PSF_INPAINT=$PWD/paint/test/fake-inpaint.sh PAINT_CODEX=$PWD/paint/test/fake-codex.sh npx vite
 ```

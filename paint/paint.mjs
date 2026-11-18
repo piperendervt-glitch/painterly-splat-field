@@ -29,6 +29,13 @@
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
 // fill だけ：--local [コマンド] で、Codex の代わりに手元の PC の画像生成モデルで描く（--local-model <名前>、--seed <数>。既定の待ち時間は 3600 秒）
 //            --nvs [コマンド] --export-dir <previz-export> --view <視点> で、別視点の絵を生成するモデルの絵を穴に使う（--nvs-model <名前>、--refine [強さ] で仕上げ）
+//            --nvs に --repaint を足すと、別視点のモデルの絵を「下絵」にして、Codex（ChatGPT）に穴を描いてもらう（視点は下絵のまま、画風はもとの絵）。
+//              下絵は <出すファイルの所>/<視点>_layout.png に残る。--layout <絵> で、すでにある下絵（穴を埋めた、同じ視点の絵）を渡すと、モデルを呼ばずに Codex だけ動かす。
+//              --style-ref <絵> は画風の見本（既定は、もとの視点の絵）。
+//
+//   node paint.mjs repaint --image <別視点の絵> --style-ref <もとの絵> --out <出すファイル> [--style "..."] [--hint "..."] [--overlay <確かめ用の絵>] [--dry-run]
+//     別視点のモデルが作った絵を、構図と視点をそのままに、もとの絵の画風で 1 枚まるごと描き直してもらう（穴だけでなく全体）。
+//
 // --dry-run は Codex を呼ばず、作業フォルダに送る文（prompt.txt）と条件の絵だけを作る。利用枠は減らない。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -103,6 +110,36 @@ function fillInstructions({ style, hasPreviz, lightLines = [], hint = '' }) {
     'No magenta may remain in the result.',
     ...lightLines,
     hasPreviz ? 'previz.png is a plain 3D render of the same scene from the same camera, and depth.png is its depth map (white = near, black = far / sky). Inside the magenta areas, follow previz.png exactly for the position, size and silhouette of every object, and keep sky where depth.png is black. Use previz.png only for layout, not for colour or style.' : '',
+    hint,
+  ].filter(Boolean).join('\n');
+}
+
+// 別視点のモデルの絵を下絵にして、穴を描いてもらうときの文。layout.png = 穴に下絵をはめた絵、style.png = もとの絵
+function layoutFillInstructions({ style, hasStyleRef, hint = '' }) {
+  return [
+    `references/holes.png is ${style}. The bright magenta (#FF00FF) areas are holes with no paint yet.`,
+    'references/layout.png is the same picture from exactly the same camera, with the holes filled in by an automatic view-synthesis model. It shows WHAT lies in each hole and WHERE. Inside the magenta areas, follow layout.png for the position, size and silhouette of everything: the horizon and shoreline, ground and water, tree trunks and foliage, figures, objects and cast shadows.',
+    'layout.png is low in resolution and blurry inside the holes, and its colours and texture there may be smeared, washed out or photographic. Do NOT copy its texture or blur. Paint the same content as a real part of the painting: the same brush or dot texture, dot size, palette, light and level of detail as the painted parts around the holes.',
+    'Where layout.png shows only a shapeless smear or an obvious artefact inside a hole, paint the most natural continuation of the surrounding scene instead.',
+    'Do not add people, animals, boats, buildings or other objects that are not in layout.png, and do not leave out or move the ones that are.',
+    hasStyleRef ? 'style.png is the original painting that this view belongs to, seen from its original camera. Match its painting technique, palette, light and atmosphere exactly, so that this view looks like another part of the same canvas. Use style.png for style only (and to recognise things that reappear here); the composition comes from holes.png and layout.png.' : '',
+    'Paint ONLY inside the magenta areas. Everything outside the magenta areas must stay exactly as it is: same camera, same composition, same position of everything. Do not crop, zoom, shift or mirror the image. No magenta may remain in the result.',
+    hint,
+  ].filter(Boolean).join('\n');
+}
+
+// 別視点のモデルの絵を、1 枚まるごと、もとの絵の画風で描き直してもらうときの文。view.png = 別視点の絵、style.png = もとの絵
+function repaintInstructions({ style, hasStyleRef, hint = '' }) {
+  return [
+    `Repaint the picture in references/view.png as ${style}.`,
+    hasStyleRef
+      ? 'view.png shows the scene of the painting style.png from a different camera position. It was made by an automatic view-synthesis model, so it is low in resolution and blurry, and parts of it are smeared or look photographic.'
+      : 'view.png was made by an automatic view-synthesis model, so it is low in resolution and blurry, and parts of it are smeared or look photographic.',
+    'Keep the camera and the composition of view.png EXACTLY: the same viewpoint, the same horizon height, the same perspective, and the same position, size and silhouette of everything in it (ground, water, shoreline, trees, figures, objects, cast shadows).',
+    'Do not crop, zoom, pan, mirror or add a border. The painting must line up with view.png when overlaid pixel for pixel.',
+    'Do not add people, animals, boats, buildings or other objects that are not in view.png, and do not leave out or move the ones that are. Where view.png shows only a shapeless smear, paint the most natural continuation of the scene around it.',
+    hasStyleRef ? 'style.png is the original painting. Match its painting technique, brush or dot texture and dot size, palette, light and atmosphere exactly, so that the result looks like the same canvas seen from the new position. Use style.png for style only, not for composition: do NOT return to its camera position.' : '',
+    'Do not copy the blur or the texture of view.png: every part of the result must be crisp painted texture.',
     hint,
   ].filter(Boolean).join('\n');
 }
@@ -221,10 +258,14 @@ async function runFill(o) {
   // --refine [強さ]：--nvs の絵は粗いので、穴の中を PC の画像生成モデルで描き直して、絵の細かさを戻す（強さ 0〜1、既定 0.45）
   const cmdOf = (v, fallback) => (v ? (typeof v === 'string' && v.trim() ? v.trim() : fallback()) : '');
   const nvs = cmdOf(o.nvs, defaultNvsCommand), local = cmdOf(o.local, defaultCommand), refine = nvs && o.refine !== undefined;
+  // --repaint / --layout：別視点のモデルの絵（下絵）で視点と構図を決め、Codex に、もとの絵の画風で穴を描いてもらう
+  const givenLayout = !sky && !plate && typeof o.layout === 'string' ? o.layout : null, repaint = !sky && !plate && ((nvs && !!o.repaint) || !!givenLayout);
+  if (repaint && refine) throw new Error('--repaint（Codex で描く）と --refine（PC のモデルで仕上げる）は、どちらか片方にしてください');
   const hint = typeof o.hint === 'string' ? o.hint : '', seed = o.seed !== undefined && o.seed !== true && Number.isFinite(Number(o.seed)) ? Number(o.seed) : undefined;
-  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
+  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${givenLayout ? `下絵（${path.basename(givenLayout)}）をもとに、${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}` : o['dry-run'] && !(nvs && repaint) ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
   let file;
-  if ((nvs || local) && !o['dry-run']) {
+  if (givenLayout) file = null; // 下絵はもうある。下で Codex に渡す
+  else if ((nvs || local) && (!o['dry-run'] || (nvs && repaint))) {
     fs.mkdirSync(path.join(workDir, 'references'), { recursive: true });
     fs.copyFileSync(holesFile, path.join(workDir, 'references', 'holes.png'));
     const base = { style, hint, width: original.width, height: original.height, ...(seed !== undefined ? { seed } : {}) };
@@ -243,6 +284,30 @@ async function runFill(o) {
       }
     } else file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel }, timeoutSeconds: Number(o.timeout) || 3600 });
   } else file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
+  if (repaint) {
+    // 下絵 = 穴に別視点のモデルの絵をはめた絵（穴の外は今の絵のまま）。視点ごとに残しておく（Codex だけやり直せるように）
+    const layout = givenLayout ? resize(readPng(givenLayout), original.width, original.height) : composite(original, resize(readPng(file), original.width, original.height), mask);
+    const layoutFile = path.join(workDir, 'layout-input.png');
+    writePng(layoutFile, layout);
+    if (!givenLayout && typeof o.view === 'string' && /^[A-Za-z0-9_-]+$/.test(o.view)) writePng(path.join(path.dirname(path.resolve(o.out)), `${o.view}_layout.png`), layout);
+    let styleRef = typeof o['style-ref'] === 'string' ? o['style-ref'] : null;
+    if (!styleRef && typeof o['export-dir'] === 'string') { // 既定の見本は、もとの視点の絵
+      const cams = JSON.parse(fs.readFileSync(path.join(o['export-dir'], 'cameras.json'), 'utf8')), dir = path.dirname(path.resolve(o.out));
+      const src = cams.views.find((v) => fs.existsSync(path.join(dir, `${v.name}_painted.png`)));
+      if (src) styleRef = path.join(dir, `${src.name}_painted.png`);
+    }
+    const refs = [
+      { name: 'holes.png', file: holesFile, note: 'painting with magenta holes to fill' },
+      { name: 'layout.png', file: layoutFile, note: 'the same picture from the same camera with the holes filled by a view-synthesis model (layout to follow inside the holes; not its texture)' },
+      ...(styleRef ? [{ name: 'style.png', file: styleRef, note: 'the original painting (style, palette and atmosphere to match)' }] : []),
+    ];
+    const text = buildPrompt({ width: original.width, height: original.height, references: refs, instructions: layoutFillInstructions({ style, hasStyleRef: !!styleRef, hint }) });
+    const codexDir = path.join(workDir, 'codex'); // 別視点のモデルの作業の物と混ざらないように、Codex は別のフォルダで動かす
+    fs.mkdirSync(codexDir, { recursive: true });
+    console.log(`  ${o['dry-run'] ? '下絵ができました。Codex に送る文と条件の絵を用意します（Codex は呼びません）' : '下絵ができました。Codex で、もとの絵の画風で描いています（30 秒〜数分）'}`);
+    file = await generate({ workDir: codexDir, prompt: text, references: refs, command: o.codex || 'codex', timeoutSeconds: Number(o['codex-timeout']) || 600, dryRun: !!o['dry-run'] });
+    if (!file) { console.log(`  → ${codexDir}`); return; }
+  }
   if (!file) { console.log(`  → ${workDir}`); return; }
   const generated = resize(readPng(file), original.width, original.height);
   const result = composite(original, generated, mask);
@@ -250,6 +315,29 @@ async function runFill(o) {
   if (hasPreviz && typeof o.overlay === 'string') writePng(o.overlay, overlay(result, resize(readPng(o.previz), original.width, original.height)));
   const drift = outsideChange(original, generated, mask);
   console.log(`  → ${o.out}（穴の外の変わり具合 ${drift.toFixed(1)}/255。${drift > 25 ? '大きい：絵全体が描き直されたかも。継ぎ目を見てください' : '小さい：位置は合っていそう'}）`);
+}
+
+// 別視点のモデルが作った絵を、構図をそのままに、もとの絵の画風で 1 枚まるごと描き直してもらう
+async function runRepaint(o) {
+  if (!o.image || !o.out) throw new Error('使い方：node paint.mjs repaint --image <別視点の絵> --style-ref <もとの絵> --out <出すファイル>');
+  const view = readPng(o.image), style = typeof o.style === 'string' ? o.style : DEFAULT_STYLE;
+  const styleRef = typeof o['style-ref'] === 'string' ? o['style-ref'] : null;
+  const workDir = path.join(path.dirname(path.resolve(o.out)), 'work', `repaint-${stamp()}`);
+  fs.mkdirSync(workDir, { recursive: true });
+  const references = [
+    { name: 'view.png', file: o.image, note: 'picture from the target camera made by a view-synthesis model (composition to keep exactly)' },
+    ...(styleRef ? [{ name: 'style.png', file: styleRef, note: 'the original painting (style, palette and atmosphere to match)' }] : []),
+  ];
+  const prompt = buildPrompt({ width: view.width, height: view.height, references, instructions: repaintInstructions({ style, hasStyleRef: !!styleRef, hint: typeof o.hint === 'string' ? o.hint : '' }) });
+  console.log(`別視点の絵（${view.width}x${view.height}）を描き直します：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています（30 秒〜数分）'}`);
+  const started = Date.now();
+  const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
+  if (!file) { console.log(`  → ${workDir}`); return; }
+  const raw = readPng(file), painted = resize(raw, view.width, view.height);
+  writePng(o.out, painted);
+  fs.copyFileSync(file, path.join(workDir, `raw${path.extname(file)}`));
+  if (typeof o.overlay === 'string') writePng(o.overlay, overlay(painted, view));
+  console.log(`  → ${o.out}（生成 ${raw.width}x${raw.height}${raw.width !== view.width || raw.height !== view.height ? ` を ${view.width}x${view.height} に合わせた` : ''}、${Math.round((Date.now() - started) / 1000)} 秒）`);
 }
 
 // ---- 形の配置（箱と円柱の一覧）を書いてもらう ----
@@ -339,6 +427,7 @@ try {
   if (o._ === 'views') await runViews(o);
   else if (o._ === 'fill') await runFill(o);
   else if (o._ === 'layout') await runLayout(o);
+  else if (o._ === 'repaint') await runRepaint(o);
   else { console.log(fs.readFileSync(new URL(import.meta.url)).toString().split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n')); process.exit(2); }
 } catch (e) {
   console.error(`止まりました：${e.message}`);
