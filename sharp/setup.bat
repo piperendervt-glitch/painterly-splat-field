@@ -14,8 +14,8 @@ set MODEL_URL=https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt
 if exist ".venv\Scripts\python.exe" goto :venv_ok
 set PY=
 rem Prefer the py launcher with a supported version (newest first), then plain python.
-for %%V in (3.13 3.12 3.11 3.10) do if not defined PY py -%%V -c "pass" >nul 2>nul && set PY=py -%%V
-if not defined PY where python >nul 2>nul && set PY=python
+for %%V in (3.13 3.12 3.11 3.10) do if not defined PY (py -%%V -c "pass" >nul 2>nul && set "PY=py -%%V")
+if not defined PY (where python >nul 2>nul && set "PY=python")
 if not defined PY goto :nopython
 echo [1/4] Creating the Python environment...
 %PY% -m venv .venv
