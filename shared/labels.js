@@ -16,6 +16,9 @@ export const TYPES = [
   { id: 5, key: 'leaves', name: '木の葉', color: '#1f8a4c', sway: 1, light: 'sun',  snow: true,  water: false, solid: 'none', tracks: false },
   { id: 6, key: 'water',  name: '水',     color: '#2a6fdb', sway: 0, light: 'sun',  snow: false, water: true, solid: 'wall', tracks: false },
   { id: 7, key: 'lamp',   name: '灯り',   color: '#ffd23f', sway: 0, light: 'self', snow: false, water: false, solid: 'walk', tracks: false },
+  // 実在の絵から作った場面（painting/build.mjs）で使う種類
+  { id: 8, key: 'figure', name: '人・動物', color: '#e0607a', sway: 0, light: 'sun',  snow: false, water: false, solid: 'wall', tracks: false },
+  { id: 9, key: 'far',    name: '遠景',   color: '#8f9bb8', sway: 0, light: 'sun',  snow: false, water: false, solid: 'none', tracks: false },
 ];
 
 export const SKY_TYPE = 0;

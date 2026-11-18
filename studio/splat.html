@@ -51,6 +51,21 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
   </div>
 
   <div class="group">
+    <div class="label">粒の置き方</div>
+    <div class="seg" id="placement">
+      <button type="button" data-v="depth" aria-pressed="true">奥行きの絵から</button>
+      <button type="button" data-v="sharp" aria-pressed="false">SHARP</button>
+      <button type="button" data-v="both" aria-pressed="false">両方を重ねる</button>
+    </div>
+    <p class="note" id="sharpNone">SHARP の粒（<code>&lt;視点&gt;_sharp.ply</code>）がまだありません。作り方は <code>sharp/README.md</code>。</p>
+    <div id="sharpBox" hidden>
+      <label class="check" for="sharpFit"><input type="checkbox" id="sharpFit" checked><span>SHARP の大きさを奥行きの絵に合わせる（カメラを中心に伸び縮みさせるので、元の視点からの見た目は変わらない）</span></label>
+      <p class="note" id="sharpInfo" style="white-space: pre-line"></p>
+      <p class="note">「奥行きの絵から」は絵の 1 画素を 1 粒として奥行きの絵の上に置きます（手前の物の後ろは空っぽ）。SHARP は絵 1 枚から推定した 3D ガウシアンで、手前の物の後ろにも 1 層描き足します。色は SHARP が出した色、札（種類・物体）は粒をその視点へ映した画素から取ります。「視点別」の表示で、奥行きの絵からの粒が橙、SHARP の粒が水色になります。SHARP の粒は細長い形を持ちますが、ここでは丸い粒として描きます（大きい 2 軸の平均の大きさ）。</p>
+    </div>
+  </div>
+
+  <div class="group">
     <div class="label">動かし方</div>
     <div class="seg" id="nav">
       <button type="button" data-v="orbit" aria-pressed="true">回して見る</button>
