@@ -45,10 +45,37 @@ export function visibilityAt(map, x, y, z, bias) {
   return (lit(x0, y0) * (1 - tx) + lit(x0 + 1, y0) * tx) * (1 - ty) + (lit(x0, y0 + 1) * (1 - tx) + lit(x0 + 1, y0 + 1) * tx) * ty;
 }
 
-// 時間帯の見本。太陽の向き・色・強さと、空の光の色・強さ。
-export const PRESETS = {
-  morning: { name: '朝', azimuth: 100, elevation: 14, sunColor: '#ffd9a8', sun: 0.9, skyColor: '#b9cdf2', sky: 0.5 },
-  noon:    { name: '昼', azimuth: 200, elevation: 68, sunColor: '#fff7e6', sun: 1.1, skyColor: '#cfe2ff', sky: 0.55 },
-  evening: { name: '夕', azimuth: 285, elevation: 9,  sunColor: '#ff9a4a', sun: 0.95, skyColor: '#9a8fc7', sky: 0.42 },
-  night:   { name: '夜', azimuth: 320, elevation: 40, sunColor: '#8fb0ff', sun: 0.12, skyColor: '#2a3a7a', sky: 0.3 },
-};
+// ---- 1日の光 ----
+// 時刻（0〜24）から、照らす光の向き・色・強さと、空の光の色・強さを返す。
+// 太陽は 6 時に +X（方位 90°）から昇り、12 時に +Z の空（方位 0°、カメラAの背中側）でいちばん高く、18 時に -X（方位 270°）へ沈む。
+// 夜は同じ道を月が通る（弱い青い光）。日の出・日の入りの瞬間は強さが 0 になるので、太陽と月の入れ替わりは見えない。
+export const SUN_PEAK = 62, MOON_PEAK = 50; // いちばん高いときの高さ（度）
+const DAY_KEYS = [
+  // 時刻, 照らす光の色, 強さ, 空の光の色, 強さ
+  [0, '#8fb0ff', 0.12, '#2a3a7a', 0.30],
+  [4.5, '#8fb0ff', 0.12, '#2a3a7a', 0.30],
+  [6, '#ff8a4a', 0, '#8f86b8', 0.36],
+  [6.7, '#ffb070', 0.7, '#c9a9b8', 0.44],
+  [8, '#ffe0b8', 0.95, '#b9cdf2', 0.50],
+  [12, '#fff7e6', 1.1, '#cfe2ff', 0.55],
+  [16, '#ffeccc', 1.0, '#c5d5f5', 0.52],
+  [17.3, '#ff9a4a', 0.8, '#b89ac0', 0.46],
+  [18, '#ff6a2a', 0, '#7a6fb0', 0.40],
+  [19.5, '#8fb0ff', 0.12, '#3a4488', 0.32],
+  [24, '#8fb0ff', 0.12, '#2a3a7a', 0.30],
+];
+const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+const rgbHex = (rgb) => '#' + rgb.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+export function dayLight(hour) {
+  const h = ((hour % 24) + 24) % 24;
+  let k = 0; while (k < DAY_KEYS.length - 2 && h >= DAY_KEYS[k + 1][0]) k++;
+  const a = DAY_KEYS[k], b = DAY_KEYS[k + 1], t = (h - a[0]) / (b[0] - a[0]);
+  const lerp = (x, y) => x + (y - x) * t, mixHex = (x, y) => rgbHex(hexRgb(x).map((v, i) => lerp(v, hexRgb(y)[i])));
+  const day = h >= 6 && h < 18, u = day ? (h - 6) / 12 : ((h + 6) % 24) / 12; // 昇ってから沈むまでを 0〜1
+  return {
+    azimuth: ((90 - 180 * u) % 360 + 360) % 360, elevation: (day ? SUN_PEAK : MOON_PEAK) * Math.sin(Math.PI * u),
+    sunColor: mixHex(a[1], b[1]), sun: lerp(a[2], b[2]), skyColor: mixHex(a[3], b[3]), sky: lerp(a[4], b[4]), moon: !day,
+  };
+}
+// 時間帯の見本（時刻）
+export const PRESET_HOURS = { morning: 7.5, noon: 12, evening: 17.3, night: 22 };

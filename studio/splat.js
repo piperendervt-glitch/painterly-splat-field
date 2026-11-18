@@ -6,8 +6,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, hexToRgb, objectColor } from '../shared/labels.js';
-import { FLAT_LIGHT, LIT_LIGHT, PRESETS, sunDirection } from '../shared/light.js';
+import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
+import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage'), msg = $('msg');
@@ -37,6 +38,11 @@ const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', str
 // いまの光。方位・高さは度。色は sRGB の #rrggbb。bands は明暗の段階の数（0 = なめらか）。maxGain は明るくする上限（倍）。
 const light = { azimuth: PAINT_SUN.azimuth, elevation: PAINT_SUN.elevation, sun: LIT_LIGHT.sun, sunColor: '#ffffff', sky: LIT_LIGHT.ambient, skyColor: '#ffffff', bands: 0, maxGain: 4 };
 const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1);
+
+// 動きと光（風・草よけ・足跡・光の付け替え）をシェーダーで付ける部品。足跡は作り直しても残るよう、ここで1つだけ持つ。
+const fx = createFx();
+// 時計：hour は時刻（0〜24）、playing で自動で進む、dayLength は1日にかける秒数。manual は光のつまみを手で動かした状態（時刻と無関係）。
+const clock = { hour: 12, playing: false, dayLength: 120, manual: true };
 
 let app = null, data = null, cloud = null, starting = false;
 const query = new URLSearchParams(location.search);
@@ -261,7 +267,9 @@ function relit(c, i, out) {
 
 const DISPLAY = {
   color: painted,                                                                                     // 絵のままの色
-  relit,                                                                                              // 光を変えた後
+  relit: painted,                                                                                     // 光を変えた後（色はシェーダーが掛ける）
+  relitCpu: relit,                                                                                    // 確かめ用：同じ式を CPU で計算したもの
+  sway: (c, i, out) => { const l = luma(c, i) * 0.35, k = c.sway[i] / 255; out[0] = l * (1 - k) + 0.1 * k; out[1] = l * (1 - k) + k; out[2] = l * (1 - k) + 0.75 * k; }, // 揺れる粒
   depth: (c, i, out) => gray(out, LIN[c.depthGray[i]]),                                               // 奥行き
   view: (c, i, out) => {                                                                              // 視点別
     const t = VIEW_TINTS[c.view[i] % VIEW_TINTS.length], l = 0.25 + 0.75 * luma(c, i);
@@ -278,16 +286,28 @@ const DISPLAY = {
     for (let k = 0; k < 3; k++) out[k] = LIN[Math.round(c.normal[i * 3 + k] / 127 * 127.5 + 127.5)];
   },
   sun0: (c, i, out) => (c.object[i] ? gray(out, 0.03 + 0.97 * sunAmount(c, i, L.dir0, c.sunVis0)) : gray(out, 0.3)),   // 描いたときの日なた
-  sunNow: (c, i, out) => (c.object[i] ? gray(out, 0.03 + 0.97 * sunAmount(c, i, L.dir, c.sunNow)) : gray(out, 0.3)),   // いまの日なた
+  sunNow: painted,                                                                                    // いまの日なた（シェーダーが灰色にする）
   labelEdge: (c, i, out) => {                                                                         // 札の境目の近く
     painted(c, i, out);
     const k = 1 - Math.min(1, c.labelEdge[i] / 6); // 境目に近いほど赤く
     out[0] = out[0] * (1 - k) + k; out[1] *= 1 - k; out[2] *= 1 - k;
   },
 };
-const NEEDS_LABELS = new Set(['relit', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge']);
+const NEEDS_LABELS = new Set(['relit', 'sway', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge']);
+const SHADER_SHOW = { relit: 1, sunNow: 2 };     // シェーダー側で色を作る表示
+const COLOR_FX = new Set(['color', 'relit']);    // 風の照りと足跡の色を掛ける表示
+const KIND_OF = new Map(TYPES.map((t) => [t.id, KIND[t.light] + (t.tracks ? 4 : 0)]));
 
-// いまの太陽の向きで、粒ごとの日なた・影を計算し直す。プレビズの形を太陽から見た奥行きの地図を作り、粒ごとに比べる。
+// いまの光を、シェーダーの値へ写す。
+function applyLight() {
+  prepareLight();
+  const u = fx.u;
+  u.sunDir.value.fromArray(L.dir); u.sunDir0.value.fromArray(L.dir0);
+  u.sunRGB.value.fromArray(L.sun); u.skyRGB.value.fromArray(L.sky); u.skyGain.value.fromArray(L.skyGain);
+  u.paintAmb.value = L.paint.ambient; u.paintSun.value = L.paint.sun; u.bands.value = L.bands; u.maxGain.value = L.maxGain;
+}
+
+// いまの太陽の向きで、影用の地図（プレビズの形を太陽から見た奥行き）を作り直してシェーダーへ渡す。粒ごとの比較は描くときにする。
 let sunBusy = false, sunDirty = false;
 async function updateSun() {
   if (sunBusy) { sunDirty = true; return; }
@@ -295,57 +315,63 @@ async function updateSun() {
   try {
     do {
       sunDirty = false;
-      const a = app, c = cloud; if (!a || !c || !data.hasLabels) break;
+      const a = app; if (!a || !data.hasLabels) break;
       const t0 = performance.now(), dir = sunDirection(light.azimuth, light.elevation);
-      const map = await renderSunMap(a.renderer, a.previz, a.labels, dir);
-      if (a !== app || c !== cloud) break; // 待っている間に作り直された
-      const { n, position: P, normal: N, lift, sunNow } = c;
-      for (let i = 0; i < n; i++) {
-        sunNow[i] = c.object[i] ? Math.round(255 * sunVisibility(map, P[i * 3], P[i * 3 + 1], P[i * 3 + 2], N[i * 3] / 127, N[i * 3 + 1] / 127, N[i * 3 + 2] / 127, lift[i])) : 255;
-      }
-      a.sunMap = map;
+      const map = await renderSunMap(a.renderer, a.previz, a.labels, dir, { size: SUN_MAP_SIZE, depth: false, packed: true });
+      if (a !== app) break; // 待っている間に作り直された
+      fx.setSunMap(map);
       $('sSun').textContent = `${Math.round(performance.now() - t0)} ms`;
-      refill();
     } while (sunDirty);
   } catch (e) { console.error(e); } finally { sunBusy = false; }
 }
+// 確かめ用：以前の CPU の計算（細かい地図で粒ごとに影を調べる）。relitCpu の表示と比べるときに使う。
+async function cpuSun() {
+  const a = app, c = cloud, map = await renderSunMap(a.renderer, a.previz, a.labels, sunDirection(light.azimuth, light.elevation), { size: SUN_MAP_SIZE });
+  const { n, position: P, normal: N, lift, sunNow } = c;
+  for (let i = 0; i < n; i++) sunNow[i] = c.object[i] ? Math.round(255 * sunVisibility(map, P[i * 3], P[i * 3 + 1], P[i * 3 + 2], N[i * 3] / 127, N[i * 3 + 1] / 127, N[i * 3 + 2] / 127, lift[i])) : 255;
+}
 
-// 描画用は vec4 を3本にまとめる（WebGPU は頂点バッファの本数に上限があるため、列ごとに分けない）。
-//   A = [位置 xyz, 粒の間隔]  B = [表示する色 rgb, 境界からの距離]  C = [空, 視点, 空き, 空き]
+// 描画用は vec4 を4本にまとめる（WebGPU は頂点バッファの本数に上限があるため、列ごとに分けない）。
+//   A = [位置 xyz, 粒の間隔]  B = [表示する色 rgb, 境界からの距離]
+//   C = [空, 視点, 揺れやすさ, 光の受け方＋足跡が付くか]  D = [面の向き xyz, 描いたときの日なた]（C・D の使い方は studio/fx.js）
 // 遠い順（視点からの距離）に並べ直すのは別の糸（studio/sortworker.js）で行い、描画は止めない。
-// ここでは、粒の元の並びのまま描画用の値を作って渡す（表示・光・粒を変えたときだけ）。
+// ここでは、粒の元の並びのまま描画用の値を作って渡す（表示・粒を変えたときだけ。光や動きは描くときに付けるので送り直さない）。
 function sendSource() {
   const a = app, c = cloud; if (!a || !c) return;
-  const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4);
+  const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4), D = new Float32Array(n * 4);
   prepareLight();
-  const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0];
+  const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0], labels = data.hasLabels;
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     P[o] = c.position[i * 3]; P[o + 1] = c.position[i * 3 + 1]; P[o + 2] = c.position[i * 3 + 2]; P[o + 3] = c.size[i];
     display(c, i, rgb);
     B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i];
     C[o] = c.sky[i]; C[o + 1] = c.view[i];
+    if (labels) {
+      C[o + 2] = c.sway[i] / 255; C[o + 3] = KIND_OF.get(c.type[i]) || 0;
+      D[o] = c.normal[i * 3] / 127; D[o + 1] = c.normal[i * 3 + 1] / 127; D[o + 2] = c.normal[i * 3 + 2] / 127; D[o + 3] = c.sunVis0[i] / 255;
+    }
   }
-  a.sorter.worker.postMessage({ type: 'source', P, B, C }, [P.buffer, B.buffer, C.buffer]);
+  a.sorter.worker.postMessage({ type: 'source', P, B, C, D }, [P.buffer, B.buffer, C.buffer, D.buffer]);
 }
 // 並べ直しの係。終わった配列を描画用の値と入れ替え、外した方を次の並べ直しの書き込み先に回す。
 function makeSorter(a, n) {
   const worker = new Worker(new URL('./sortworker.js', import.meta.url), { type: 'module' });
-  const s = { worker, busy: false, pending: null, spare: [new Float32Array(n * 4), new Float32Array(n * 4), new Float32Array(n * 4)], done: 0 };
+  const s = { worker, busy: false, pending: null, spare: [new Float32Array(n * 4), new Float32Array(n * 4), new Float32Array(n * 4), new Float32Array(n * 4)], done: 0 };
   s.sort = (eye) => { // eye = [x, y, z]
     if (s.busy || !s.spare) { s.pending = eye; return; }
-    s.busy = true; const [A, B, C] = s.spare; s.spare = null;
-    worker.postMessage({ type: 'sort', eye, A, B, C }, [A.buffer, B.buffer, C.buffer]);
+    s.busy = true; const [A, B, C, D] = s.spare; s.spare = null;
+    worker.postMessage({ type: 'sort', eye, A, B, C, D }, [A.buffer, B.buffer, C.buffer, D.buffer]);
   };
   worker.onmessage = (e) => {
     const m = e.data;
     if (!m.empty) {
-      s.spare = [a.attrA.array, a.attrB.array, a.attrC.array];
-      a.attrA.array = m.A; a.attrB.array = m.B; a.attrC.array = m.C;
-      a.attrA.needsUpdate = a.attrB.needsUpdate = a.attrC.needsUpdate = true;
+      s.spare = [a.attrA.array, a.attrB.array, a.attrC.array, a.attrD.array];
+      a.attrA.array = m.A; a.attrB.array = m.B; a.attrC.array = m.C; a.attrD.array = m.D;
+      a.attrA.needsUpdate = a.attrB.needsUpdate = a.attrC.needsUpdate = a.attrD.needsUpdate = true;
       s.done++;
       $('sSort').textContent = `${Math.round(m.ms)} ms（描画とは別の糸）`;
-    } else s.spare = [m.A, m.B, m.C];
+    } else s.spare = [m.A, m.B, m.C, m.D];
     s.busy = false;
     if (s.pending) { const p = s.pending; s.pending = null; s.sort(p); }
   };
@@ -362,7 +388,8 @@ function requestSort() { const a = app; if (!a) return; const e = orderEye(); a.
 
 // ---- 材質 ----
 function makeMaterials(a) {
-  const P = instancedBufferAttribute(a.attrA), B = instancedBufferAttribute(a.attrB), M = instancedBufferAttribute(a.attrC), C = B.xyz;
+  const P = instancedBufferAttribute(a.attrA), B = instancedBufferAttribute(a.attrB), M = instancedBufferAttribute(a.attrC), D = instancedBufferAttribute(a.attrD);
+  const moved = fx.nodes(P, B, M, D); // 風・草よけ・足跡・光の付け替えを掛けた位置と色
   const edgeOk = step(uEdge, B.w.add(0.5));                               // 境界から uEdge 画素以上はなれた粒だけ
   const skyOk = mix(float(1), uSky, M.x);                                 // 空の粒は uSky で出し入れ
   const viewOk = max(step(uView, -0.5), float(1).sub(step(0.5, abs(M.y.sub(uView))))); // 使う視点だけ
@@ -370,12 +397,12 @@ function makeMaterials(a) {
   const r = uv().sub(0.5).length();
 
   const soft = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: false });
-  soft.positionNode = P.xyz; soft.scaleNode = vec2(s, s); soft.colorNode = C;
+  soft.positionNode = moved.position; soft.scaleNode = vec2(s, s); soft.colorNode = moved.color;
   soft.opacityNode = exp(r.mul(r).mul(-18));
 
   const hard = new THREE.SpriteNodeMaterial({ transparent: false, depthWrite: true, depthTest: true, alphaTest: 0.5 });
   const sh = s.mul(0.62); // ぼかさないぶん小さめの円にする
-  hard.positionNode = P.xyz; hard.scaleNode = vec2(sh, sh); hard.colorNode = C;
+  hard.positionNode = moved.position; hard.scaleNode = vec2(sh, sh); hard.colorNode = moved.color;
   hard.opacityNode = float(1).sub(step(0.5, r));
   return { soft, hard };
 }
@@ -407,6 +434,7 @@ async function start(useGL) {
     attrA: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
     attrB: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
     attrC: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
+    attrD: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
     sortEye: new THREE.Vector3(Infinity, 0, 0), yaw: 0, pitch: 0,
   };
   a.sorter = makeSorter(a, n);
@@ -436,7 +464,10 @@ async function start(useGL) {
   if (keep && keep.feet) a.walk.place(...keep.feet); else placeAtCamera();
 
   sendSource(); requestSort();
-  applyUi();
+  fx.u.zFromSize.value = data.views[0].def.intrinsics.fy / ui.stride;
+  fx.u.zStep.value = (1 / data.cams.depth.near - 1 / data.cams.depth.far) / 65535;
+  if (!keep) fx.clearFootprints(camera.position.x, camera.position.z);
+  applyUi(); applyLight();
   await updateSun();
 
   const gpu = !!(renderer.backend && renderer.backend.isWebGPUBackend);
@@ -453,6 +484,7 @@ async function start(useGL) {
   renderer.setAnimationLoop(() => {
     const now = performance.now(), dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (ui.nav === 'walk') walkStep(dt); else controls.update();
+    tick(dt, now);
     if (ui.order === 'sort' && !a.sorter.busy && camera.position.distanceToSquared(a.sortEye) > 0.09) requestSort(); // 0.3 m 動いたら、前の並べ直しが終わっていれば次を頼む
     renderer.render(scene, camera);
     if (++frames >= 30) {
@@ -462,10 +494,44 @@ async function start(useGL) {
     }
   });
   starting = false;
-  window.__splat = { app: a, cloud, data, ui, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy,
+  window.__splat = { app: a, cloud, data, ui, light, setLight, backend: gpu ? 'webgpu' : 'webgl2', jump, sunBusy: () => sunBusy, fx, clock, setHour, cpuSun, keys,
+    setMode,
     // 確かめ用：表示 mode での全粒の色（リニア）を返す
     colorsFor(mode) { prepareLight(); const out = new Float32Array(cloud.n * 3), rgb = [0, 0, 0]; for (let i = 0; i < cloud.n; i++) { DISPLAY[mode](cloud, i, rgb); out.set(rgb, i * 3); } return out; } };
   window.__ready = true;
+}
+
+// 毎フレーム：風の時間、プレイヤーの位置（草よけ）、足跡、時計
+const STRIDE = 0.65, FOOT_SIDE = 0.11; // 歩幅と、足の左右の開き（m）
+const lastStep = { x: NaN, z: NaN, side: 1 };
+let lastSunAt = 0, lastClockShown = 0;
+function tick(dt, now) {
+  const a = app, u = fx.u, wk = a.walk.wk;
+  u.time.value += dt;
+  const walking = ui.nav === 'walk' && !wk.noclip;
+  if (walking) u.player.value.set(wk.feet[0], wk.feet[1], wk.feet[2]); else u.player.value.set(0, -1e4, 0);
+
+  // 足跡：地面や草地の上を歩幅ぶん進むたびに、左右交互に1つ押す
+  if (walking && wk.onGround && $('footOn').checked && data.hasLabels) {
+    const [x, , z] = wk.feet;
+    fx.follow(x, z);
+    if (Number.isNaN(lastStep.x)) { lastStep.x = x; lastStep.z = z; }
+    const dx = x - lastStep.x, dz = z - lastStep.z, d = Math.hypot(dx, dz);
+    if (d > 3) { lastStep.x = x; lastStep.z = z; } // 跳んだ・視点を移した
+    else if (d >= STRIDE) {
+      const t = wk.groundTri, type = t >= 0 ? TYPE_BY_ID.get(a.walk.W.typeId[t]) : null;
+      if (type && type.tracks) { lastStep.side = -lastStep.side; fx.stamp(x - dz / d * FOOT_SIDE * lastStep.side, z + dx / d * FOOT_SIDE * lastStep.side, dx, dz); }
+      lastStep.x = x; lastStep.z = z;
+    }
+  } else lastStep.x = NaN;
+
+  // 時計：進めた時刻から光を決める。影用の地図は 0.1 秒に 1 回まで作り直す
+  if (clock.playing) {
+    clock.hour = (clock.hour + dt * 24 / clock.dayLength) % 24;
+    Object.assign(light, dayLight(clock.hour)); applyLight();
+    if (now - lastSunAt > 100) { lastSunAt = now; updateSun(); }
+    if (now - lastClockShown > 250) { lastClockShown = now; showLight(); }
+  }
 }
 
 function applyUi() {
@@ -478,6 +544,16 @@ function applyUi() {
   a.wire.visible = $('wire').checked; a.frusta.visible = $('frusta').checked;
   a.sprite.material = ui.order === 'opaque' ? a.mats.hard : a.mats.soft;
   a.controls.enabled = ui.nav === 'orbit';
+  // 動き：切ってあれば強さ 0。表示の種類によっては、色の効果（風の照り・足跡の暗さ）を掛けない
+  const u = fx.u, moving = data.hasLabels;
+  u.wind.value = moving && $('windOn').checked ? Number($('windK').value) : 0;
+  u.windSpeed.value = Number($('windSpeed').value);
+  const wa = Number($('windDir').value) * Math.PI / 180; u.windDir.value.set(Math.sin(wa), Math.cos(wa));
+  u.part.value = moving && $('partOn').checked ? 0.45 : 0; u.partRadius.value = Number($('partR').value);
+  u.foot.value = moving && $('footOn').checked ? 0.5 : 0; u.footShow.value = moving && $('footShow').checked ? 1 : 0;
+  u.show.value = SHADER_SHOW[ui.mode] || 0; u.colorFx.value = COLOR_FX.has(ui.mode) ? 1 : 0;
+  $('oWindK').textContent = `${Math.round(Number($('windK').value) * 100)} cm`; $('oWindSpeed').textContent = `${Number($('windSpeed').value).toFixed(1)} 倍`;
+  $('oWindDir').textContent = `${$('windDir').value}°`; $('oPartR').textContent = `${Number($('partR').value).toFixed(1)} m`;
   a.walk.shapes.visible = $('shapes').checked;
   a.walk.me.visible = ui.nav === 'walk' ? $('third').checked : $('shapes').checked; // 自分の体は、後ろから見るときと、回して見るときに当たりの形を出しているとき
   $('walkBox').hidden = ui.nav !== 'walk';
@@ -596,16 +672,18 @@ function setupViewButtons() {
   setColorSrc(ui.colorSrc, false);
   for (const b of $('mode').children) b.disabled = NEEDS_LABELS.has(b.dataset.v) && !data.hasLabels;
   if (NEEDS_LABELS.has(ui.mode) && !data.hasLabels) { ui.mode = 'color'; press($('mode'), ui.mode); }
-  $('lightBox').hidden = !data.hasLabels;
+  $('lightBox').hidden = $('moveBox').hidden = !data.hasLabels;
 }
 const SRC_BUTTONS = () => [...$('colorSrc').children, ...$('colorSrc2').children];
 function setColorSrc(v, andRebuild = true) {
   ui.colorSrc = v;
   for (const b of SRC_BUTTONS()) b.setAttribute('aria-pressed', b.dataset.v === v ? 'true' : 'false');
-  ui.paintLight = SOURCES[v].light; press($('paintLight'), ui.paintLight); // その絵が描かれたときの光の見立て
+  ui.paintLight = SOURCES[v].light; press($('paintLight'), ui.paintLight); applyLight(); // その絵が描かれたときの光の見立て
   if (andRebuild) rebuild();
 }
 const refill = () => { if (app) { sendSource(); requestSort(); } };
+// 表示を切り替える。色の作り方が同じ表示どうし（絵のままの色 ⇔ 光を変えた後 など）は、シェーダーの切り替えだけで済ませる
+function setMode(v) { const same = DISPLAY[v] === DISPLAY[ui.mode]; ui.mode = v; applyUi(); if (!same) refill(); }
 const rebuild = () => { press($('stride'), ui.stride); start(forceGL).catch(fail); };
 
 // ---- 光の操作 ----
@@ -617,11 +695,22 @@ function showLight() { // light の値を、つまみと数字に写す
   $('oSunK').textContent = light.sun.toFixed(2); $('oSkyK').textContent = light.sky.toFixed(2);
   $('oBands').textContent = light.bands ? `${light.bands} 段` : 'なめらか';
   $('oMaxGain').textContent = `${light.maxGain.toFixed(1)} 倍まで`;
+  const h = clock.hour, hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+  $('hour').value = h; $('oHour').textContent = clock.manual ? '手で調整中' : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}${light.moon ? '（月）' : ''}`;
+  $('play').textContent = clock.playing ? '時間を止める' : '時間を進める'; $('play').setAttribute('aria-pressed', clock.playing ? 'true' : 'false');
+  $('dayLength').value = clock.dayLength; $('oDayLength').textContent = `${clock.dayLength} 秒`;
 }
-function setLight(values, sunMoved) {
-  Object.assign(light, values); showLight();
-  if (ui.mode === 'color') { ui.mode = 'relit'; press($('mode'), ui.mode); } // 光を触ったら、変えた後の色を見せる
-  if (sunMoved) updateSun(); else refill();
+function setLight(values, sunMoved) { // 光のつまみを手で動かした：時計は止める
+  clock.playing = false; clock.manual = true;
+  Object.assign(light, values); showLight(); applyLight();
+  showRelit();
+  if (sunMoved) updateSun();
+}
+function showRelit() { if (ui.mode === 'color') { ui.mode = 'relit'; press($('mode'), ui.mode); applyUi(); } } // 光を触ったら、変えた後の色を見せる
+function setHour(h) { // 時刻を決める：光は1日の光（shared/light.js の dayLight）から
+  clock.hour = ((h % 24) + 24) % 24; clock.manual = false;
+  Object.assign(light, dayLight(clock.hour)); showLight(); applyLight(); showRelit();
+  return updateSun();
 }
 for (const [id, key] of Object.entries(LIGHT_INPUTS)) {
   $(id).addEventListener('input', () => setLight({ [key]: Number($(id).value) }, key === 'azimuth' || key === 'elevation'));
@@ -632,25 +721,30 @@ $('preset').addEventListener('click', (e) => {
   if (b.dataset.v === 'paint') { // 描いたときの光：「影つき」の絵なら、絵のままの色に戻るはずの設定
     const pl = data && data.cams.paint_light;
     setLight({ azimuth: pl ? pl.sun_azimuth_deg : PAINT_SUN.azimuth, elevation: pl ? pl.sun_elevation_deg : PAINT_SUN.elevation, sun: LIT_LIGHT.sun, sunColor: '#ffffff', sky: LIT_LIGHT.ambient, skyColor: '#ffffff' }, true);
-  } else {
-    const p = PRESETS[b.dataset.v];
-    setLight({ azimuth: p.azimuth, elevation: p.elevation, sun: p.sun, sunColor: p.sunColor, sky: p.sky, skyColor: p.skyColor }, true);
-  }
+  } else setHour(PRESET_HOURS[b.dataset.v]);
 });
-seg('paintLight', (v) => { ui.paintLight = v; refill(); });
+$('hour').addEventListener('input', () => { clock.playing = false; setHour(Number($('hour').value)); });
+$('play').addEventListener('click', () => {
+  clock.playing = !clock.playing;
+  if (clock.playing) { if (clock.manual) setHour(clock.hour); clock.playing = true; }
+  showLight();
+});
+$('dayLength').addEventListener('input', () => { clock.dayLength = Number($('dayLength').value); showLight(); });
+seg('paintLight', (v) => { ui.paintLight = v; applyLight(); });
 
 for (const id of ['colorSrc', 'colorSrc2']) $(id).addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) setColorSrc(b.dataset.v); });
 seg('source', (v) => { ui.source = v; applyUi(); });
 seg('nav', setNav);
-seg('mode', (v) => { ui.mode = v; refill(); });
+seg('mode', setMode);
 seg('stride', (v) => { ui.stride = Number(v); rebuild(); });
 seg('order', (v) => {
   ui.order = v; if (!app) return;
   requestSort(); applyUi();
 });
 $('jump').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { jump(b.dataset.v); if (ui.nav === 'walk') placeAtCamera(); } });
-for (const id of ['size', 'edge']) $(id).addEventListener('input', applyUi);
-for (const id of ['holes', 'wire', 'frusta', 'sky', 'shapes', 'third']) $(id).addEventListener('change', applyUi);
+for (const id of ['size', 'edge', 'windK', 'windSpeed', 'windDir', 'partR']) $(id).addEventListener('input', applyUi);
+for (const id of ['holes', 'wire', 'frusta', 'sky', 'shapes', 'third', 'windOn', 'partOn', 'footOn', 'footShow']) $(id).addEventListener('change', applyUi);
+$('footClear').addEventListener('click', () => { if (app) fx.clearFootprints(app.camera.position.x, app.camera.position.z); });
 // 歩き方の操作
 function showWalk() { $('oEye').textContent = `${Number($('eye').value).toFixed(2)} m`; $('oSpeed').textContent = `${Number($('speed').value).toFixed(1)} m/s`; }
 $('eye').addEventListener('input', () => { showWalk(); if (app) app.walk.setEye(Number($('eye').value)); });
