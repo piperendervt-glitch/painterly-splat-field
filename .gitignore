@@ -16,3 +16,6 @@ scenes/*/previz-export/*_overlay.png
 # 絵から作った場面で、絵画化や穴埋めを試したときの作業フォルダと結果（paint/paint.mjs）
 scenes/*/paint-out/work/
 scenes/*/paint-out/*_plate*.png
+# 絵から推定したプレビズのモデル（「粒の空間」の「推定した形を書き出す」。作り直せる）
+estimated_model.obj
+estimated_model.json
