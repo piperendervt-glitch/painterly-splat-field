@@ -1,12 +1,13 @@
 // 粒の空間：書き出した奥行き・カメラ情報と、絵（絵画 or プレビズの色）から、1画素を1粒として3D空間に置いて見る。
 // 置き方は cameras.json の projection のとおり。プレビズの形そのものは使わない（線で重ねる確かめ用を除く）。
 import * as THREE from 'three/webgpu';
-import { instancedBufferAttribute, uniform, uv, vec2, vec3, float, step, exp, mix, max, abs, fract, varying } from 'three/tsl';
+import { instancedBufferAttribute, uniform, uv, vec2, vec3, vec4, float, step, exp, mix, max, abs, fract, sqrt, atan, dot, clamp, cameraViewMatrix, varying } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, SKY_TYPE, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
-import { parsePly, checkSharp, sharpScale, splatsFromSharp } from './sharp.js';
+import { parsePly, checkSharp, sharpScale, splatsFromSharp, sharpGrid, sharpBack, sharpBackSplats } from './sharp.js';
+import { SIGMA_K, BACK_RING, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate } from './layers.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
@@ -39,14 +40,16 @@ const SOURCES = {
 // sfx は、AI が描いた空の絵（paint/out/sky_ai<sfx>.png）の名前の後ろ。paint は、空を描いてもらうときの光の描かせ方（paint.mjs の --light）。
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, skyMode: 'dome', skyStep: 0.2 };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, skyMode: 'dome', skyStep: 0.2 };
+// 角度を変えたときの崩れを減らす設定（計算は studio/layers.js）：shape = 粒の形（round 丸 / surfel 面に沿う楕円）、stretch = 面に沿って伸ばす上限（倍）、
+// back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
 
 // 実在の絵から作った場面（painting/build.mjs）の種類の名前を、shared/labels.js の種類へ読み替える
 const PAINT_TYPE_KEYS = { sky: 'sky', ground: 'grass', water: 'water', figure: 'figure', far: 'far', tree: 'leaves' };
 // いまの光。方位・高さは度。色は sRGB の #rrggbb。bands は明暗の段階の数（0 = なめらか）。maxGain は明るくする上限（倍）。
 const light = { azimuth: PAINT_SUN.azimuth, elevation: PAINT_SUN.elevation, sun: LIT_LIGHT.sun, sunColor: '#ffffff', sky: LIT_LIGHT.ambient, skyColor: '#ffffff', bands: 0, maxGain: 4 };
-const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1), uDome = uniform(1);
+const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1), uShape = uniform(1), uDome = uniform(1);
 
 // 動きと光（風・草よけ・足跡・光の付け替え）をシェーダーで付ける部品。足跡は作り直しても残るよう、ここで1つだけ持つ。
 const fx = createFx();
@@ -74,6 +77,7 @@ async function loadImage(url, w, h) {
 
 async function tryImage(url, w, h) { try { return await loadImage(url, w, h); } catch { return null; } }
 
+let plateVersion = 0; // AI が描いた背景の絵を読むたびに増やす（作り置きの層を作り直す目印）
 async function loadData() {
   const [camsRes, stateRes] = await Promise.all([fetch('/files/previz-export/cameras.json', { cache: 'no-store' }), fetch('/api/state', { cache: 'no-store' })]);
   if (!camsRes.ok) throw new Error('プレビズの書き出しがまだありません。\n「プレビズ」のタブで「previz-export に保存」を押してから、ここで「ファイルを読み直す」を押してください。');
@@ -117,12 +121,20 @@ async function loadData() {
       const res = await fetch(`/files/paint-out/${v.name}_sharp.ply`, { cache: 'no-store' });
       if (res.ok) { sharp = parsePly(await res.arrayBuffer()); checkSharp(sharp); }
     }
+    // AI が描いた「手前の物を消した背景の絵」と、そのときの穴の印（色のもとごと。studio/server.mjs の plates）
+    const plates = {};
+    for (const key of st.plates || []) {
+      const px = await tryImage(`/files/paint-out/${v.name}_plate_${key}.png`, W, H), mask = px && await tryImage(`/files/paint-out/${v.name}_platemask_${key}.png`, W, H);
+      if (px && mask) plates[key] = { px, mask, version: ++plateVersion };
+    }
     views.push({
+      plates,
       def: v, W, H, z, edge: edgeDistance(z, W, H), near, far, isSky, skyDist: skyDistance(isSky, W, H),
       colors, hasTypes, hasLabels, type, object, normalPx: hasLabels ? lab.normal : null, sunPx: hasLabels ? lab.sun : null,
       labelEdge: hasTypes ? labelEdgeDistance(type, object, W, H) : null, sharp,
       onlyNew: st.new_mask ? await loadImage(`/files/paint-out/${v.name}_new.png`, W, H) : null, // 穴埋めで足した視点：白い画素だけ粒にする
       matrix: new THREE.Matrix4().set(...v.extrinsics.camera_to_world.flat()),
+      c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
   return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0 };
@@ -196,6 +208,8 @@ export const COLUMNS = {
   labelEdge: { type: Uint8Array, size: 1, default: LABEL_EDGE_MAX }, // 札の境目からの距離（画素）
   lift: { type: Float32Array, size: 1, default: 0.05 },  // 影を調べるときに面から浮かせる量（m）。奥行きの刻みの粗さ
   opacity: { type: Uint8Array, size: 1, default: 255 },  // 不透明さ（0〜255）。奥行きから置いた粒は 255、SHARP の粒は SHARP の値
+  cov: { type: Float32Array, size: 6, default: 0 },      // 粒の形（共分散 xx, xy, xz, yy, yz, zz。m²）。面に沿う楕円や SHARP の形。「粒の大きさ」が 2.6 倍のときの広がり
+  layer: { type: Uint8Array, size: 1, default: 0 },      // 層。0 = 絵に見えていた面、1 = 背後の層（手前の物の後ろに、背景を伸ばして作った粒）
   skyFrom: { type: Uint8Array, size: 1, default: 0 },    // 天球の粒の出どころ（0 = 天球の粒ではない、1 = 絵、2 = AI が描いた空、3 = ツール内で埋めた空）
 };
 const TYPE_BY_ID = new Map(TYPES.map((t) => [t.id, t]));
@@ -208,6 +222,7 @@ export function makeCloud(capacity) {
 export function appendSplats(c, columns, count) {
   if (c.n + count > c.capacity) throw new Error('粒の数が用意した枠を超えました');
   for (const [name, d] of Object.entries(COLUMNS)) { const src = columns[name]; if (src) c[name].set(src.subarray(0, count * d.size), c.n * d.size); }
+  if (!columns.cov) for (let i = c.n; i < c.n + count; i++) roundCov(c.cov, i * 6, c.size[i] * SIGMA_K); // 形が渡されなければ丸
   for (let i = c.n; i < c.n + count; i++) c.order[i] = i;
   c.n += count;
 }
@@ -216,21 +231,28 @@ export function appendSplats(c, columns, count) {
 // 視点 v で、色のもと src の絵を返す。無ければ fallback をたどる。
 function colorOf(v, src) { for (let key = src; key; key = SOURCES[key].fallback) if (v.colors[key]) return { key, px: v.colors[key] }; return { key: 'previz', px: v.colors.previz }; }
 
-function splatsFromView(v, vi, stride, src) {
+// back（studio/layers.js の backLayer の結果）を渡すと、物のまわりの縁の画素は置かない（背後の層の粒が代わりに入る）。
+function splatsFromView(v, vi, stride, src, back = null) {
   const { W, H, z, edge, near, far } = v, { fx, fy, cx, cy } = v.def.intrinsics;
   const max = Math.ceil(W / stride) * Math.ceil(H / stride);
-  const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max) };
+  const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max), cov: new Float32Array(max * 6) };
   if (v.hasTypes) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max) });
   if (v.hasLabels) Object.assign(col, { normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), lift: new Float32Array(max) });
   const px = colorOf(v, src).px, p = new THREE.Vector3(), off = stride >> 1, zStep = (1 / near - 1 / far) / 65535;
+  const eye = [v.c2w[3], v.c2w[7], v.c2w[11]], nrm = [0, 0, 1], nStep = Math.max(2, stride); // nStep = 面の向きを奥行きから求めるときの画素の間隔
   let k = 0;
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) {
     const i = y * W + x, sky = z[i] === 0, zz = sky ? SKY_Z : z[i];
     if (sky && ui.skyMode !== 'wall') continue; // 空は天球（下の「空の天球」）が受け持つ
     if (v.onlyNew && v.onlyNew[i * 4] < 128) continue;
+    if (back && back.kind[i] === BACK_RING) continue;
     p.set((x + 0.5 - cx) / fx * zz, -(y + 0.5 - cy) / fy * zz, -zz).applyMatrix4(v.matrix);
     col.position[k * 3] = p.x; col.position[k * 3 + 1] = p.y; col.position[k * 3 + 2] = p.z;
     col.size[k] = zz * stride / fy;
+    // 形：面に沿う楕円（面の向きは、面の向きの絵か、無ければ奥行きから）。空と、向きが求まらない所は丸
+    // 面の向きの絵が無い場面（実在の絵から作った場面）では、手前の物（人・木）は板として置いてあり、奥行きから求めた向きが荒れるので丸のまま
+    if (!sky && (v.hasLabels || !v.hasTypes || !FRONT[v.type[i]]) && viewNormal(v, z, x, y, nStep, nrm)) { const rx = p.x - eye[0], ry = p.y - eye[1], rz = p.z - eye[2], rl = Math.hypot(rx, ry, rz); surfelCov(col.cov, k * 6, nrm[0], nrm[1], nrm[2], rx / rl, ry / rl, rz / rl, col.size[k] * SIGMA_K, ui.stretch); }
+    else roundCov(col.cov, k * 6, col.size[k] * SIGMA_K);
     col.color[k * 3] = px[i * 4]; col.color[k * 3 + 1] = px[i * 4 + 1]; col.color[k * 3 + 2] = px[i * 4 + 2];
     col.depthGray[k] = sky ? 0 : Math.max(0, Math.min(255, (1 - Math.log(zz / near) / Math.log(far / near)) * 255));
     col.edge[k] = edge[i]; col.sky[k] = sky ? 1 : 0;
@@ -249,25 +271,64 @@ function splatsFromView(v, vi, stride, src) {
   }
   return { columns: col, count: k };
 }
-// SHARP の粒は、視点の番号の後ろ（視点の数 + 何番目の視点か）を「視点」の札にする。視点別の表示で色が分かれ、出し入れもできる。
+// 「視点」の札の番号：奥行きの絵からの粒は視点の番号、SHARP の粒はその後ろ（視点の数 + 何番目か）、背後の層の粒はさらに後ろ（視点の数 × 2 + 何番目か）。
+// 視点別の表示で色が分かれ、「使う視点」で出し入れもできる。
 const sharpViewIndex = (vi) => data.views.length + vi;
-function sharpParts() {
+const backViewIndex = (vi) => data.views.length * 2 + vi;
+const FRONT = frontTable(TYPES);            // 種類 → 手前の物かどうか
+const backInfo = { on: false, views: [] };  // 背後の層の作り方の結果（画面に出す）
+const SPLAT_OPTS = () => ({ skyZ: SKY_Z, typeOf: (t) => TYPE_BY_ID.get(t), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, maxStretch: ui.stretch, emitSky: ui.skyMode === 'wall' });
+// 視点 v の背後の層（画素ごと）。色のもとと縁の幅が同じなら作り直さない
+// plated = false にすると、AI が描いた背景の絵を使わない、計算だけの層を返す（AI に頼むときの目安の絵に使う）
+function backOf(v, src, plated = true) {
+  const c = colorOf(v, src), key = `${c.key}:${ui.halo}`;
+  if (!v.back || v.back.key !== key) v.back = { key, layer: backLayer({ W: v.W, H: v.H, z: v.z, type: v.type, rgba: c.px, front: FRONT, halo: ui.halo }), plated: null };
+  const p = plated && ui.plate ? v.plates[c.key] : null;
+  if (!p) return v.back.layer;
+  if (!v.back.plated || v.back.plated.version !== p.version) v.back.plated = { version: p.version, layer: withPlate(v.back.layer, p.px, p.mask) };
+  return v.back.plated.layer;
+}
+function sharpParts(withBack) {
   const out = [];
   data.views.forEach((v, vi) => {
     if (!v.sharp) return;
     const inv = v.matrix.clone().invert(), cam = new THREE.Vector3().setFromMatrixPosition(v.matrix).toArray();
     if (v.sharpScale === undefined) v.sharpScale = sharpScale(v.sharp, v, inv); // 奥行きの絵に合わせる倍率（読み込みごとに 1 回）
     const keep = Math.max(1, (ui.stride / 2) ** 2); // SHARP は 2 画素に 1 粒（× 2 層）なので、「ふつう」で全部使う
-    const p = splatsFromSharp(v.sharp, v, sharpViewIndex(vi), { keep, scale: ui.sharpFit ? v.sharpScale : 1, inv, cam, typeOf: (t) => TYPE_BY_ID.get(t), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+    const scale = ui.sharpFit ? v.sharpScale : 1;
+    // 粒の並び（ます目）から、手前と奥をつなぐ膜を探す。倍率が同じなら作り直さない
+    if (!v.sharpGrid || v.sharpGrid.scale !== scale) v.sharpGrid = { scale, grid: sharpGrid(v.sharp, { scale, inv, cam, edgeMax: EDGE_MAX }) };
+    const grid = v.sharpGrid.grid, opts = SPLAT_OPTS();
+    const p = splatsFromSharp(v.sharp, v, sharpViewIndex(vi), { keep, scale, inv, cam, typeOf: opts.typeOf, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX, grid });
     v.sharpStats = p.stats;
     out.push(p);
+    if (withBack && grid && v.hasTypes) { // 背後の層：SHARP の奥行きのます目から作る（SHARP の地面とずれないように）
+      const c = colorOf(v, ui.colorSrc), key = `${c.key}:${ui.halo}:${scale}`;
+      if (!v.sharpBack || v.sharpBack.key !== key) v.sharpBack = { key, layer: sharpBack(v.sharp, v, grid, c.px, { scale, inv, cam, front: FRONT, halo: Math.max(1, Math.round(ui.halo / 2)) }), plated: null };
+      const pl = ui.plate ? v.plates[c.key] : null; // AI が描いた背景の絵があれば、色はそこから
+      if (pl && (!v.sharpBack.plated || v.sharpBack.plated.version !== pl.version)) v.sharpBack.plated = { version: pl.version, layer: withPlate(v.sharpBack.layer, pl.px, pl.mask, v.sharpBack.layer.pixel) };
+      const layer = pl ? v.sharpBack.plated.layer : v.sharpBack.layer;
+      const b = sharpBackSplats(v.sharp, v, grid, layer, backViewIndex(vi), { ...opts, step: Math.max(1, ui.stride >> 1), scale, inv, cam });
+      out.push(b);
+      backInfo.views.push({ name: `${v.def.name}（SHARP）`, count: b.count, covered: 0, stats: v.sharpBack.layer.stats, ai: !!pl });
+    }
   });
   return out;
 }
 function buildCloud() {
   const placement = data.hasSharp ? ui.placement : 'depth';
-  const parts = placement === 'sharp' ? [] : data.views.map((v, vi) => splatsFromView(v, vi, ui.stride, ui.colorSrc));
-  if (placement !== 'depth') parts.push(...sharpParts());
+  const withBack = ui.back && data.hasTypes; // 背後の層には種類の札が要る
+  backInfo.on = withBack; backInfo.views = [];
+  const parts = [];
+  if (placement !== 'sharp') data.views.forEach((v, vi) => {
+    const back = withBack && !v.onlyNew ? backOf(v, ui.colorSrc) : null; // 穴埋めで足した視点（穴の所だけの絵）には作らない
+    parts.push(splatsFromView(v, vi, ui.stride, ui.colorSrc, back));
+    if (!back) return;
+    const b = backSplats(v, back, backViewIndex(vi), ui.stride, { ...SPLAT_OPTS(), others: data.views.filter((o) => o !== v) });
+    parts.push(b);
+    backInfo.views.push({ name: v.def.name, count: b.count, covered: b.covered, stats: back.stats, ai: back.used !== undefined });
+  });
+  if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp'));
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
   for (const p of parts) appendSplats(c, p.columns, p.count);
   return c;
@@ -335,6 +396,10 @@ const DISPLAY = {
   },
   sun0: (c, i, out) => (c.object[i] ? gray(out, 0.03 + 0.97 * sunAmount(c, i, L.dir0, c.sunVis0)) : gray(out, 0.3)),   // 描いたときの日なた
   sunNow: painted,                                                                                    // いまの日なた（シェーダーが灰色にする）
+  layer: (c, i, out) => {                                                                             // 層：絵に見えていた面は灰色、背後の層は黄
+    const l = 0.15 + 0.85 * luma(c, i);
+    if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
+  },
   labelEdge: (c, i, out) => {                                                                         // 札の境目の近く
     painted(c, i, out);
     const k = 1 - Math.min(1, c.labelEdge[i] / 6); // 境目に近いほど赤く
@@ -349,8 +414,8 @@ DISPLAY.skySrc = (c, i, out) => {
   const t = from === 1 ? VIEW_TINTS[c.view[i] % VIEW_TINTS.length] : SKY_FROM_TINT[from];
   out[0] = LIN[t[0] * 255 | 0] * l; out[1] = LIN[t[1] * 255 | 0] * l; out[2] = LIN[t[2] * 255 | 0] * l;
 };
-const NEEDS_LABELS = new Set(['relit', 'sway', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge']);
-const TYPE_MODES = new Set(['type', 'typeMix', 'object', 'labelEdge']); // 種類と物体の札だけで出せる表示（実在の絵の場面でも使える）
+const NEEDS_LABELS = new Set(['relit', 'sway', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge', 'layer']);
+const TYPE_MODES = new Set(['type', 'typeMix', 'object', 'labelEdge', 'layer']); // 種類と物体の札だけで出せる表示（実在の絵の場面でも使える）
 const SHADER_SHOW = { relit: 1, sunNow: 2 };     // シェーダー側で色を作る表示
 const COLOR_FX = new Set(['color', 'relit']);    // 風の照りと足跡の色を掛ける表示
 const KIND_OF = new Map(TYPES.map((t) => [t.id, KIND[t.light] + (t.tracks ? 4 : 0)]));
@@ -391,12 +456,13 @@ async function cpuSun() {
 // 描画用は vec4 を4本にまとめる（WebGPU は頂点バッファの本数に上限があるため、列ごとに分けない）。
 //   A = [位置 xyz, 粒の間隔]  B = [表示する色 rgb, 境界からの距離]
 //   C = [空, 視点, 揺れやすさ, 光の受け方＋足跡が付くか]  D = [面の向き xyz, 描いたときの日なた]（C・D の使い方は studio/fx.js）
+//   E = [形 xx, xy, xz, yy]  F = [形 yz, zz, 空き, 空き]（粒の形の共分散。makeMaterials で画面の上の楕円に直す）
 // 遠い順（視点からの距離）に並べ直すのは別の糸（studio/sortworker.js）で行い、描画は止めない。
 // ここでは、粒の元の並びのまま描画用の値を作って渡す（表示・粒を変えたときだけ。光や動きは描くときに付けるので送り直さない）。
 const OPACITY_PACK = 0.45; // B.w の小数部に「1 − 不透明さ」をこの幅で詰める（境界の判定 step(uEdge, B.w + 0.5) を変えない幅）
 function sendSource() {
   const a = app, c = cloud; if (!a || !c) return;
-  const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4), D = new Float32Array(n * 4);
+  const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4), D = new Float32Array(n * 4), E = new Float32Array(n * 4), F = new Float32Array(n * 4);
   prepareLight();
   const display = DISPLAY[ui.mode] || DISPLAY.color, rgb = [0, 0, 0], labels = data.hasLabels;
   for (let i = 0; i < n; i++) {
@@ -405,31 +471,32 @@ function sendSource() {
     display(c, i, rgb);
     B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i] + (1 - c.opacity[i] / 255) * OPACITY_PACK; // 境界からの距離（整数）＋ 透けぐあい（小数）
     C[o] = c.sky[i]; C[o + 1] = c.view[i];
+    E[o] = c.cov[i * 6]; E[o + 1] = c.cov[i * 6 + 1]; E[o + 2] = c.cov[i * 6 + 2]; E[o + 3] = c.cov[i * 6 + 3]; F[o] = c.cov[i * 6 + 4]; F[o + 1] = c.cov[i * 6 + 5];
     if (labels) {
       C[o + 2] = c.sway[i] / 255; C[o + 3] = KIND_OF.get(c.type[i]) || 0;
       D[o] = c.normal[i * 3] / 127; D[o + 1] = c.normal[i * 3 + 1] / 127; D[o + 2] = c.normal[i * 3 + 2] / 127; D[o + 3] = c.sunVis0[i] / 255;
     }
   }
-  a.sorter.worker.postMessage({ type: 'source', P, B, C, D }, [P.buffer, B.buffer, C.buffer, D.buffer]);
+  const arrays = [P, B, C, D, E, F];
+  a.sorter.worker.postMessage({ type: 'source', arrays }, arrays.map((x) => x.buffer));
 }
 // 並べ直しの係。終わった配列を描画用の値と入れ替え、外した方を次の並べ直しの書き込み先に回す。
 function makeSorter(a, n) {
   const worker = new Worker(new URL('./sortworker.js', import.meta.url), { type: 'module' });
-  const s = { worker, busy: false, pending: null, spare: [new Float32Array(n * 4), new Float32Array(n * 4), new Float32Array(n * 4), new Float32Array(n * 4)], done: 0 };
+  const s = { worker, busy: false, pending: null, spare: a.attrs.map(() => new Float32Array(n * 4)), done: 0 };
   s.sort = (eye) => { // eye = [x, y, z]
     if (s.busy || !s.spare) { s.pending = eye; return; }
-    s.busy = true; const [A, B, C, D] = s.spare; s.spare = null;
-    worker.postMessage({ type: 'sort', eye, A, B, C, D }, [A.buffer, B.buffer, C.buffer, D.buffer]);
+    s.busy = true; const arrays = s.spare; s.spare = null;
+    worker.postMessage({ type: 'sort', eye, arrays }, arrays.map((x) => x.buffer));
   };
   worker.onmessage = (e) => {
     const m = e.data;
     if (!m.empty) {
-      s.spare = [a.attrA.array, a.attrB.array, a.attrC.array, a.attrD.array];
-      a.attrA.array = m.A; a.attrB.array = m.B; a.attrC.array = m.C; a.attrD.array = m.D;
-      a.attrA.needsUpdate = a.attrB.needsUpdate = a.attrC.needsUpdate = a.attrD.needsUpdate = true;
+      s.spare = a.attrs.map((t) => t.array);
+      a.attrs.forEach((t, i) => { t.array = m.arrays[i]; t.needsUpdate = true; });
       s.done++;
       $('sSort').textContent = `${Math.round(m.ms)} ms（描画とは別の糸）`;
-    } else s.spare = [m.A, m.B, m.C, m.D];
+    } else s.spare = m.arrays;
     s.busy = false;
     if (s.pending) { const p = s.pending; s.pending = null; s.sort(p); }
   };
@@ -446,25 +513,44 @@ function requestSort() { const a = app; if (!a) return; const e = orderEye(); a.
 
 // ---- 材質 ----
 function makeMaterials(a) {
-  const P = instancedBufferAttribute(a.attrA), B = instancedBufferAttribute(a.attrB), M = instancedBufferAttribute(a.attrC), D = instancedBufferAttribute(a.attrD);
+  const [P, B, M, D, E, F] = a.attrs.map((t) => instancedBufferAttribute(t));
   const moved = fx.nodes(P, B, M, D); // 風・草よけ・足跡・光の付け替えを掛けた位置と色
   const edgeOk = step(uEdge, B.w.add(0.5));                               // 境界から uEdge 画素以上はなれた粒だけ
   const skyOk = mix(float(1), uSky, M.x);                                 // 空の粒は uSky で出し入れ
   const viewOk = max(step(uView, -0.5), float(1).sub(step(0.5, abs(M.y.sub(uView))))); // 使う視点だけ
-  const s = P.w.mul(uSize).mul(edgeOk).mul(skyOk).mul(viewOk);
+  const show = edgeOk.mul(skyOk).mul(viewOk);
+  const s = P.w.mul(uSize);
   const r = uv().sub(0.5).length();
 
+  // 粒の形（3D の共分散）を、いまのカメラから見た画面の上の楕円に直す（3D Gaussian Splatting と同じ計算）。
+  //   m1・m2 = 「粒の中心を通り、画面に平行な板」への写し方（遠近のゆがみ込み）。板の上での共分散 [[ca, cb], [cb, cc]] の
+  //   長い軸・短い軸の広がり（√固有値）と傾きを求め、板（スプライト）の縦横の大きさと回転にする。
+  const V = cameraViewMatrix, r1 = vec3(V[0].x, V[1].x, V[2].x), r2 = vec3(V[0].y, V[1].y, V[2].y), r3 = vec3(V[0].z, V[1].z, V[2].z);
+  const t = V.mul(vec4(moved.position, 1)).xyz;
+  const m1 = r1.sub(r3.mul(clamp(t.x.div(t.z), -2, 2))), m2 = r2.sub(r3.mul(clamp(t.y.div(t.z), -2, 2)));
+  const S0 = vec3(E.x, E.y, E.z), S1 = vec3(E.y, E.w, F.x), S2 = vec3(E.z, F.x, F.y);
+  const Sm1 = vec3(dot(S0, m1), dot(S1, m1), dot(S2, m1)), Sm2 = vec3(dot(S0, m2), dot(S1, m2), dot(S2, m2));
+  const ca = dot(m1, Sm1), cb = dot(m1, Sm2), cc = dot(m2, Sm2);
+  const mid = ca.add(cc).mul(0.5), half = ca.sub(cc).mul(0.5), rad = sqrt(half.mul(half).add(cb.mul(cb)));
+  const floor2 = P.w.mul(P.w).mul(MIN_SIGMA * MIN_SIGMA);                 // 真横から見た面が線より細くならないように
+  const l1 = max(mid.add(rad), floor2), l2 = max(mid.sub(rad), floor2);
+  const k = uSize.div(2.6).mul(6);                                        // 板の一辺 = 広がり（σ）× 6（下のぼかしが σ = 一辺 / 6）
+  const oval = vec2(sqrt(l1), sqrt(l2)).mul(k);
+  const tilt = atan(cb.mul(2), ca.sub(cc).add(1e-12)).mul(0.5).mul(uShape); // 長い軸の傾き。丸のときは 0
+  const size = mix(vec2(s, s), oval, uShape);                             // uShape = 0 なら今までどおりの丸
+
   const soft = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: false });
-  soft.positionNode = moved.position; soft.scaleNode = vec2(s, s); soft.colorNode = moved.color;
+  soft.positionNode = moved.position; soft.scaleNode = size.mul(show); soft.rotationNode = tilt; soft.colorNode = moved.color;
   const alpha = float(1).sub(fract(B.w).div(OPACITY_PACK)); // 不透明さ（sendSource で B.w の小数部に詰めたもの）
   soft.opacityNode = exp(r.mul(r).mul(-18)).mul(alpha);
 
   const hard = new THREE.SpriteNodeMaterial({ transparent: false, depthWrite: true, depthTest: true, alphaTest: 0.5 });
-  const sh = s.mul(0.62); // ぼかさないぶん小さめの円にする
-  hard.positionNode = moved.position; hard.scaleNode = vec2(sh, sh); hard.colorNode = moved.color;
+  // ぼかさないぶん小さめの円にする
+  hard.positionNode = moved.position; hard.scaleNode = size.mul(show).mul(0.62); hard.rotationNode = tilt; hard.colorNode = moved.color;
   hard.opacityNode = float(1).sub(step(0.5, r)).mul(step(0.5, alpha)); // 半分より透ける粒は描かない
   return { soft, hard };
 }
+const MIN_SIGMA = 0.12; // 粒の広がり（σ）の下限 ÷ 粒の間隔
 
 // ---- 空の天球 ----
 // 空の画素は粒の雲に入れず、向きだけで 1 枚の空の地図にまとめてから、カメラを中心にした球の内側に粒として並べる（studio/skydome.js）。
@@ -616,6 +702,65 @@ async function forgetSky() {
   await refreshSky(); showSkyPlan();
 }
 
+// ---- AI（Codex）に、手前の物を消した背景の絵を描いてもらう（背後の層の色） ----
+// 視点ごとに 1 枚：手前の物とその縁をマゼンタの穴にした絵を見せ、後ろの背景だけ描いてもらう。できた絵は paint-out の <視点>_plate_<色のもと>.png。
+const PLATE_GROW = 6; // 層のます（物とその縁）から、さらに何画素ひろげて描いてもらうか（絵と札のずれのぶん）
+let plateJob = false, plateStop = false;
+// まだ背景の絵が無い視点（いまの色のもとで、手前の物がある視点）
+function plateTodo() {
+  if (!data || !data.hasTypes) return [];
+  return data.views.filter((v) => !v.onlyNew && !v.plates[colorOf(v, ui.colorSrc).key] && backOf(v, ui.colorSrc, false).stats.behind > 0);
+}
+const plateHave = () => (data ? data.views.filter((v) => v.plates[colorOf(v, ui.colorSrc).key]) : []);
+function showPlatePlan() {
+  if (!data || plateJob) return;
+  const todo = plateTodo(), have = plateHave();
+  $('plateBox').hidden = !data.hasTypes;
+  $('plateUse').disabled = !have.length;
+  $('platePlan').textContent = todo.length
+    ? `まだ描いてもらっていない視点：${todo.map((v) => v.def.name).join('、')}。押すと ChatGPT の利用枠を ${todo.length} 枚ぶん使います（1 視点 1 枚、1 枚 1〜2 分）。`
+    : have.length ? `いまの色のもとでは、全部の視点（${have.map((v) => v.def.name).join('、')}）に AI が描いた背景があります。押しても Codex は呼びません。` : '手前の物がある視点がありません。';
+}
+async function paintPlate(dryRun) {
+  if (plateJob || !app || !data) return;
+  const log = (t) => { $('plateLog').hidden = false; $('plateLog').textContent = t; };
+  const buttons = ['platePaint', 'plateDry', 'plateForget'];
+  plateJob = true; plateStop = false; for (const id of buttons) $(id).disabled = true; $('plateStopBtn').hidden = false;
+  let done = 0;
+  try {
+    for (const v of plateTodo()) {
+      if (plateStop) break;
+      const name = v.def.name, c = colorOf(v, ui.colorSrc), req = plateRequest(backOf(v, ui.colorSrc, false), c.px, v.W, v.H, PLATE_GROW);
+      const head = `視点 ${name}：手前の物とその縁 ${Math.round(req.holes * 100)}%。`;
+      log(head + (dryRun ? '文と絵を用意しています' : 'Codex が描いています（30 秒〜数分）'));
+      await api(`/api/paint-out/${name}_platein_${c.key}.png`, await pngBlob(c.px, v.W, v.H));
+      await api(`/api/paint-out/${name}_platemask_${c.key}.png`, await pngBlob(req.mask, v.W, v.H));
+      await api(`/api/paint-out/${name}_plateguide_${c.key}.png`, await pngBlob(req.guide, v.W, v.H));
+      await api('/api/paint/plate', { view: name, src: c.key, dryRun });
+      let st;
+      for (;;) { await sleep(1000); st = await (await fetch('/api/paint/status', { cache: 'no-store' })).json(); if (!st.running) break; if (plateStop) await api('/api/paint/stop'); else log(`${head}Codex が描いています（${st.seconds} 秒）`); }
+      if (plateStop) break;
+      if (st.code !== 0) throw new Error(st.log.trim().split('\n').slice(-4).join('\n') || 'Codex が失敗しました');
+      done++;
+      if (dryRun) continue;
+      v.plates[c.key] = { px: await loadImage(`/files/paint-out/${name}_plate_${c.key}.png`, v.W, v.H), mask: req.mask, version: ++plateVersion };
+    }
+    log(plateStop ? '止めました。' : !done ? '頼む視点がありません。' : dryRun ? `${done} 枚ぶんの文と絵を paint-out/work/ に用意しました（Codex は呼んでいません）。` : `${done} 枚描いてもらいました。背後の層の色に使っています。`);
+  } catch (e) { console.error(e); log('止まりました：' + e.message); }
+  finally {
+    plateJob = false; for (const id of buttons) $(id).disabled = false; $('plateStopBtn').hidden = true;
+    if (done && !dryRun) { ui.plate = true; $('plateUse').checked = true; rebuild(); } else showPlatePlan();
+  }
+}
+async function forgetPlate() {
+  if (plateJob || !data) return;
+  try {
+    for (const v of plateHave()) { const key = colorOf(v, ui.colorSrc).key; await api(`/api/paint-out/${v.def.name}_plate_${key}.png`, null, 'DELETE'); delete v.plates[key]; }
+  } catch (e) { $('plateLog').hidden = false; $('plateLog').textContent = e.message; return; }
+  $('plateLog').hidden = true; showPlatePlan();
+  rebuild();
+}
+
 // ---- 起動（描画方式・粒の細かさ・色のもとを替えるたびに作り直す） ----
 async function start(useGL) {
   if (starting) return; starting = true;
@@ -640,10 +785,7 @@ async function start(useGL) {
 
   const a = app = {
     renderer, scene, camera, controls,
-    attrA: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
-    attrB: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
-    attrC: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
-    attrD: new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4),
+    attrs: Array.from({ length: 6 }, () => new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4)), // 描画用の A〜F（sendSource）
     sortEye: new THREE.Vector3(Infinity, 0, 0), yaw: 0, pitch: 0,
   };
   a.sorter = makeSorter(a, n);
@@ -689,7 +831,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo();
+  showSharpInfo(); showLayerInfo();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -756,6 +898,7 @@ function applyUi() {
   $('skyBox').hidden = ui.skyMode !== 'dome';
   $('oSkyMargin').textContent = `${$('skyMargin').value} 画素`; $('oSkyMottle').textContent = `${Number($('skyMottle').value).toFixed(1)} 倍`;
   uView.value = ui.source === 'all' ? -1 : Number(ui.source);
+  uShape.value = ui.shape === 'surfel' ? 1 : 0;
   a.scene.background = new THREE.Color($('holes').checked ? BG_HOLES : BG);
   a.wire.visible = $('wire').checked; a.frusta.visible = $('frusta').checked;
   a.sprite.material = ui.order === 'opaque' ? a.mats.hard : a.mats.soft;
@@ -873,12 +1016,19 @@ function showSharpInfo() {
     if (!v.sharp) continue;
     const st = v.sharpStats, used = data.hasSharp && ui.placement !== 'depth';
     let t = `${v.def.name}：${(v.sharp.count / 10000).toFixed(1)} 万粒、奥行きの絵に合わせる倍率 ${v.sharpScale !== undefined ? v.sharpScale.toFixed(2) : '–'}`;
-    if (used && st) t += `。視点の外 ${pct(st.outside, st.count)}、手前の物の後ろ（描き足された所）${pct(st.behind, st.count)}、そのうち札を近くから取れなかった ${pct(st.guessed, st.count)}`;
+    if (used && st) t += `。視点の外 ${pct(st.outside, st.count)}、奥行きの絵と合わない ${pct(st.behind, st.count)}、そのうち札を近くから取れなかった ${pct(st.guessed, st.count)}、手前と奥をつなぐ膜 ${pct(st.sheets, st.count)}（「境界の粒を消す」で消える）`;
     lines.push(t);
   }
   $('sharpInfo').textContent = lines.join('\n');
 }
 const pct = (a, b) => `${b ? Math.round(a / b * 1000) / 10 : 0}%`;
+// 背後の層の結果
+function showLayerInfo() {
+  const lines = backInfo.views.map((b) => `${b.name}：${b.count < 1000 ? `${b.count} 粒` : `${(b.count / 10000).toFixed(1)} 万粒`}${b.ai ? '（色は AI が描いた背景）' : ''}${b.covered ? `（ほかの視点の絵に写っている ${(b.covered / 10000).toFixed(1)} 万粒は置かない）` : ''}`);
+  $('layerInfo').textContent = !data.hasTypes ? '種類の札（X_type.png）が無いので、背後の層は作れません。' : !ui.back ? '' : lines.length ? lines.join('\n') : '背後の層を作れる視点がありません。';
+  $('layerInfo').classList.toggle('warn', !data.hasTypes);
+  showPlatePlan();
+}
 
 // ---- 操作 ----
 function press(el, v) { for (const x of el.children) x.setAttribute('aria-pressed', x.dataset.v === String(v) ? 'true' : 'false'); }
@@ -907,6 +1057,10 @@ function setupViewButtons() {
   data.views.forEach((v, i) => {
     if (!v.sharp) return;
     const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(sharpViewIndex(i)); b.textContent = `${v.def.name}（SHARP）だけ`; b.setAttribute('aria-pressed', 'false'); src.append(b);
+  });
+  if (data.hasTypes) data.views.forEach((v, i) => { // 背後の層の粒だけを見るボタン
+    if (v.onlyNew) return;
+    const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(backViewIndex(i)); b.textContent = `${v.def.name}（背後の層）だけ`; b.setAttribute('aria-pressed', 'false'); src.append(b);
   });
   for (const b of $('placement').children) b.disabled = b.dataset.v !== 'depth' && !data.hasSharp;
   if (!data.hasSharp) ui.placement = 'depth';
@@ -981,6 +1135,17 @@ seg('mode', setMode);
 seg('stride', (v) => { ui.stride = Number(v); rebuild(); });
 seg('placement', (v) => { ui.placement = v; rebuild(); });
 $('sharpFit').addEventListener('change', () => { ui.sharpFit = $('sharpFit').checked; rebuild(); });
+// 角度を変えたときの崩れを減らす設定。形の切り替えは描き方だけ。ほかは粒を作り直す（つまみは離したときに）
+seg('shape', (v) => { ui.shape = v; applyUi(); });
+function showLayerUi() { $('oStretch').textContent = `${$('stretch').value} 倍まで`; $('oHalo').textContent = Number($('halo').value) ? `${$('halo').value} 画素` : '塗り直さない'; }
+for (const id of ['stretch', 'halo']) { $(id).addEventListener('input', showLayerUi); $(id).addEventListener('change', () => { ui[id] = Number($(id).value); rebuild(); }); }
+$('back').addEventListener('change', () => { ui.back = $('back').checked; rebuild(); });
+$('plateUse').addEventListener('change', () => { ui.plate = $('plateUse').checked; rebuild(); });
+$('platePaint').addEventListener('click', () => paintPlate(false));
+$('plateDry').addEventListener('click', () => paintPlate(true));
+$('plateStopBtn').addEventListener('click', () => { plateStop = true; });
+$('plateForget').addEventListener('click', forgetPlate);
+showLayerUi();
 seg('order', (v) => {
   ui.order = v; if (!app) return;
   requestSort(); applyUi();

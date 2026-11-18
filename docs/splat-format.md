@@ -17,18 +17,20 @@
 | `sunVis0` | uint8 | 絵を描いたときの日なた（255）・影（0） | `X_sun.png` |
 | `sunNow` | uint8 | いまの太陽での日なた・影（確かめ用） | ふだんは描くときにシェーダーが計算するので使わない。以前の CPU の計算と見比べるときだけ埋める（`cpuSun()`） |
 | `sway` | uint8 | 揺れやすさ | 種類の一覧の `sway`（いまは種類ごとに一律） |
-| `view` | uint8 | どの視点（や穴埋めの回）から来たか | 置くときに記録 |
+| `view` | uint8 | どの視点（や穴埋めの回）から来たか | 置くときに記録。奥行きの絵からの粒は視点の番号、SHARP の粒は「視点の数 + 番号」、背後の層は「視点の数 × 2 + 番号」 |
 | `edge` | uint8 | 奥行きの境界からの距離（画素） | `X_depth.png` |
 | `labelEdge` | uint8 | 種類・物体の境目からの距離（画素） | `X_type.png` と `X_object.png` |
 | `lift` | float32 | 影を調べるときに面から浮かせる量（m） | 奥行きの刻みの粗さ |
 | `opacity` | uint8 | 不透明さ（0〜255） | 奥行きから置いた粒は 255。SHARP の粒は SHARP の値（`sharp/README.md`） |
+| `cov` | float32 × 6 | 粒の形（共分散 xx, xy, xz, yy, yz, zz。m²） | 面の向きと元の視点からの向きで決めた「面に沿う楕円」。SHARP の粒は SHARP の楕円体。空は丸（[angle-artifacts.md](angle-artifacts.md)） |
+| `layer` | uint8 | 層。0 = 絵に見えていた面、1 = 背後の層 | 置くときに記録。背後の層は、手前の物の後ろに背景を伸ばして作った粒 |
 | `skyFrom` | uint8 | 天球の粒の出どころ。0 = 天球の粒ではない、1 = 絵、2 = AI が描いた空、3 = ツール内で埋めた空 | 空の地図（`studio/skydome.js`） |
 
 空の粒は、ほかの粒と別に持つ（天球）。位置は「向き × 半径 3000 m」で、描くときはいつもカメラを中心に置く。列は上と同じで、`type` は 0（空）、`object` は 0、`view` は絵から来た粒だけが持つ。
 
 ## 一覧で持つもの
 
-- 種類の一覧：`shared/labels.js` の `TYPES`（番号、名前、色分けの色、揺れやすさ `sway`、光の受け方 `light`、雪が積もるか、水面か、当たり判定 `solid`、足跡が付くか `tracks`）。`cameras.json` の `labels.types` にも書き出す。
+- 種類の一覧：`shared/labels.js` の `TYPES`（番号、名前、色分けの色、揺れやすさ `sway`、光の受け方 `light`、雪が積もるか、水面か、当たり判定 `solid`、足跡が付くか `tracks`、手前の物か背景か `layer`）。`cameras.json` の `labels.types` にも書き出す。
 - 物体の一覧：`cameras.json` の `labels.objects`（番号、名前、種類、プレビズでの色、大きさ）。
 - 絵を描いたときの光：`cameras.json` の `paint_light`（太陽の方向と、下絵 2 枚の光の強さ）。
 - 視点の一覧：`cameras.json` の `views`。

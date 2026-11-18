@@ -15,6 +15,8 @@
 //     穴をマゼンタで塗った絵を見せて「マゼンタの所だけ描いて」と頼み、できた絵の穴の所だけを元の絵に貼る。
 //     穴の外は 1 画素も変えない。
 //     --sky を付けると、空だけの絵（空の天球の一部）として頼む：地面や物を描かせない。--style-ref <絵> は画風の見本（同じ場面の絵）。
+//     --plate を付けると、手前の物を消した背景の絵（背後の層の色）として頼む：穴は手前の物があった所で、その後ろの背景だけを描かせる。
+//       --guide <絵> は、穴をツール内の計算で埋めた絵（どこに何の背景が来るかの目安）。
 //
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
 // --dry-run は Codex を呼ばず、作業フォルダに送る文（prompt.txt）と条件の絵だけを作る。利用枠は減らない。
@@ -106,6 +108,19 @@ function skyInstructions({ style, hasStyleRef, lightLines = [] }) {
   ].filter(Boolean).join('\n');
 }
 
+// 手前の物を消した背景の絵（背後の層の色）を描いてもらうときの文。穴は、手前の物（人・幹・柱など）があった所。
+function plateInstructions({ hasGuide }) {
+  return [
+    'references/holes.png is a picture of a scene from which the foreground objects (for example people, animals, tree trunks, posts, stone pillars or arches) have been cut out. The cut-out areas are bright magenta (#FF00FF).',
+    'Paint ONLY inside the magenta areas. Paint what lies BEHIND the removed objects: continue the surrounding background (ground, grass, water, distant trees, hills, sky) straight through every hole, as if the objects had never been there.',
+    'The result must be an EMPTY background plate. Do NOT paint any person, animal, tree trunk, pillar, arch, wall, post, building or any other object inside the holes, and do not redraw the outline, silhouette or shadow shape of what was removed.',
+    'Keep horizons, shorelines and the edges between ground, water, far trees and sky continuous across the holes.',
+    hasGuide ? 'guide.png shows the same picture with the holes filled by a blurry automatic guess. Use it only as a rough guide for which kind of background (ground / water / far trees / sky) and which overall colour belongs where; paint real surface texture and brush strokes instead of its blur and smears.' : '',
+    'Match the surrounding picture exactly: the same brushwork or dot texture, palette, light and level of detail, so that the filled areas cannot be told apart from the rest.',
+    'Everything outside the magenta areas must stay exactly as it is: same composition, same position of everything. Do not crop, zoom or shift the image. No magenta may remain in the result.',
+  ].filter(Boolean).join('\n');
+}
+
 async function runViews(o) {
   if (!o.in || !o.out) throw new Error('使い方：node paint.mjs views --in <プレビズの書き出し> --out <出す所> [--views A,B]');
   const cams = JSON.parse(fs.readFileSync(path.join(o.in, 'cameras.json'), 'utf8'));
@@ -165,14 +180,16 @@ async function runFill(o) {
   fs.mkdirSync(workDir, { recursive: true });
   const holesFile = path.join(workDir, 'holes-input.png');
   writePng(holesFile, paintHoles(original, mask));
-  const references = [{ name: 'holes.png', file: holesFile, note: 'painting with magenta holes to fill' }];
+  const references = [{ name: 'holes.png', file: holesFile, note: o.plate ? 'picture with the foreground objects cut out (magenta holes to fill with background)' : 'painting with magenta holes to fill' }];
   const sky = !!o.sky, hasStyleRef = sky && typeof o['style-ref'] === 'string';
   if (sky) references.push({ name: 'guide.png', file: o.image, note: 'the same image with the holes filled by a blurry automatic guess (rough colour guide only)' });
   if (hasStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: 'painting of the scene this sky belongs to (style and sky colours to match)' });
-  const hasPreviz = !sky && typeof o.previz === 'string';
+  const plate = !sky && !!o.plate, hasGuide = plate && typeof o.guide === 'string';
+  if (hasGuide) references.push({ name: 'guide.png', file: o.guide, note: 'the same picture with the holes filled by a blurry automatic guess (rough guide only)' });
+  const hasPreviz = !sky && !plate && typeof o.previz === 'string';
   if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
   if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
-  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
+  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines }) });
   console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}`);
   const file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (!file) { console.log(`  → ${workDir}`); return; }

@@ -82,4 +82,23 @@ for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
 assert.ok(outsideSame, '穴の外が変わった');
 assert.ok(inside > 19 * 29 * 0.75, `穴が埋まっていない（${inside}）`);
 console.log('ok fill：穴の所だけ置き換え、穴の外は元のまま');
+
+// fill --plate：手前の物を消した背景の絵。文は「物の後ろの背景だけ」を頼み、目安の絵（guide.png）を見せる。穴の外は元のまま
+const plate = path.join(tmp, 'fill', 'A_plate.png');
+run('fill', '--plate', '--image', path.join(inDir, 'A_color.png'), '--mask', path.join(tmp, 'mask.png'), '--guide', path.join(inDir, 'A_color.png'), '--out', plate, '--codex', fake, '--grow', '0');
+const plateWork = path.join(tmp, 'fill', 'work', fs.readdirSync(path.join(tmp, 'fill', 'work')).sort().pop());
+const platePrompt = fs.readFileSync(path.join(plateWork, 'fake-saw-prompt.txt'), 'utf8');
+assert.match(platePrompt, /EMPTY background plate/);
+assert.match(platePrompt, /guide\.png/);
+assert.doesNotMatch(platePrompt, /previz\.png/);
+assert.ok(fs.existsSync(path.join(plateWork, 'references', 'guide.png')), 'guide.png が渡っていない');
+const pl = readPng(plate);
+let plateInside = 0, plateOutsideSame = true;
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = (y * W + x) * 4;
+  if (x > 20 && x < 40 && y > 30 && y < 60) { if (pl.data[i + 1] > pl.data[i] + 60) plateInside++; }
+  else if (pl.data[i] !== img.data[i] || pl.data[i + 1] !== img.data[i + 1] || pl.data[i + 2] !== img.data[i + 2]) plateOutsideSame = false;
+}
+assert.ok(plateOutsideSame && plateInside > 19 * 29 * 0.75, '背景の絵の貼り方がおかしい');
+console.log('ok fill --plate：物の後ろの背景だけを頼み、穴の所だけ置き換える');
 fs.rmSync(tmp, { recursive: true, force: true });

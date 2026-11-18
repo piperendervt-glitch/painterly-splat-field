@@ -7,6 +7,7 @@
 //   POST /api/paint-out/<名>        「視点を足す」画面からの保存（写した絵・穴の印）
 //   POST /api/paint/fill            paint/paint.mjs fill を起動（{ view, style, dryRun, light }）。足した視点の穴だけ描く
 //   POST /api/paint/sky             paint/paint.mjs fill --sky を起動（{ face, sfx, light, styleRef, dryRun }）。空の天球の穴だけ描く
+//   POST /api/paint/plate           paint/paint.mjs fill --plate を起動（{ view, src, dryRun }）。手前の物を消した背景の絵（背後の層の色）を描く
 //   POST /api/view/forget           足した視点の絵を消す（{ view }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
@@ -71,6 +72,7 @@ function state() {
     painted_lit: stat(path.join(DIRS['paint-out'], `${v.name}_painted_lit.png`)),
     overlay_lit: stat(path.join(DIRS['paint-out'], `${v.name}_overlay_lit.png`)),
     sharp: stat(path.join(DIRS['paint-out'], `${v.name}_sharp.ply`)), // SHARP の粒（sharp/psf_sharp.py）
+    plates: PLATE_SRC.filter((k) => { const f = plateFiles(v.name, k); return fs.existsSync(f.out) && fs.existsSync(f.mask); }), // AI が描いた、手前の物を消した背景の絵（色のもとごと）
   }));
   return out;
 }
@@ -122,6 +124,18 @@ function runSky({ face, sfx, light, styleRef, style, dryRun }) {
   const ref = typeof styleRef === 'string' && /^[A-Za-z0-9]+_painted(_flat|_lit)?$/.test(styleRef) ? path.join(DIRS['paint-out'], `${styleRef}.png`) : null;
   if (ref && fs.existsSync(ref)) args.push('--style-ref', ref); // 画風の見本にする、同じ場面の絵
   if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
+  if (dryRun) args.push('--dry-run');
+  startJob(args, dryRun);
+}
+// 手前の物を消した背景の絵（背後の層の色）を描く。元の絵（…_platein_…）、穴の印（…_platemask_…）、計算で埋めた目安（…_plateguide_…）は「粒の空間」の画面が先に保存している。
+const PLATE_SRC = ['painted', 'painted_flat', 'painted_lit', 'previz', 'flat', 'lit']; // 色のもと（studio/splat.js の SOURCES の名前）
+function plateFiles(view, src) {
+  const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}_${src}.png`);
+  return { image: out('platein'), mask: out('platemask'), guide: out('plateguide'), out: out('plate') };
+}
+function runPlate({ view, src, dryRun }) {
+  const f = plateFiles(view, src);
+  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--plate', '--image', f.image, '--mask', f.mask, '--guide', f.guide, '--out', f.out, '--grow', '0'];
   if (dryRun) args.push('--dry-run');
   startJob(args, dryRun);
 }
@@ -187,9 +201,19 @@ export async function handle(req, res, next) {
       runSky(body);
       return json(res, 200, { ok: true });
     }
+    if (p === '/api/paint/plate' && req.method === 'POST') {
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[A-Za-z0-9]+$/.test(body.view || '') || !PLATE_SRC.includes(body.src)) return json(res, 400, { error: '視点か色のもとの名前が使えません' });
+      const need = plateFiles(body.view, body.src);
+      for (const f of [need.image, need.mask, need.guide]) if (!fs.existsSync(f)) return json(res, 400, { error: `${path.basename(f)} がありません` });
+      runPlate(body);
+      return json(res, 200, { ok: true });
+    }
     if (p.startsWith('/api/paint-out/') && req.method === 'DELETE') { // 埋めた絵を消す（写し直す前）
       const name = p.slice('/api/paint-out/'.length);
       if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
+      if (/^[A-Za-z0-9]+_plate_[a-z_]+\.png$/.test(name)) { for (const kind of ['plate', 'platemask', 'platein', 'plateguide']) fs.rmSync(path.join(DIRS['paint-out'], name.replace('_plate_', `_${kind}_`)), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた背景の絵（と、頼むときに作った絵）
       if (/^sky_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
       if (!/^[A-Za-z0-9]+_painted(_flat|_lit)?\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
       if (!fs.existsSync(path.join(DIRS['paint-out'], name.replace('_painted', '_reproj')))) return json(res, 400, { error: '足した視点の絵だけ消せます' }); // もとの視点の絵は消さない
