@@ -12,6 +12,7 @@ import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../
 import { createWalk } from './walk.js';
 import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
+import { WORLD_PROPS, worldKind, worldTransform, fitWorldScale, splatsFromWorld } from './worldimport.js';
 import { layoutFrame, worldShapes, shapeEdges, project as projectTo, rasterLayout, compareLayout, briefText } from './layoutai.js';
 import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, sampleMap, skyDistance, skyNoise, withAi } from './skydome.js';
 
@@ -150,7 +151,7 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, painting: views.some((v) => v.painting) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, groundAiFiles: state.ground_ai || {}, groundAi: {}, layoutAiFile: !!state.layout_ai, worldFile: !!state.world, painting: views.some((v) => v.painting) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -367,6 +368,7 @@ function buildCloud() {
   });
   if (placement !== 'depth') parts.push(...sharpParts(withBack && placement === 'sharp'));
   const around = surroundSplats(); if (around) parts.push(around);
+  const outer = worldSplats(); if (outer) parts.push(outer);
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
   for (const p of parts) appendSplats(c, p.columns, p.count);
   return c;
@@ -436,7 +438,8 @@ const DISPLAY = {
   sunNow: painted,                                                                                    // いまの日なた（シェーダーが灰色にする）
   layer: (c, i, out) => {                                                                             // 層：絵に見えていた面は灰色、背後の層は黄
     const l = 0.15 + 0.85 * luma(c, i);
-    if (c.layer[i] === 2) { out[0] = l * 0.1; out[1] = l * 0.8; out[2] = l; }                              // 周囲の地面は水色
+    if (c.layer[i] === 3) { out[0] = l; out[1] = l * 0.3; out[2] = l * 0.8; }                              // 取り込んだ世界は桃色
+    else if (c.layer[i] === 2) { out[0] = l * 0.1; out[1] = l * 0.8; out[2] = l; }                         // 周囲の地面は水色
     else if (c.layer[i]) { out[0] = l; out[1] = l * 0.8; out[2] = l * 0.1; } else gray(out, l * 0.6);
   },
   labelEdge: (c, i, out) => {                                                                         // 札の境目の近く
@@ -932,6 +935,48 @@ async function forgetGround() {
   rebuild();
 }
 
+// ---- 外で作った世界の取り込み（studio/worldimport.js） ----
+// Marble や HunyuanWorld など、外の道具で作った世界の .ply を、位置と大きさを合わせてこの場面に重ねる。見比べ用。
+const WORLD_DEFAULT = { show: true, frame: 'cv', scale: 1, yaw: 0, x: 0, y: 0, z: 0, point: 0.05 };
+const world = { ply: null, name: '', kind: '', tried: false, count: 0, bounds: null, error: '' };
+const worldViewIndex = () => data.views.length * 3 + 1;
+ui.world = { ...WORLD_DEFAULT };
+try { Object.assign(ui.world, JSON.parse(localStorage.getItem('psf-world') || '{}')); } catch { /* 無ければ最初の値 */ }
+const saveWorld = () => { try { localStorage.setItem('psf-world', JSON.stringify(ui.world)); } catch { /* 保存できなくても動く */ } };
+function setWorldPly(buffer, name) {
+  const ply = parsePly(buffer, WORLD_PROPS);
+  world.kind = worldKind(ply); world.ply = ply; world.name = name; world.error = '';
+}
+async function loadWorldFile() {
+  if (world.tried || !data.worldFile) return;
+  world.tried = true;
+  try { const res = await fetch('/files/paint-out/world.ply', { cache: 'no-store' }); if (res.ok) setWorldPly(await res.arrayBuffer(), 'paint-out/world.ply'); }
+  catch (e) { console.error(e); world.error = e.message; }
+}
+// 置き方：ずらす量は、絵の視点から見た 右 / 上 / 手前（m）
+function worldPlacement() {
+  const v = centerView(), w = ui.world, f = layoutFrame(v.c2w, 0);
+  return worldTransform({ frame: w.frame, c2w: v.c2w, scale: w.scale, yawDeg: w.yaw, offset: [f.right[0] * w.x - f.fwd[0] * w.z, w.y, f.right[2] * w.x - f.fwd[2] * w.z] });
+}
+function worldSplats() {
+  if (!world.ply || !ui.world.show || !data) return null;
+  const out = splatsFromWorld(world.ply, worldPlacement(), worldViewIndex(), { keep: Math.max(1, (ui.stride / 2) ** 2), pointSize: ui.world.point, edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+  world.count = out.count; world.bounds = out.bounds;
+  return out;
+}
+function showWorld() {
+  const w = ui.world, has = !!world.ply, r = (x) => (Math.abs(x) >= 100 ? Math.round(x) : Math.round(x * 10) / 10);
+  $('worldBox').hidden = !has; $('worldPointBox').hidden = world.kind !== 'points';
+  $('worldShow').checked = w.show; press($('worldFrame'), w.frame);
+  $('worldScale').value = String(Math.log10(w.scale)); $('oWorldScale').textContent = `${w.scale >= 10 ? w.scale.toFixed(1) : w.scale.toFixed(3)} 倍`;
+  $('worldYaw').value = String(w.yaw); $('oWorldYaw').textContent = `${w.yaw}°`;
+  $('worldX').value = String(w.x); $('worldY').value = String(w.y); $('worldZ').value = String(w.z); $('oWorldOffset').textContent = `${r(w.x)} / ${r(w.y)} / ${r(w.z)} m`;
+  $('worldPoint').value = String(w.point); $('oWorldPoint').textContent = `${Math.round(w.point * 1000) / 10} cm`;
+  const b = world.bounds;
+  $('worldInfo').textContent = world.error ? `読めませんでした：${world.error}` : !has ? 'まだ読み込んでいません。'
+    : `${world.name}：${world.kind === 'gaussians' ? '3D ガウシアン' : '色つきの点'} ${world.ply.count.toLocaleString()} 個${w.show && b ? `（いま ${world.count.toLocaleString()} 粒。広がり 横 ${r(b.max[0] - b.min[0])} × 高さ ${r(b.max[1] - b.min[1])} × 奥 ${r(b.max[2] - b.min[2])} m）` : ''}`;
+}
+
 // ---- AI に形の配置を書かせる（Codex。絵は作らず、文だけ。studio/layoutai.js） ----
 // 絵・奥行きの絵・カメラと奥行きの表を見せて、箱と円柱の一覧（layout_ai.json）を書いてもらう。
 // 「見比べて直す」回は、今の配置を絵に線で重ねた絵と、奥行き・物の輪郭との見比べの文を見せて、書き直してもらう。いちばん合った回の配置を残す。
@@ -1236,6 +1281,7 @@ async function start(useGL) {
 
   if (ui.surround) await groundAiLayer(); // 周囲の地面：AI が描いた層があれば先に読む
   await loadLayoutAi();                    // AI が書いた形の配置があれば読む
+  await loadWorldFile();                   // paint-out/world.ply（外で作った世界）があれば読む
   cloud = buildCloud();
   const n = cloud.n;
   const scene = new THREE.Scene();
@@ -1293,7 +1339,7 @@ async function start(useGL) {
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
   $('labelNote').hidden = data.hasLabels || data.hasTypes;
-  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi();
+  showSharpInfo(); showLayerInfo(); showSurround(); showLayoutAi(); showWorld();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -1506,6 +1552,7 @@ function setupViewButtons() {
     const j = document.createElement('button'); j.type = 'button'; j.className = 'plain'; j.dataset.v = String(i); j.textContent = `カメラ${v.def.name}`; jumpEl.append(j);
   });
   { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(surroundViewIndex()); b.textContent = '（周囲の地面）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
+  { const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(worldViewIndex()); b.textContent = '（取り込んだ世界）だけ'; b.setAttribute('aria-pressed', 'false'); src.append(b); }
   ui.source = 'all'; press(src, 'all');
   // 色のもと：どの視点にも無い絵は選べなくする。いま選んでいる絵が無くなっていたら、ある絵へ移す。
   const has = (key) => data.views.some((v) => v.colors[key]);
@@ -1616,6 +1663,25 @@ $('groundDry').addEventListener('click', () => paintGround(true));
 $('groundStopBtn').addEventListener('click', () => { groundStop = true; });
 $('groundForget').addEventListener('click', forgetGround);
 $('estimateExport').addEventListener('click', exportEstimate);
+$('worldFile').addEventListener('change', async () => {
+  const file = $('worldFile').files[0]; if (!file) return;
+  $('worldInfo').textContent = '読み込んでいます…';
+  try { setWorldPly(await file.arrayBuffer(), file.name); ui.world.show = true; rebuild(); }
+  catch (e) { console.error(e); world.ply = null; world.error = e.message; showWorld(); }
+});
+$('worldShow').addEventListener('change', () => { ui.world.show = $('worldShow').checked; saveWorld(); rebuild(); });
+seg('worldFrame', (v) => { ui.world.frame = v; saveWorld(); rebuild(); });
+for (const [id, set] of [['worldScale', (x) => { ui.world.scale = 10 ** x; }], ['worldYaw', (x) => { ui.world.yaw = x; }], ['worldX', (x) => { ui.world.x = x; }], ['worldY', (x) => { ui.world.y = x; }], ['worldZ', (x) => { ui.world.z = x; }], ['worldPoint', (x) => { ui.world.point = x; }]]) {
+  $(id).addEventListener('input', () => { set(Number($(id).value)); showWorld(); });
+  $(id).addEventListener('change', () => { set(Number($(id).value)); saveWorld(); rebuild(); });
+}
+$('worldFit').addEventListener('click', () => {
+  if (!world.ply || !data) return;
+  const v = centerView(), k = fitWorldScale(world.ply, worldPlacement(), { W: v.W, H: v.H, z: v.z, w2c: v.w2c, intr: v.def.intrinsics });
+  ui.world.scale = Math.max(0.001, Math.min(1000, ui.world.scale * k)); saveWorld(); rebuild();
+});
+$('worldReset').addEventListener('click', () => { Object.assign(ui.world, WORLD_DEFAULT); saveWorld(); rebuild(); });
+$('worldForget').addEventListener('click', () => { world.ply = null; world.name = ''; world.kind = ''; world.bounds = null; world.tried = true; $('worldFile').value = ''; rebuild(); });
 $('layoutRun').addEventListener('click', () => runLayoutAi({ fresh: true, fixes: Number($('layoutFixes').value), dryRun: false }));
 $('layoutMore').addEventListener('click', () => runLayoutAi({ fresh: false, fixes: 1, dryRun: false }));
 $('layoutDry').addEventListener('click', () => runLayoutAi({ fresh: !layoutAi.layout, fixes: layoutAi.layout ? 1 : 0, dryRun: true }));

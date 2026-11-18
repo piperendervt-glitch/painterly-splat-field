@@ -54,6 +54,7 @@ function state() {
   try { cams = JSON.parse(fs.readFileSync(camFile, 'utf8')); } catch { return out; }
   out.previz = stat(camFile);
   out.ground_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`ground_ai${sfx}`, stat(path.join(DIRS['paint-out'], `ground_ai${sfx}.png`))])); // AI が描いた周囲の地面
+  out.world = stat(path.join(DIRS['paint-out'], 'world.ply')); // 外で作った世界の粒（取り込み用。studio/worldimport.js）
   out.layout_ai = stat(path.join(DIRS['paint-out'], 'layout_ai.json')); // AI が書いた形の配置
   out.sky_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`sky_ai${sfx}`, stat(path.join(DIRS['paint-out'], `sky_ai${sfx}.png`))])); // AI が描いた空（天球の層）
   out.views = (cams.views || []).map((v) => ({

@@ -19,6 +19,8 @@ scenes/*/paint-out/*_plate*.png
 scenes/*/paint-out/sky_*.png
 scenes/*/paint-out/ground_*.png
 scenes/*/paint-out/layout_*
+# 外の道具で作った世界の粒（取り込み用。大きい）
+world.ply
 # 絵から推定したプレビズのモデル（「粒の空間」の「推定した形を書き出す」。作り直せる）
 estimated_model.obj
 estimated_model.json
