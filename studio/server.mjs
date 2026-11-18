@@ -23,8 +23,8 @@ const SCENE = /^[A-Za-z0-9_-]+$/.test(process.env.PSF_SCENE || '') ? process.env
 const DIRS = SCENE
   ? { 'previz-export': path.join(ROOT, 'scenes', SCENE, 'previz-export'), 'paint-out': path.join(ROOT, 'scenes', SCENE, 'paint-out') }
   : { 'previz-export': path.join(ROOT, 'previz-export'), 'paint-out': path.join(ROOT, 'paint', 'out') };
-const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json|ply)$/;
-const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.ply': 'application/octet-stream' };
+const SAFE_NAME = /^[A-Za-z0-9_-]+\.(png|json|ply|obj)$/;
+const TYPES = { '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.ply': 'application/octet-stream', '.obj': 'text/plain; charset=utf-8' };
 const WIN = process.platform === 'win32';
 
 const job = { child: null, running: false, log: '', code: null, startedAt: 0, dryRun: false };

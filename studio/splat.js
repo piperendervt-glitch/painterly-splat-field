@@ -7,9 +7,10 @@ import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
 import { TYPES, SKY_TYPE, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
 import { parsePly, checkSharp, sharpScale, splatsFromSharp, sharpGrid, sharpBack, sharpBackSplats } from './sharp.js';
-import { SIGMA_K, BACK_RING, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate, refineBackDepth, gridToPixels } from './layers.js';
+import { SIGMA_K, BACK_RING, BACK_BEHIND, surfelCov, roundCov, viewNormal, frontTable, backLayer, backSplats, plateRequest, withPlate, refineBackDepth, gridToPixels } from './layers.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
+import { backgroundMesh, objectBoxes, toObj } from './estimate.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
 import { AI_W, AI_H, FACE, buildSkyMap, colorDome, domeDirections, faceCamera, faceHoles, fillSky, pasteFace, renderFace, skyDistance, withAi } from './skydome.js';
 
@@ -40,9 +41,10 @@ const SOURCES = {
 // sfx は、AI が描いた空の絵（paint/out/sky_ai<sfx>.png）の名前の後ろ。paint は、空を描いてもらうときの光の描かせ方（paint.mjs の --light）。
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, backDepth: 'plate', skyMode: 'dome', skyStep: 0.2 };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true, shape: 'surfel', stretch: 16, back: true, halo: 3, plate: true, backDepth: 'plate', walkShape: 'auto', skyMode: 'dome', skyStep: 0.2 };
 // 角度を変えたときの崩れを減らす設定（計算は studio/layers.js）：shape = 粒の形（round 丸 / surfel 面に沿う楕円）、stretch = 面に沿って伸ばす上限（倍）、
 // back = 手前の物の後ろに背景の層を作る、halo = 物のまわり何画素を背景の色で塗り直すか、plate = 背後の層の色に、AI が描いた背景の絵（あれば）を使う、
+// walkShape = 歩くときの当たりの形（auto = プレビズのある場面はプレビズ、絵から作った場面は推定 / previz / estimate）
 // backDepth = 背後の層の位置（calc 計算で延ばす / plate AI が描いた背景の絵を SHARP に通した奥行き。あれば）
 // 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
 
@@ -137,7 +139,7 @@ async function loadData() {
       if ((st.plate_sharp || []).includes(key)) plates[key].sharp = await loadPlateSharp(v.name, key); // その絵を SHARP に通した粒（奥行きに使う）
     }
     views.push({
-      plates,
+      plates, painting,
       def: v, W, H, z, edge: edgeDistance(z, W, H), near, far, isSky, skyDist: skyDistance(isSky, W, H),
       colors, hasTypes, hasLabels, type, object, normalPx: hasLabels ? lab.normal : null, sunPx: hasLabels ? lab.sun : null,
       labelEdge: hasTypes ? labelEdgeDistance(type, object, W, H) : null, sharp,
@@ -146,7 +148,7 @@ async function loadData() {
       c2w: v.extrinsics.camera_to_world.flat(), w2c: v.extrinsics.world_to_camera.flat(), // 行ごとに並んだ 4x4（studio/layers.js 用）
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0 };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp), skyAiFiles: state.sky_ai || {}, skyAi: {}, skyAiVersion: 0, painting: views.some((v) => v.painting) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -734,6 +736,64 @@ async function forgetSky() {
   await refreshSky(); showSkyPlan();
 }
 
+// ---- 絵と奥行きから推定したプレビズのモデル（studio/estimate.js） ----
+// 背景の面（手前の物を消した後ろの奥行きのメッシュ）と、手前の物を囲む箱。歩くときの当たりの形と、OBJ の書き出しに使う。
+const GROUND_TYPE = typeByKey('grass').id;
+const estimateOn = () => (ui.walkShape === 'auto' ? !!(data && data.painting) : ui.walkShape === 'estimate');
+function estimateModel() {
+  const objName = new Map(((data.cams.labels && data.cams.labels.objects) || []).map((o) => [o.id, o.name]));
+  const grounds = [], seen = [];
+  for (const v of data.views) {
+    if (v.onlyNew) continue; // 足した視点（穴の所だけの絵）は使わない
+    const n = v.W * v.H, bz = new Float32Array(n), fill = new Uint8Array(n), bt = new Uint8Array(n).fill(GROUND_TYPE);
+    const back = v.hasTypes ? backOf(v, ui.colorSrc) : null;
+    for (let i = 0; i < n; i++) {
+      if (!back) { bz[i] = v.z[i]; continue; }
+      if (back.kind[i] === BACK_BEHIND) { bz[i] = back.z2[i]; const s = back.from[i], t = s >= 0 ? v.type[s] : 0; if (t && !FRONT[t]) bt[i] = t; } // 物の後ろ：背後の層の奥行き
+      else if (back.thing[i]) fill[i] = 1;                                                                                               // 物の足もとなど：まわりから埋める
+      else { bz[i] = v.z[i]; bt[i] = v.type[i] || GROUND_TYPE; }
+    }
+    grounds.push({ name: `background_${v.def.name}`, mesh: backgroundMesh({ W: v.W, H: v.H, bz, fill, btype: bt, c2w: v.c2w, intr: v.def.intrinsics }) });
+    if (v.hasTypes) seen.push({ W: v.W, H: v.H, z: v.z, type: v.type, object: v.object, c2w: v.c2w, intr: v.def.intrinsics });
+  }
+  const boxes = objectBoxes(seen, { front: FRONT }).map((b) => ({ ...b, name: `${objName.get(b.objectId) || (TYPE_BY_ID.get(b.typeId) || {}).key || 'object'}_${b.objectId}` }));
+  // 土台の平面：歩ける面の高さのまん中。推定した面の外へ出たときや、面に穴がある所で、下へ落ちないようにする
+  const ys = [];
+  for (const g of grounds) { const { positions, indices, triType } = g.mesh; for (let k = 0; k < triType.length; k += 7) if ((TYPE_BY_ID.get(triType[k]) || {}).solid === 'walk') ys.push(positions[indices[k * 3] * 3 + 1]); }
+  ys.sort((p, q) => p - q);
+  return { grounds, boxes, baseY: ys.length ? ys[ys.length >> 1] : 0 };
+}
+// 推定したモデルを、当たり判定に渡せる形（shared/collision.js の solids）にする
+function estimateSolids(model) {
+  const solids = [];
+  for (const g of model.grounds) {
+    const { positions, indices, triType } = g.mesh;
+    for (const t of new Set(triType)) { // 種類ごとに 1 つのメッシュ
+      const idx = []; for (let k = 0; k < triType.length; k++) if (triType[k] === t) idx.push(indices[k * 3], indices[k * 3 + 1], indices[k * 3 + 2]);
+      const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(positions, 3)); geo.setIndex(idx);
+      solids.push({ mesh: new THREE.Mesh(geo), typeId: t, objectId: 0 });
+    }
+  }
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200)); base.rotation.x = -Math.PI / 2; base.position.y = model.baseY - 0.02;
+  solids.push({ mesh: base, typeId: GROUND_TYPE, objectId: 0 });
+  for (const b of model.boxes) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(b.half[0] * 2, b.half[1] * 2, b.half[2] * 2));
+    mesh.position.fromArray(b.center); mesh.rotation.y = b.yaw;
+    solids.push({ mesh, typeId: b.typeId, objectId: b.objectId });
+  }
+  return solids;
+}
+async function exportEstimate() {
+  if (!data) return;
+  const note = (t) => { $('estimateNote').textContent = t; };
+  try {
+    const model = estimateModel(), obj = toObj(model, (t) => (TYPE_BY_ID.get(t) || {}).key || `type${t}`);
+    await api('/api/previz-export/estimated_model.obj', new Blob([obj], { type: 'text/plain' }));
+    await api('/api/previz-export/estimated_model.json', new Blob([JSON.stringify({ units: 'metres, +Y up', base_y: model.baseY, boxes: model.boxes.map((b) => ({ name: b.name, part: b.part, object: b.objectId, type: (TYPE_BY_ID.get(b.typeId) || {}).key, center: b.center, half: b.half, yaw: b.yaw })) }, null, 1)], { type: 'application/json' }));
+    note(`previz-export に estimated_model.obj（背景の面 ${model.grounds.reduce((s, g) => s + g.mesh.triType.length, 0)} 三角形、物体 ${new Set(model.boxes.map((b) => b.name)).size} 個を箱 ${model.boxes.length} 個で）と estimated_model.json（箱の一覧）を書き出しました。`);
+  } catch (e) { console.error(e); note('書き出せませんでした：' + e.message); }
+}
+
 // ---- AI（Codex）に、手前の物を消した背景の絵を描いてもらう（背後の層の色） ----
 // 視点ごとに 1 枚：手前の物とその縁をマゼンタの穴にした絵を見せ、後ろの背景だけ描いてもらう。できた絵は paint-out の <視点>_plate_<色のもと>.png。
 const PLATE_GROW = 6; // 層のます（物とその縁）から、さらに何画素ひろげて描いてもらうか（絵と札のずれのぶん）
@@ -864,7 +924,9 @@ async function start(useGL) {
   a.wire = new THREE.Group();
   const wireMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.5, depthTest: false });
   a.previz = buildScene(); a.labels = labelScene(a.previz); // 太陽を動かしたときの影の計算にも使う
-  a.walk = createWalk(scene, a.labels.solids, a.labels.objects); // 歩くときの当たり判定（プレビズの形そのもの）
+  // 歩くときの当たり判定：プレビズの形そのものか、絵と奥行きから推定したモデル（プレビズの無い場面）
+  a.estimate = estimateOn() ? estimateModel() : null;
+  a.walk = createWalk(scene, a.estimate ? estimateSolids(a.estimate) : a.labels.solids, a.estimate ? [{ id: 0, name: '推定した背景の面' }, ...((data.cams.labels && data.cams.labels.objects) || [])] : a.labels.objects);
   a.walk.setEye(Number($('eye').value)); a.walk.setSpeed(Number($('speed').value)); a.walk.wk.noclip = !$('collide').checked;
   a.previz.traverse((o) => { if (o.isMesh && o.name !== 'ground') { const m = new THREE.Mesh(o.geometry, wireMat); o.updateWorldMatrix(true, false); m.applyMatrix4(o.matrixWorld); m.renderOrder = 2; a.wire.add(m); } });
   a.frusta = new THREE.Group();
@@ -1212,6 +1274,8 @@ $('plateDry').addEventListener('click', () => paintPlate(true));
 $('plateStopBtn').addEventListener('click', () => { plateStop = true; });
 $('plateForget').addEventListener('click', forgetPlate);
 $('plateSharp').addEventListener('click', sharpPlate);
+seg('walkShape', (v) => { ui.walkShape = v; rebuild(); });
+$('estimateExport').addEventListener('click', exportEstimate);
 seg('backDepth', (v) => { ui.backDepth = v; rebuild(); });
 showLayerUi();
 seg('order', (v) => {

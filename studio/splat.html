@@ -115,6 +115,15 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <input type="range" id="speed" min="1" max="12" step="0.5" value="4.5">
       <p class="note">走る（Shift）は歩く速さの約 2.7 倍。当たりはプレビズの形そのもので、目の高さ 1.7 m は書き出しカメラと同じ高さです。</p>
     </div>
+    <div class="label">当たりの形</div>
+    <div class="seg" id="walkShape">
+      <button type="button" data-v="auto" aria-pressed="true">自動</button>
+      <button type="button" data-v="previz" aria-pressed="false">プレビズの形</button>
+      <button type="button" data-v="estimate" aria-pressed="false">絵から推定した形</button>
+    </div>
+    <p class="note">「絵から推定した形」は、手前の物を消した背景の奥行きをメッシュにした面（地面・水・遠景）と、物体ごとの箱です。「自動」は、プレビズのある場面ではプレビズの形、絵から作った場面では推定した形を使います。下の「当たりの形を表示」で形が見えます。プレビズのある場面で「絵から推定した形」にして「プレビズの形を線で重ねる」を入れると、推定と本物を見比べられます。</p>
+    <button type="button" class="plain" id="estimateExport">推定した形を書き出す（OBJ）</button>
+    <p class="note" id="estimateNote"></p>
     <label class="check" for="shapes"><input type="checkbox" id="shapes"><span>当たりの形を表示（緑 = 立てる床、橙 = 壁、赤 = いま触れている所）</span></label>
     <div class="label">視点を移す</div>
     <div class="row" id="jump">
