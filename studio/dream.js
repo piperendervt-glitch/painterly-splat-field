@@ -186,18 +186,103 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3 } = {}) {
   return { z, a, b, samples: xs.length, skyHoles };
 }
 
+// 絵の色を点描のつぶより大きくならす（種類を色で見分けるため）。返すのは RGB（Float32、0〜255）
+function smoothColor(rgba, W, H, r = 6) {
+  const n = W * H, a = new Float32Array(n * 3), b = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { a[i * 3] = rgba[i * 4]; a[i * 3 + 1] = rgba[i * 4 + 1]; a[i * 3 + 2] = rgba[i * 4 + 2]; }
+  const pass = (src, dst, len, stride, lines, lineStride) => {
+    for (let l = 0; l < lines; l++) for (let ch = 0; ch < 3; ch++) {
+      const o = l * lineStride * 3 + ch; let sum = 0, cnt = 0;
+      for (let t = 0; t <= Math.min(r, len - 1); t++) { sum += src[o + t * stride * 3]; cnt++; }
+      for (let t = 0; t < len; t++) {
+        dst[o + t * stride * 3] = sum / cnt;
+        const add = t + r + 1, del = t - r;
+        if (add < len) { sum += src[o + add * stride * 3]; cnt++; }
+        if (del >= 0) { sum -= src[o + del * stride * 3]; cnt--; }
+      }
+    }
+  };
+  pass(a, b, W, 1, H, W); // 横
+  pass(b, a, H, W, W, 1); // 縦
+  return a;
+}
+// 色の見分けに使う 3 つの量：明るさ、赤−緑、黄−青
+const feat = (c, i, out) => { const r = c[i * 3], g = c[i * 3 + 1], b = c[i * 3 + 2]; out[0] = (r + g + b) / 3; out[1] = r - g; out[2] = (r + g) / 2 - b; return out; };
+
 /**
- * 穴だった画素に札を付ける：空（z = 0）は空、地面の高さより上に出ている所は遠景（当たらない・揺れない）、それ以外は地面。
- * ids = { sky, ground, far }（場面の種類の番号）。type を書き換える。
+ * 種類ごとの色と奥行きの傾向を、札の分かっている絵（もとの視点）から集める。
+ * view = { W, H, painted（RGBA）, type, z }。返すのは { stat[種類] = { n, mean[3], var[3], zLo, zHi } }。穴を色で見分ける labelHoles に渡す。
  */
-export function labelHoles(c, z, target, { ids, groundY = 0, rise = 0.6 }) {
-  const { W, H } = c, m = target.c2w;
+export function colorModel(view, { step = 3 } = {}) {
+  const { W, H } = view, col = smoothColor(view.painted, W, H), f = [0, 0, 0], acc = [];
+  for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step) {
+    const i = y * W + x, t = view.type[i];
+    const a = acc[t] || (acc[t] = { n: 0, s: [0, 0, 0], q: [0, 0, 0], zs: [] });
+    feat(col, i, f); a.n++;
+    for (let k = 0; k < 3; k++) { a.s[k] += f[k]; a.q[k] += f[k] * f[k]; }
+    if (view.z[i] > 0) a.zs.push(view.z[i]);
+  }
+  const stat = [];
+  acc.forEach((a, t) => {
+    if (!a || a.n < 50) return;
+    const mean = a.s.map((v) => v / a.n), vari = a.q.map((v, k) => Math.max(16, v / a.n - mean[k] * mean[k]));
+    a.zs.sort((p, q) => p - q);
+    const at = (p) => (a.zs.length ? a.zs[Math.min(a.zs.length - 1, Math.floor(p * a.zs.length))] : 0);
+    stat[t] = { n: a.n, mean, var: vari, zLo: at(0.1), zHi: at(0.95) };
+  });
+  return { stat };
+}
+
+/**
+ * 穴の画素に種類の札を付ける（c.type を書き換える）。空（z = 0）は空。
+ * 色の手がかり（rgba = 埋めた後の絵、model = colorModel の結果）が無いとき：地面より rise 以上高い所は遠景、ほかは地面。
+ * 色の手がかりがあるとき：地面の高さの所は「地面か水か」を色で、それより高い所は「遠景か木か人か」を色と距離で決める。木にした画素は、つながったかたまりごとに新しい物体の番号を付ける（objectBase から）。
+ */
+export function labelHoles(c, z, target, { ids, groundY = 0, rise = 0.6, rgba = null, model = null, objectBase = 0 }) {
+  const { W, H } = c, m = target.c2w, col = rgba && model ? smoothColor(rgba, W, H) : null, f = [0, 0, 0];
+  const S = model ? model.stat : [];
+  const cost = (t, zi) => { // 色の離れ具合（小さいほどその種類らしい）＋距離が傾向から外れたときの罰
+    const s = S[t]; if (!s) return Infinity;
+    let d = 0; for (let k = 0; k < 3; k++) d += (f[k] - s.mean[k]) ** 2 / s.var[k] + Math.log(s.var[k]);
+    if (t === ids.far && s.zLo > 0 && zi < s.zLo) d += 6 * Math.log(s.zLo / zi);
+    if ((t === ids.tree || t === ids.figure) && s.zHi > 0 && zi > s.zHi) d += 6 * Math.log(zi / s.zHi);
+    return d;
+  };
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x; if (!c.hole[i]) continue;
-    if (!(z[i] > 0)) { c.type[i] = ids.sky; continue; }
+    if (!(z[i] > 0)) { c.type[i] = ids.sky; if (c.object) c.object[i] = 0; continue; }
     const yc = -(y + 0.5 - target.cy) / target.fy * z[i], xc = (x + 0.5 - target.cx) / target.fx * z[i];
-    const wy = m[4] * xc + m[5] * yc - m[6] * z[i] + m[7];
-    c.type[i] = wy > groundY + rise ? ids.far : ids.ground;
+    const wy = m[4] * xc + m[5] * yc - m[6] * z[i] + m[7], high = wy > groundY + rise;
+    let t = high ? ids.far : ids.ground;
+    if (col) {
+      feat(col, i, f);
+      // 高い所：遠景・木・人（人は、絵の端で切れていた人の続きだけのはずなので、少し選びにくくする）。地面の高さ：地面・水
+      let best = Infinity;
+      for (const [k, extra] of high ? [[ids.far, 0], [ids.tree, 0], [ids.figure, 1.5]] : [[ids.ground, 0], [ids.water, 0]]) {
+        if (k === undefined) continue;
+        const d = cost(k, z[i]) + extra; if (d < best) { best = d; t = k; }
+      }
+    }
+    c.type[i] = t; if (c.object) c.object[i] = 0;
+  }
+  if (col && c.object && objectBase > 0 && ids.tree !== undefined) { // 木のかたまりに番号を付ける（小さすぎるかたまりは番号なし）
+    const seen = new Uint8Array(W * H), stack = []; let next = objectBase;
+    for (let s0 = 0; s0 < W * H; s0++) {
+      if (seen[s0] || !c.hole[s0] || c.type[s0] !== ids.tree) continue;
+      const members = []; stack.push(s0); seen[s0] = 1;
+      while (stack.length) {
+        const i = stack.pop(); members.push(i);
+        const x = i % W, y = (i - x) / W;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const j = ny * W + nx;
+          if (seen[j] || !c.hole[j] || c.type[j] !== ids.tree) continue;
+          if (Math.abs(z[j] - z[i]) > 0.15 * Math.min(z[i], z[j])) continue; // 奥行きの段をまたがない
+          seen[j] = 1; stack.push(j);
+        }
+      }
+      if (members.length >= 400 && next < 65535) { for (const i of members) c.object[i] = next; next++; }
+    }
   }
   return c.type;
 }

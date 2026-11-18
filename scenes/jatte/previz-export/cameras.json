@@ -8,7 +8,8 @@
    "horizon": 0.2,
    "eye": 1.7,
    "hfov": 60
-  }
+  },
+  "style": "a pointillist oil painting in the manner of Georges Seurat's 'A Sunday on La Grande Jatte', built from small separate dots of pure colour, with soft sunlit greens and violet shadows; match the dot size, palette and light of the painted parts around the holes exactly"
  },
  "units": "meters",
  "world": "right-handed, +Y up",

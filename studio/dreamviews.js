@@ -1,7 +1,7 @@
 // 「視点を足す」の、絵 1 枚から作った場面（プレビズの形が無い場面）のための部分。計算は studio/dream.js、ここはファイルの読み書きとの橋渡し。
 // 流れ（LucidDreamer の Dreaming の段と同じ）：すでにある絵を新しい視点へ写す → 穴を埋める（Codex かツール内）→ 埋めた絵の奥行きを推定して、分かっている所に合わせる。
 import { cameraBasis } from './viewdata.js';
-import { cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
+import { cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
 
 /** この場面は、絵 1 枚から作った物か（cameras.json の source.kind）。 */
 export const isPainting = (cams) => !!(cams && cams.source && cams.source.kind === 'painting');
@@ -12,7 +12,7 @@ function typeTable(cams) {
   const types = (cams.labels && cams.labels.types) || [], id = (name, alt) => { const t = types.find((x) => x.name === name); return t ? t.id : alt; };
   const colors = []; for (const t of types) colors[t.id] = TYPE_COLORS[t.name] || [140, 140, 140];
   const sky = id('sky', 0), ground = id('ground', 1);
-  return { ids: { sky, ground, far: id('far', ground) }, colors };
+  return { ids: { sky, ground, far: id('far', ground), water: id('water', undefined), tree: id('tree', undefined), figure: id('figure', undefined) }, colors };
 }
 
 /** 穴を描いてもらうときの画風の文。cameras.json の source.style があればそれ、無ければ「まわりと同じ画風」。 */
@@ -77,9 +77,18 @@ function viewDef(D, name, cand, cam) {
 const groundY = (D) => { const b = baseView(D), p = D.cams.source && D.cams.source.params; return b.def.extrinsics.position[1] - (p && Number.isFinite(p.eye) ? p.eye : 1.7); };
 
 // 視点の奥行き・札・下絵を previz-export に書く
-async function saveGeometry(D, name, c, z, cam, io) {
+// rgba（埋めた後の絵）を渡すと、穴の種類を色でも見分ける（地面か水か、木か遠景か）
+const models = new WeakMap(); // もとの視点ごとの、種類の色の傾向
+function typeModel(D) {
+  const b = baseView(D); if (!b || !b.painted || !b.type) return null;
+  if (!models.has(b)) models.set(b, colorModel({ W: b.W, H: b.H, painted: b.painted, type: b.type, z: b.z }));
+  return models.get(b);
+}
+// 足した視点で新しく見つけた木の番号の始まり（視点 R<n> ごとに 200 個ぶん）
+const objectBase = (name) => { const k = /^R(\d+)$/.exec(name); return k ? 20000 + Math.min(220, Number(k[1])) * 200 : 0; };
+async function saveGeometry(D, name, c, z, cam, io, rgba = null) {
   const n = c.W * c.H, { near, far } = D.cams.depth, T = typeTable(D.cams);
-  labelHoles(c, z, cam, { ids: T.ids, groundY: groundY(D) });
+  labelHoles(c, z, cam, { ids: T.ids, groundY: groundY(D), rgba, model: rgba ? typeModel(D) : null, objectBase: objectBase(name) });
   const lab = labelPngs(c.type, c.object, n);
   await io.saveExport(`${name}_depth.png`, depthPng(z, n, near, far), c.W, c.H);
   await io.saveExport(`${name}_depth_view.png`, depthViewPng(z, n), c.W, c.H);
@@ -114,7 +123,7 @@ export async function refineDepth(D, v, holes, disp, io) {
   for (let i = 0; i < n; i++) if (holes[i * 4] > 127) { c.hole[i] = 1; c.z[i] = 0; }
   const r = alignDepth(c, disp);
   if (!r) return null;
-  await saveGeometry(D, v.name, c, r.z, { cx: v.cx, cy: v.cy, fx: v.fx, fy: v.fy, c2w: v.c2w }, io);
+  await saveGeometry(D, v.name, c, r.z, { cx: v.cx, cy: v.cy, fx: v.fx, fy: v.fy, c2w: v.c2w }, io, v.painted || null);
   return r;
 }
 

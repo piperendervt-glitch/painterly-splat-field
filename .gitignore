@@ -27,3 +27,9 @@ estimated_model.json
 # 物体ごとの切り抜きの絵と、外の道具で作った 3D モデル（studio/objectmodel.js）
 scenes/*/paint-out/object_*
 scenes/*/paint-out/objects.json
+# 絵 1 枚の場面に足した視点（「視点を足す」。作り直せる。studio/dreamviews.js）
+scenes/*/previz-export/added_views.json
+scenes/*/previz-export/R[0-9]*_*.png
+scenes/*/paint-out/R[0-9]*_*.png
+# 外部の手法で作った結果の置き場（大きい。ライセンスが研究目的のものもある）
+scenes/*/external/

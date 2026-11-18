@@ -194,7 +194,8 @@ async function main() {
   const r6 = (n) => Math.round(n * 1e6) / 1e6;
   const cams = {
     generator: 'painterly-splat-field painting/build.mjs',
-    source: { kind: 'painting', image: path.basename(String(a.image)), crop: a.crop, params: { horizon: a.horizon, eye: a.eye, hfov: a.hfov } },
+    // style = 穴を描き足してもらうときに伝える画風（英語の名詞句。「視点を足す」のタブが使う。--style で指定。無ければ「まわりと同じ画風」）
+    source: { kind: 'painting', image: path.basename(String(a.image)), crop: a.crop, params: { horizon: a.horizon, eye: a.eye, hfov: a.hfov }, ...(typeof a.style === 'string' && a.style.trim() ? { style: a.style.trim() } : {}) },
     units: 'meters', world: 'right-handed, +Y up',
     camera_axes: 'three.js / OpenGL: +X right, +Y up, camera looks down -Z',
     pixel_coords: 'origin at top-left, +x right, +y down, pixel centers at +0.5',

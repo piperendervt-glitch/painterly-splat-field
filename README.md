@@ -160,4 +160,19 @@ node build.mjs --image <絵のファイル> --scene jatte --horizon 0.2 --eye 1.
 - 出力：`J_color.png`（プレビズ＝種類ごとの色）、`J_depth.png`、`J_labels.png`（種類：0 空 / 1 地面 / 2 水 / 3 人・動物 / 4 遠景 / 5 木）、`J_objects.png`（物体番号）、`J_overlay.png`（絵に境目を重ねた確かめ用）、`paint-out/J_painted.png`（絵そのもの）。
 - 種類分けは奥行きと色だけで決めた下書きで、木の前に立つ人が「木」になるなどの間違いがある。
 
+### 絵 1 枚の場面で視点を足す（回しながら描き足す）
+
+`start-jatte.bat` で開いた「視点を足す」のタブは、絵 1 枚の場面用の動きになる（LucidDreamer の「写す → 穴を埋める → 奥行きを合わせる」と同じ流れ。考え方は [docs/luciddreamer.md](docs/luciddreamer.md)）。
+
+1. **写す**：もとの絵（と、すでに足した視点の絵）を、奥行きを使って新しい視点へ写す。写らなかった所が穴。プレビズは使わない（`studio/dream.js`）。
+2. **穴を埋める**：Codex に、まわりと同じ画風で穴だけを描いてもらう（画風は `cameras.json` の `source.style`、人や動物は増やさない指示つき）。ツール内の穴埋めも使える。
+3. **奥行きを合わせる**：埋めた絵を Depth Anything V2 Small に通し（`painting/depth.mjs`、CPU で数秒）、すでに位置の分かっている面に尺度を合わせて、穴の奥行きを決める。穴の種類（地面・水・木・遠景・人）は高さと色から付ける。
+
+「3. 連続で進める」は、この 3 つを 1 歩ずつ繰り返す。絵 1 枚の場面では「その場で向きを変える」が初めに選ばれる（位置を動かさないので、奥行きの誤差が絵のずれにならない）。回数の上限は無く、止めるまで続く。
+
+- 足した視点は `scenes/<名前>/previz-export/added_views.json` に記録し、名前は R1, R2, …。もとの `cameras.json` は書き換えない（サーバーが読むときに合わせる）。足した視点の絵や奥行きは `.gitignore` で外してある。
+- 奥行き推定の部品（`painting/node_modules`）は、`start-jatte.bat` の初回起動で入る。入っていないときは、穴の奥行きはまわりからなめらかに伸ばした仮の値のままになる。
+- 位置を動かす視点（見る先のまわりを回る、など）も足せるが、もとの奥行きが粗いので、1 歩を小さくしないと穴が半分を超える。
+- 利用枠を使わずに流れを確かめるには、にせの Codex を使う：`PAINT_CODEX=paint/test/mirror-codex.sh`（穴を鏡写しで埋める）。
+
 画像の出典：Georges Seurat, *A Sunday on La Grande Jatte — 1884*, The Art Institute of Chicago（[作品ページ](https://www.artic.edu/artworks/27992)）、CC0 Public Domain Designation。

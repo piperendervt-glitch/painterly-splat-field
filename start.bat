@@ -24,6 +24,14 @@ if not exist "paint\node_modules\pngjs" (
   popd
 )
 
+if defined PSF_SCENE if not exist "painting\node_modules\onnxruntime-node" (
+  echo [setup] Installing packages for depth estimation ^(first time only, used by "add a view" in painting scenes^)...
+  pushd painting
+  call npm install
+  if errorlevel 1 echo [warning] Depth estimation packages could not be installed. The tool still starts; depth of newly painted areas stays approximate.
+  popd
+)
+
 echo.
 echo Starting the GUI. Your browser will open by itself.
 echo Keep this window open while you use the tool. Close it ^(or press Ctrl+C^) to stop.
