@@ -324,9 +324,9 @@ export function frontTable(types) { const t = new Uint8Array(256); for (const x 
 /**
  * 視点 v の背後の層の粒を、粒の列にする。back は backLayer() の戻り値（画素ごと）。
  *   viewId   粒の「視点」の番号
- *   opts     { skyZ, typeOf（種類 → { sway }）, edgeMax, labelEdgeMax, maxStretch, layerId }
+ *   opts     { skyZ, typeOf（種類 → { sway }）, edgeMax, labelEdgeMax, maxStretch, layerId, others（ほかの視点）, emitSky（背景が空の所にも粒を置くか。空を天球にするときは false） }
  */
-export function backSplats(v, back, viewId, stride, { skyZ, typeOf, edgeMax, labelEdgeMax, maxStretch = 16, layerId = 1, others = [] }) {
+export function backSplats(v, back, viewId, stride, { skyZ, typeOf, edgeMax, labelEdgeMax, maxStretch = 16, layerId = 1, others = [], emitSky = true }) {
   const { W, H, near, far } = v, { fx, fy, cx, cy } = v.def.intrinsics, m = v.c2w;
   let max = 0; const off = stride >> 1;
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) if (back.kind[y * W + x]) max++;
@@ -341,6 +341,7 @@ export function backSplats(v, back, viewId, stride, { skyZ, typeOf, edgeMax, lab
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) {
     const i = y * W + x; if (!back.kind[i]) continue;
     const sky = !(back.z2[i] > 0), zz = sky ? skyZ : back.z2[i];
+    if (sky && !emitSky) continue; // 空は天球が受け持つとき
     const xc = (x + 0.5 - cx) / fx * zz, yc = -(y + 0.5 - cy) / fy * zz, zc = -zz;
     const px = m[0] * xc + m[1] * yc + m[2] * zc + m[3], py = m[4] * xc + m[5] * yc + m[6] * zc + m[7], pz = m[8] * xc + m[9] * yc + m[10] * zc + m[11];
     // ほかの視点の絵に写っている所は、そちらの粒が本物なので置かない（物の後ろだけ。縁は元の粒の代わりなので残す）

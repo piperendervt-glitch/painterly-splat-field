@@ -144,7 +144,7 @@ export function splatsFromSharp(ply, v, vi, { keep = 1, scale = 1, inv, cam, typ
     if (u < 0 || w < 0 || u >= W || w >= H) { stats.outside++; }
     else {
       let i = w * W + u;
-      if (z[i] === 0) col.sky[k] = 1;       // 映した画素が空なら空の粒（「空も粒にする」で出し入れ）
+      if (z[i] === 0) col.sky[k] = 1;       // 映した画素が空なら空の粒（空の置き方が「遠くの壁」のときだけ出す。「天球」のときは天球が受け持つ）
       else if (!match(i, d)) {
         stats.behind++;
         let found = -1;
@@ -239,7 +239,7 @@ export function sharpBack(ply, v, grid, px, { scale = 1, inv, cam, front, halo =
  * SHARP のます目で作った背後の層を、粒の列にする。粒は、元の粒と同じ視線の上で、背景の奥行きまで下げた所に置く。
  *   step  何ますおきに置くか（粗くするとき）
  */
-export function sharpBackSplats(ply, v, grid, back, viewId, { step = 1, scale = 1, inv, cam, typeOf, edgeMax, labelEdgeMax, skyZ, maxStretch = 16, layerId = 1 }) {
+export function sharpBackSplats(ply, v, grid, back, viewId, { step = 1, scale = 1, inv, cam, typeOf, edgeMax, labelEdgeMax, skyZ, maxStretch = 16, layerId = 1, emitSky = true }) {
   const { g } = grid, P = ply.props, e = inv.elements, { W } = v, { fx } = v.def.intrinsics, near = v.near, far = v.far;
   // 物のまわりの縁（BACK_RING）は置かない。SHARP の粒は絵の輪郭に沿って置かれていて、縁の色のにじみが小さいので、元の粒を残す
   const use = (s) => back.kind[s] === BACK_BEHIND;
@@ -266,6 +266,7 @@ export function sharpBackSplats(ply, v, grid, back, viewId, { step = 1, scale = 
   for (let r = step >> 1; r < g; r += step) for (let c = step >> 1; c < g; c += step) {
     const s = r * g + c; if (!use(s)) continue;
     const surface = at(s, p), zb = surface ? back.z2[s] : skyZ;
+    if (!surface && !emitSky) continue; // 空は天球が受け持つとき
     col.position[k * 3] = p[0]; col.position[k * 3 + 1] = p[1]; col.position[k * 3 + 2] = p[2];
     col.size[k] = zb * cellPx / fx;
     col.color[k * 3] = back.rgb[s * 3]; col.color[k * 3 + 1] = back.rgb[s * 3 + 1]; col.color[k * 3 + 2] = back.rgb[s * 3 + 2];

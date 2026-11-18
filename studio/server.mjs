@@ -6,6 +6,7 @@
 //   POST /api/paint/run             paint/paint.mjs views を起動（{ views, style, dryRun, light }）
 //   POST /api/paint-out/<名>        「視点を足す」画面からの保存（写した絵・穴の印）
 //   POST /api/paint/fill            paint/paint.mjs fill を起動（{ view, style, dryRun, light }）。足した視点の穴だけ描く
+//   POST /api/paint/sky             paint/paint.mjs fill --sky を起動（{ face, sfx, light, styleRef, dryRun }）。空の天球の穴だけ描く
 //   POST /api/view/forget           足した視点の絵を消す（{ view }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
@@ -49,6 +50,7 @@ function state() {
   let cams;
   try { cams = JSON.parse(fs.readFileSync(camFile, 'utf8')); } catch { return out; }
   out.previz = stat(camFile);
+  out.sky_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`sky_ai${sfx}`, stat(path.join(DIRS['paint-out'], `sky_ai${sfx}.png`))])); // AI が描いた空（天球の層）
   out.views = (cams.views || []).map((v) => ({
     name: v.name,
     color: stat(path.join(DIRS['previz-export'], v.color)),
@@ -107,6 +109,22 @@ function runFill({ view, style, dryRun, light }) {
   if (dryRun) args.push('--dry-run');
   startJob(args, dryRun);
 }
+// 空の天球の穴を描く。空の絵（sky_face<向き><光>.png）と穴の印（…_holes.png）は「粒の空間」の画面が先に保存している。
+const SKY_SFX = ['', '_flat', '_lit'];
+function skyFiles(face, sfx) {
+  const out = (name) => path.join(DIRS['paint-out'], `sky_face${face}${sfx}${name}.png`);
+  return { image: out(''), mask: out('_holes'), out: out('_painted') };
+}
+function runSky({ face, sfx, light, styleRef, style, dryRun }) {
+  const f = skyFiles(face, sfx);
+  const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--sky', '--image', f.image, '--mask', f.mask, '--out', f.out];
+  if (light === 'flat' || light === 'previz') args.push('--light', light);
+  const ref = typeof styleRef === 'string' && /^[A-Za-z0-9]+_painted(_flat|_lit)?$/.test(styleRef) ? path.join(DIRS['paint-out'], `${styleRef}.png`) : null;
+  if (ref && fs.existsSync(ref)) args.push('--style-ref', ref); // 画風の見本にする、同じ場面の絵
+  if (typeof style === 'string' && style.trim()) args.push('--style', style.trim().slice(0, 500));
+  if (dryRun) args.push('--dry-run');
+  startJob(args, dryRun);
+}
 function stopPaint() {
   const child = job.child; if (!child) return;
   job.log += '\n（止めました）\n';
@@ -160,9 +178,19 @@ export async function handle(req, res, next) {
       runFill(body);
       return json(res, 200, { ok: true });
     }
+    if (p === '/api/paint/sky' && req.method === 'POST') {
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (![0, 1, 2, 3].includes(body.face) || !SKY_SFX.includes(body.sfx)) return json(res, 400, { error: '空の向きが使えません' });
+      const need = skyFiles(body.face, body.sfx);
+      for (const f of [need.image, need.mask]) if (!fs.existsSync(f)) return json(res, 400, { error: `${path.basename(f)} がありません` });
+      runSky(body);
+      return json(res, 200, { ok: true });
+    }
     if (p.startsWith('/api/paint-out/') && req.method === 'DELETE') { // 埋めた絵を消す（写し直す前）
       const name = p.slice('/api/paint-out/'.length);
       if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
+      if (/^sky_ai(_flat|_lit)?\.png$/.test(name)) { fs.rmSync(path.join(DIRS['paint-out'], name), { force: true }); return json(res, 200, { ok: true }); } // AI が描いた空
       if (!/^[A-Za-z0-9]+_painted(_flat|_lit)?\.png$/.test(name)) return json(res, 400, { error: 'ファイル名が使えません' });
       if (!fs.existsSync(path.join(DIRS['paint-out'], name.replace('_painted', '_reproj')))) return json(res, 400, { error: '足した視点の絵だけ消せます' }); // もとの視点の絵は消さない
       fs.rmSync(path.join(DIRS['paint-out'], name), { force: true });
