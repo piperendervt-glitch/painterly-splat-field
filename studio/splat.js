@@ -1,11 +1,12 @@
 // 粒の空間：書き出した奥行き・カメラ情報と、絵（絵画 or プレビズの色）から、1画素を1粒として3D空間に置いて見る。
 // 置き方は cameras.json の projection のとおり。プレビズの形そのものは使わない（線で重ねる確かめ用を除く）。
 import * as THREE from 'three/webgpu';
-import { instancedBufferAttribute, uniform, uv, vec2, float, step, exp, mix, max, abs } from 'three/tsl';
+import { instancedBufferAttribute, uniform, uv, vec2, float, step, exp, mix, max, abs, fract } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildScene, PAINT_SUN } from '../previz/scene.js';
 import { labelScene, renderSunMap, sunVisibility } from '../previz/gbuffer.js';
-import { TYPES, hexToRgb, objectColor } from '../shared/labels.js';
+import { TYPES, hexToRgb, objectColor, typeByKey } from '../shared/labels.js';
+import { parsePly, checkSharp, sharpScale, splatsFromSharp } from './sharp.js';
 import { FLAT_LIGHT, LIT_LIGHT, PRESET_HOURS, dayLight, sunDirection } from '../shared/light.js';
 import { createWalk } from './walk.js';
 import { createFx, KIND, SUN_MAP_SIZE } from './fx.js';
@@ -34,7 +35,11 @@ const SOURCES = {
 };
 const PAINT_LIGHTS = { flat: FLAT_LIGHT, lit: LIT_LIGHT };
 
-const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat' };
+const ui = { colorSrc: 'previz', source: 'all', nav: 'orbit', mode: 'color', stride: 2, order: 'sort', paintLight: 'flat', placement: 'depth', sharpFit: true };
+// 粒の置き方：depth = 奥行きの絵から 1 画素 1 粒、sharp = SHARP の .ply（<視点>_sharp.ply）、both = 両方を重ねる
+
+// 実在の絵から作った場面（painting/build.mjs）の種類の名前を、shared/labels.js の種類へ読み替える
+const PAINT_TYPE_KEYS = { sky: 'sky', ground: 'grass', water: 'water', figure: 'figure', far: 'far', tree: 'leaves' };
 // いまの光。方位・高さは度。色は sRGB の #rrggbb。bands は明暗の段階の数（0 = なめらか）。maxGain は明るくする上限（倍）。
 const light = { azimuth: PAINT_SUN.azimuth, elevation: PAINT_SUN.elevation, sun: LIT_LIGHT.sun, sunColor: '#ffffff', sky: LIT_LIGHT.ambient, skyColor: '#ffffff', bands: 0, maxGain: 4 };
 const uSize = uniform(2.6), uEdge = uniform(1), uSky = uniform(1), uView = uniform(-1);
@@ -88,20 +93,32 @@ async function loadData() {
     }
     if (!colors.previz) throw new Error(`/files/previz-export/${v.color} を読めませんでした`);
     // 札（種類・物体・面の向き・描いたときの日なた）。古い書き出しには無いので、無ければ null。
-    const lab = {};
+    // 実在の絵から作った場面は、種類（labels）と物体（objects）だけがあり、種類の番号と物体の色の詰め方が違う。
+    const lab = {}, painting = !v.type && !!v.labels;
     for (const key of ['type', 'object', 'normal', 'sun']) lab[key] = v[key] ? await tryImage(`/files/previz-export/${v[key]}`, W, H) : null;
-    const hasLabels = !!(lab.type && lab.object && lab.normal && lab.sun);
+    if (painting) { lab.type = await tryImage(`/files/previz-export/${v.labels}`, W, H); lab.object = v.objects ? await tryImage(`/files/previz-export/${v.objects}`, W, H) : null; }
+    const hasTypes = !!(lab.type && lab.object), hasLabels = hasTypes && !!(lab.normal && lab.sun);
     const type = new Uint8Array(W * H), object = new Uint16Array(W * H);
-    if (hasLabels) for (let i = 0; i < W * H; i++) { type[i] = lab.type[i * 4]; object[i] = lab.object[i * 4] * 256 + lab.object[i * 4 + 1]; }
+    if (hasTypes && painting) {
+      const remap = new Uint8Array(256);
+      for (const t of (cams.labels && cams.labels.types) || []) remap[t.id] = PAINT_TYPE_KEYS[t.name] ? typeByKey(PAINT_TYPE_KEYS[t.name]).id : 0;
+      for (let i = 0; i < W * H; i++) { type[i] = remap[lab.type[i * 4]]; object[i] = lab.object[i * 4] + lab.object[i * 4 + 1] * 256; }
+    } else if (hasTypes) for (let i = 0; i < W * H; i++) { type[i] = lab.type[i * 4]; object[i] = lab.object[i * 4] * 256 + lab.object[i * 4 + 1]; }
+    // SHARP の粒（sharp/psf_sharp.py の書き出し）。無ければ null
+    let sharp = null;
+    if (st.sharp) {
+      const res = await fetch(`/files/paint-out/${v.name}_sharp.ply`, { cache: 'no-store' });
+      if (res.ok) { sharp = parsePly(await res.arrayBuffer()); checkSharp(sharp); }
+    }
     views.push({
       def: v, W, H, z, edge: edgeDistance(z, W, H), near, far,
-      colors, hasLabels, type, object, normalPx: hasLabels ? lab.normal : null, sunPx: hasLabels ? lab.sun : null,
-      labelEdge: hasLabels ? labelEdgeDistance(type, object, W, H) : null,
+      colors, hasTypes, hasLabels, type, object, normalPx: hasLabels ? lab.normal : null, sunPx: hasLabels ? lab.sun : null,
+      labelEdge: hasTypes ? labelEdgeDistance(type, object, W, H) : null, sharp,
       onlyNew: st.new_mask ? await loadImage(`/files/paint-out/${v.name}_new.png`, W, H) : null, // 穴埋めで足した視点：白い画素だけ粒にする
       matrix: new THREE.Matrix4().set(...v.extrinsics.camera_to_world.flat()),
     });
   }
-  return { cams, views, hasLabels: views.every((v) => v.hasLabels) };
+  return { cams, views, hasLabels: views.every((v) => v.hasLabels), hasTypes: views.every((v) => v.hasTypes), hasSharp: views.some((v) => v.sharp) };
 }
 
 // 奥行きが急に変わる画素（境界）からの距離（画素、EDGE_MAX まで）。
@@ -171,6 +188,7 @@ export const COLUMNS = {
   sway: { type: Uint8Array, size: 1, default: 0 },       // 揺れやすさ（0〜255）。いまは種類ごとに一律
   labelEdge: { type: Uint8Array, size: 1, default: LABEL_EDGE_MAX }, // 札の境目からの距離（画素）
   lift: { type: Float32Array, size: 1, default: 0.05 },  // 影を調べるときに面から浮かせる量（m）。奥行きの刻みの粗さ
+  opacity: { type: Uint8Array, size: 1, default: 255 },  // 不透明さ（0〜255）。奥行きから置いた粒は 255、SHARP の粒は SHARP の値
 };
 const TYPE_BY_ID = new Map(TYPES.map((t) => [t.id, t]));
 export function makeCloud(capacity) {
@@ -194,7 +212,8 @@ function splatsFromView(v, vi, stride, src) {
   const { W, H, z, edge, near, far } = v, { fx, fy, cx, cy } = v.def.intrinsics;
   const max = Math.ceil(W / stride) * Math.ceil(H / stride);
   const col = { position: new Float32Array(max * 3), size: new Float32Array(max), color: new Uint8Array(max * 3), edge: new Uint8Array(max), sky: new Uint8Array(max), view: new Uint8Array(max).fill(vi), depthGray: new Uint8Array(max) };
-  if (v.hasLabels) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max), lift: new Float32Array(max) });
+  if (v.hasTypes) Object.assign(col, { type: new Uint8Array(max), object: new Uint16Array(max), sway: new Uint8Array(max), labelEdge: new Uint8Array(max) });
+  if (v.hasLabels) Object.assign(col, { normal: new Int8Array(max * 3), sunVis0: new Uint8Array(max), lift: new Float32Array(max) });
   const px = colorOf(v, src).px, p = new THREE.Vector3(), off = stride >> 1, zStep = (1 / near - 1 / far) / 65535;
   let k = 0;
   for (let y = off; y < H; y += stride) for (let x = off; x < W; x += stride) {
@@ -206,21 +225,40 @@ function splatsFromView(v, vi, stride, src) {
     col.color[k * 3] = px[i * 4]; col.color[k * 3 + 1] = px[i * 4 + 1]; col.color[k * 3 + 2] = px[i * 4 + 2];
     col.depthGray[k] = sky ? 0 : Math.max(0, Math.min(255, (1 - Math.log(zz / near) / Math.log(far / near)) * 255));
     col.edge[k] = edge[i]; col.sky[k] = sky ? 1 : 0;
-    if (v.hasLabels) { // 札は、絵と同じ画素からそのまま引き継ぐ
+    if (v.hasTypes) { // 札は、絵と同じ画素からそのまま引き継ぐ
       const t = v.type[i];
       col.type[k] = t; col.object[k] = v.object[i];
-      for (let c = 0; c < 3; c++) col.normal[k * 3 + c] = Math.round((v.normalPx[i * 4 + c] / 127.5 - 1) * 127);
-      col.sunVis0[k] = v.sunPx[i * 4];
       col.sway[k] = Math.round(((TYPE_BY_ID.get(t) || {}).sway || 0) * 255);
       col.labelEdge[k] = v.labelEdge[i];
+    }
+    if (v.hasLabels) {
+      for (let c = 0; c < 3; c++) col.normal[k * 3 + c] = Math.round((v.normalPx[i * 4 + c] / 127.5 - 1) * 127);
+      col.sunVis0[k] = v.sunPx[i * 4];
       col.lift[k] = 0.05 + zz * zz * zStep;
     }
     k++;
   }
   return { columns: col, count: k };
 }
+// SHARP の粒は、視点の番号の後ろ（視点の数 + 何番目の視点か）を「視点」の札にする。視点別の表示で色が分かれ、出し入れもできる。
+const sharpViewIndex = (vi) => data.views.length + vi;
+function sharpParts() {
+  const out = [];
+  data.views.forEach((v, vi) => {
+    if (!v.sharp) return;
+    const inv = v.matrix.clone().invert(), cam = new THREE.Vector3().setFromMatrixPosition(v.matrix).toArray();
+    if (v.sharpScale === undefined) v.sharpScale = sharpScale(v.sharp, v, inv); // 奥行きの絵に合わせる倍率（読み込みごとに 1 回）
+    const keep = Math.max(1, (ui.stride / 2) ** 2); // SHARP は 2 画素に 1 粒（× 2 層）なので、「ふつう」で全部使う
+    const p = splatsFromSharp(v.sharp, v, sharpViewIndex(vi), { keep, scale: ui.sharpFit ? v.sharpScale : 1, inv, cam, typeOf: (t) => TYPE_BY_ID.get(t), edgeMax: EDGE_MAX, labelEdgeMax: LABEL_EDGE_MAX });
+    v.sharpStats = p.stats;
+    out.push(p);
+  });
+  return out;
+}
 function buildCloud() {
-  const parts = data.views.map((v, vi) => splatsFromView(v, vi, ui.stride, ui.colorSrc));
+  const placement = data.hasSharp ? ui.placement : 'depth';
+  const parts = placement === 'sharp' ? [] : data.views.map((v, vi) => splatsFromView(v, vi, ui.stride, ui.colorSrc));
+  if (placement !== 'depth') parts.push(...sharpParts());
   const c = makeCloud(parts.reduce((s, p) => s + p.count, 0));
   for (const p of parts) appendSplats(c, p.columns, p.count);
   return c;
@@ -294,6 +332,7 @@ const DISPLAY = {
   },
 };
 const NEEDS_LABELS = new Set(['relit', 'sway', 'type', 'typeMix', 'object', 'normal', 'sun0', 'sunNow', 'labelEdge']);
+const TYPE_MODES = new Set(['type', 'typeMix', 'object', 'labelEdge']); // 種類と物体の札だけで出せる表示（実在の絵の場面でも使える）
 const SHADER_SHOW = { relit: 1, sunNow: 2 };     // シェーダー側で色を作る表示
 const COLOR_FX = new Set(['color', 'relit']);    // 風の照りと足跡の色を掛ける表示
 const KIND_OF = new Map(TYPES.map((t) => [t.id, KIND[t.light] + (t.tracks ? 4 : 0)]));
@@ -336,6 +375,7 @@ async function cpuSun() {
 //   C = [空, 視点, 揺れやすさ, 光の受け方＋足跡が付くか]  D = [面の向き xyz, 描いたときの日なた]（C・D の使い方は studio/fx.js）
 // 遠い順（視点からの距離）に並べ直すのは別の糸（studio/sortworker.js）で行い、描画は止めない。
 // ここでは、粒の元の並びのまま描画用の値を作って渡す（表示・粒を変えたときだけ。光や動きは描くときに付けるので送り直さない）。
+const OPACITY_PACK = 0.45; // B.w の小数部に「1 − 不透明さ」をこの幅で詰める（境界の判定 step(uEdge, B.w + 0.5) を変えない幅）
 function sendSource() {
   const a = app, c = cloud; if (!a || !c) return;
   const n = c.n, P = new Float32Array(n * 4), B = new Float32Array(n * 4), C = new Float32Array(n * 4), D = new Float32Array(n * 4);
@@ -345,7 +385,7 @@ function sendSource() {
     const o = i * 4;
     P[o] = c.position[i * 3]; P[o + 1] = c.position[i * 3 + 1]; P[o + 2] = c.position[i * 3 + 2]; P[o + 3] = c.size[i];
     display(c, i, rgb);
-    B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i];
+    B[o] = rgb[0]; B[o + 1] = rgb[1]; B[o + 2] = rgb[2]; B[o + 3] = c.edge[i] + (1 - c.opacity[i] / 255) * OPACITY_PACK; // 境界からの距離（整数）＋ 透けぐあい（小数）
     C[o] = c.sky[i]; C[o + 1] = c.view[i];
     if (labels) {
       C[o + 2] = c.sway[i] / 255; C[o + 3] = KIND_OF.get(c.type[i]) || 0;
@@ -398,12 +438,13 @@ function makeMaterials(a) {
 
   const soft = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: false });
   soft.positionNode = moved.position; soft.scaleNode = vec2(s, s); soft.colorNode = moved.color;
-  soft.opacityNode = exp(r.mul(r).mul(-18));
+  const alpha = float(1).sub(fract(B.w).div(OPACITY_PACK)); // 不透明さ（sendSource で B.w の小数部に詰めたもの）
+  soft.opacityNode = exp(r.mul(r).mul(-18)).mul(alpha);
 
   const hard = new THREE.SpriteNodeMaterial({ transparent: false, depthWrite: true, depthTest: true, alphaTest: 0.5 });
   const sh = s.mul(0.62); // ぼかさないぶん小さめの円にする
   hard.positionNode = moved.position; hard.scaleNode = vec2(sh, sh); hard.colorNode = moved.color;
-  hard.opacityNode = float(1).sub(step(0.5, r));
+  hard.opacityNode = float(1).sub(step(0.5, r)).mul(step(0.5, alpha)); // 半分より透ける粒は描かない
   return { soft, hard };
 }
 
@@ -477,7 +518,8 @@ async function start(useGL) {
   const used = data.views.map((v) => colorOf(v, ui.colorSrc).key), missing = used.filter((k) => k !== ui.colorSrc).length;
   $('srcNote').textContent = missing ? `「${SOURCES[ui.colorSrc].name}」が無い視点が ${missing} / ${data.views.length} あります。その視点は「${SOURCES[used.find((k) => k !== ui.colorSrc)].name}」で置いています。` : '';
   $('srcNote').classList.toggle('warn', missing > 0);
-  $('labelNote').hidden = data.hasLabels;
+  $('labelNote').hidden = data.hasLabels || data.hasTypes;
+  showSharpInfo();
 
   layout(); say('');
   let frames = 0, t0 = performance.now(), last = t0;
@@ -650,6 +692,20 @@ function layout() {
   a.camera.aspect = w / h; a.camera.updateProjectionMatrix();
 }
 
+// SHARP の粒の読み込み結果（倍率と、札をどう取ったか）
+function showSharpInfo() {
+  const lines = [];
+  for (const v of data.views) {
+    if (!v.sharp) continue;
+    const st = v.sharpStats, used = data.hasSharp && ui.placement !== 'depth';
+    let t = `${v.def.name}：${(v.sharp.count / 10000).toFixed(1)} 万粒、奥行きの絵に合わせる倍率 ${v.sharpScale !== undefined ? v.sharpScale.toFixed(2) : '–'}`;
+    if (used && st) t += `。視点の外 ${pct(st.outside, st.count)}、手前の物の後ろ（描き足された所）${pct(st.behind, st.count)}、そのうち札を近くから取れなかった ${pct(st.guessed, st.count)}`;
+    lines.push(t);
+  }
+  $('sharpInfo').textContent = lines.join('\n');
+}
+const pct = (a, b) => `${b ? Math.round(a / b * 1000) / 10 : 0}%`;
+
 // ---- 操作 ----
 function press(el, v) { for (const x of el.children) x.setAttribute('aria-pressed', x.dataset.v === String(v) ? 'true' : 'false'); }
 function seg(id, fn) {
@@ -670,8 +726,20 @@ function setupViewButtons() {
   if (!has(ui.colorSrc) || !setupViewButtons.done) ui.colorSrc = ['painted_flat', 'painted_lit', 'painted', 'previz'].find(has);
   setupViewButtons.done = true;
   setColorSrc(ui.colorSrc, false);
-  for (const b of $('mode').children) b.disabled = NEEDS_LABELS.has(b.dataset.v) && !data.hasLabels;
-  if (NEEDS_LABELS.has(ui.mode) && !data.hasLabels) { ui.mode = 'color'; press($('mode'), ui.mode); }
+  const usable = (m) => !NEEDS_LABELS.has(m) || data.hasLabels || (TYPE_MODES.has(m) && data.hasTypes);
+  for (const b of $('mode').children) b.disabled = !usable(b.dataset.v);
+  if (!usable(ui.mode)) { ui.mode = 'color'; press($('mode'), ui.mode); }
+  // SHARP の粒：視点ごとの出し入れのボタンと、置き方のボタン。初めて読めたときは SHARP だけを見せる
+  data.views.forEach((v, i) => {
+    if (!v.sharp) return;
+    const b = document.createElement('button'); b.type = 'button'; b.dataset.v = String(sharpViewIndex(i)); b.textContent = `${v.def.name}（SHARP）だけ`; b.setAttribute('aria-pressed', 'false'); src.append(b);
+  });
+  for (const b of $('placement').children) b.disabled = b.dataset.v !== 'depth' && !data.hasSharp;
+  if (!data.hasSharp) ui.placement = 'depth';
+  else if (!setupViewButtons.sharpSeen) ui.placement = 'sharp';
+  setupViewButtons.sharpSeen = data.hasSharp;
+  press($('placement'), ui.placement);
+  $('sharpBox').hidden = !data.hasSharp; $('sharpNone').hidden = data.hasSharp;
   $('lightBox').hidden = $('moveBox').hidden = !data.hasLabels;
 }
 const SRC_BUTTONS = () => [...$('colorSrc').children, ...$('colorSrc2').children];
@@ -737,6 +805,8 @@ seg('source', (v) => { ui.source = v; applyUi(); });
 seg('nav', setNav);
 seg('mode', setMode);
 seg('stride', (v) => { ui.stride = Number(v); rebuild(); });
+seg('placement', (v) => { ui.placement = v; rebuild(); });
+$('sharpFit').addEventListener('change', () => { ui.sharpFit = $('sharpFit').checked; rebuild(); });
 seg('order', (v) => {
   ui.order = v; if (!app) return;
   requestSort(); applyUi();

@@ -11,3 +11,5 @@ prototype/*.png
 # 絵から場面を作る道具：奥行き推定モデル（初回に自動で取得）と、確かめ用の大きな重ね絵
 painting/models/
 scenes/*/previz-export/*_overlay.png
+# SHARP の粒（研究目的のみのモデルの出力で、大きい）。sharp/README.md
+*_sharp.ply
