@@ -224,13 +224,13 @@ export function settleHoleDepth(c, z, { cam = null, groundY = 0, side = null, sk
     const h = new Float32Array(n).fill(NaN);
     for (let i = 0; i < n; i++) { const zi = c.hole[i] ? z[i] : c.z[i]; if (zi > 0) h[i] = heightAt(cam, i % W, (i / W) | 0, zi) - groundY; }
     const zAt = (i) => (c.hole[i] ? z[i] : c.z[i]), out = new Float32Array(z);
+    // 立っている物の足もとか：0.5 m ぶん上の画素が、同じくらいの奥行きで、地面より高い
+    const foot = (x, y) => { const i = y * W + x, up = y - Math.max(4, Math.min(80, Math.round(0.5 * cam.fy / z[i]))); if (up < 0) return false; const zj = zAt(up * W + x); return zj > 0 && Math.abs(Math.log(zj / z[i])) < 0.1 && h[up * W + x] > 0.4; };
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const i = y * W + x; if (!c.hole[i] || side.run[i] || !(zp[i] > 0)) continue;
       if (!(z[i] > 0) || z[i] > zp[i]) { out[i] = zp[i]; snapped++; continue; } // 空とされたが地面に当たる所、地面より下に来た所
       if (Math.abs(h[i]) > 0.25 + 0.02 * z[i] || Math.log(zp[i] / z[i]) > 0.27) continue;
-      // 立っている物の足もとか：0.5 m ぶん上の画素が、同じくらいの奥行きで、地面より高い
-      const up = y - Math.max(4, Math.min(80, Math.round(0.5 * cam.fy / z[i])));
-      if (up >= 0) { const j = up * W + x, zj = zAt(j); if (zj > 0 && Math.abs(Math.log(zj / z[i])) < 0.1 && h[j] > 0.4) continue; }
+      if (foot(x, y)) continue;
       out[i] = zp[i]; snapped++;
     }
     // 3. 傾いて推定された地面：地面に載った所とつながっていて、面が寝ている（奥へ行くほど少しずつ高くなる板のような）所は、地面として平面に載せる。
@@ -256,7 +256,7 @@ export function settleHoleDepth(c, z, { cam = null, groundY = 0, side = null, sk
         const x = i % W, y = (i - x) / W;
         for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) {
           if (j < 0 || done[j] || !c.hole[j] || side.run[j] || !(zp[j] > 0) || !(z[j] > 0) || !(h[j] > 0 && h[j] <= maxLying)) continue;
-          if (!lying(j % W, (j / W) | 0)) continue;
+          if (!lying(j % W, (j / W) | 0) || foot(j % W, (j / W) | 0)) continue; // 幹の根もとなど、立っている物の足もとは寝て推定されやすいので除く
           done[j] = 1; out[j] = zp[j]; flattened++; next.push(j);
         }
       }
