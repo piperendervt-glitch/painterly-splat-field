@@ -22,6 +22,8 @@
 //     --objcloud <.ply>  物ごとの 3D を置いた点群（世界の座標で x y z、red green blue、object_id、radius〔m〕。バイナリ little endian）。
 //       その物体は、もとの絵の画素を動かす代わりに、点群をこの視点から見た形で写す（横から見た形になる）
 //       --objcloud-skip 10043,10037 で、点群のうちその番号の物体は使わない（絵の画素を動かす写し方のまま）
+//       ファイルはコンマで並べられる。ファイル@10043+10045 と書くと、そのファイルからはその物体だけ使う。同じ物体は先に書いたファイルが優先
+//       （例：--objcloud trellis.ply@10043,best.ply で、10043 だけ trellis、残りは best）
 //       --objcloud-backfaces を付けると、向こうを向いた点（裏側の面）も写す（既定は写さない。面の向きが当てにならない点群のとき用）
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
@@ -83,18 +85,33 @@ function candidate(D, a) {
 }
 
 // 物ごとの 3D を置いた点群（.ply。バイナリ little endian。世界の座標で x y z、red green blue、object_id、radius〔m〕）を読む
-function readCloud(file, skip = null) {
+function readCloud(file, skip = null, only = null, taken = null) {
   const buf = fs.readFileSync(file), { count, props: p } = parsePly(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), ['x', 'y', 'z', 'nx', 'ny', 'nz', 'red', 'green', 'blue', 'object_id', 'radius']);
   for (const k of ['x', 'y', 'z', 'red', 'green', 'blue']) if (!p[k]) throw new Error(`点群に ${k} の列がありません：${file}`);
-  const xyz = new Float32Array(count * 3), rgb = new Uint8Array(count * 3), object = p.object_id ? new Uint16Array(count) : null;
-  for (let i = 0; i < count; i++) { xyz[i * 3] = p.x[i]; xyz[i * 3 + 1] = p.y[i]; xyz[i * 3 + 2] = p.z[i]; rgb[i * 3] = p.red[i]; rgb[i * 3 + 1] = p.green[i]; rgb[i * 3 + 2] = p.blue[i]; if (object) object[i] = p.object_id[i]; }
-  let normal = null; if (p.nx && p.ny && p.nz) { normal = new Float32Array(count * 3); for (let i = 0; i < count; i++) { normal[i * 3] = p.nx[i]; normal[i * 3 + 1] = p.ny[i]; normal[i * 3 + 2] = p.nz[i]; } }
-  if (!skip || !skip.size || !object) return { n: count, xyz, rgb, object, normal, radius: p.radius || 0.01 };
-  // --objcloud-skip：その物体の点は使わない（絵の画素を動かす、今までの写し方に戻る）
-  const keep = []; for (let i = 0; i < count; i++) if (!skip.has(object[i])) keep.push(i);
-  const m = keep.length, xyz2 = new Float32Array(m * 3), rgb2 = new Uint8Array(m * 3), obj2 = new Uint16Array(m), rad2 = p.radius ? new Float32Array(m) : 0.01, nrm2 = normal ? new Float32Array(m * 3) : null;
-  keep.forEach((i, k) => { xyz2.set(xyz.subarray(i * 3, i * 3 + 3), k * 3); rgb2.set(rgb.subarray(i * 3, i * 3 + 3), k * 3); obj2[k] = object[i]; if (p.radius) rad2[k] = p.radius[i]; if (normal) nrm2.set(normal.subarray(i * 3, i * 3 + 3), k * 3); });
-  return { n: m, xyz: xyz2, rgb: rgb2, object: obj2, normal: nrm2, radius: rad2 };
+  // 使う点：--objcloud-skip の物体、@ で選ばれていない物体、前のファイルでもう置いた物体の点は外す
+  const keep = []; for (let i = 0; i < count; i++) { const id = p.object_id ? p.object_id[i] : 0; if ((skip && skip.has(id)) || (only && !only.has(id)) || (taken && taken.has(id))) continue; keep.push(i); }
+  const m = keep.length, xyz = new Float32Array(m * 3), rgb = new Uint8Array(m * 3), object = new Uint16Array(m), radius = new Float32Array(m).fill(0.01), normal = new Float32Array(m * 3), hasN = !!(p.nx && p.ny && p.nz);
+  keep.forEach((i, k) => {
+    xyz[k * 3] = p.x[i]; xyz[k * 3 + 1] = p.y[i]; xyz[k * 3 + 2] = p.z[i]; rgb[k * 3] = p.red[i]; rgb[k * 3 + 1] = p.green[i]; rgb[k * 3 + 2] = p.blue[i];
+    if (p.object_id) object[k] = p.object_id[i]; if (p.radius) radius[k] = p.radius[i];
+    if (hasN) { normal[k * 3] = p.nx[i]; normal[k * 3 + 1] = p.ny[i]; normal[k * 3 + 2] = p.nz[i]; }
+  });
+  return { n: m, xyz, rgb, object, normal, radius };
+}
+// --objcloud の書き方：ファイルをコンマで並べる。ファイルの後ろに @番号+番号 を付けると、そのファイルからはその物体だけ使う。
+// 同じ物体が 2 つのファイルにあれば、先に書いたファイルのものを使う（例：trellis.ply@10043,best.ply = 10043 だけ trellis、残りは best）
+function readClouds(spec, skip) {
+  const parts = [], taken = new Set();
+  for (const item of String(spec).split(',').map((x) => x.trim()).filter(Boolean)) {
+    const at = item.lastIndexOf('@'), hasOnly = at > 0 && /^[0-9+]+$/.test(item.slice(at + 1)), file = hasOnly ? item.slice(0, at) : item;
+    const c = readCloud(path.resolve(file), skip, hasOnly ? new Set(item.slice(at + 1).split('+').map(Number)) : null, taken);
+    for (let i = 0; i < c.n; i++) taken.add(c.object[i]);
+    parts.push(c);
+  }
+  if (parts.length === 1) return parts[0];
+  const n = parts.reduce((t, c) => t + c.n, 0), out = { n, xyz: new Float32Array(n * 3), rgb: new Uint8Array(n * 3), object: new Uint16Array(n), normal: new Float32Array(n * 3), radius: new Float32Array(n) };
+  let o = 0; for (const c of parts) { out.xyz.set(c.xyz, o * 3); out.rgb.set(c.rgb, o * 3); out.object.set(c.object, o); out.normal.set(c.normal, o * 3); out.radius.set(c.radius, o); o += c.n; }
+  return out;
 }
 
 const run = (cmd, argv, cwd) => { const r = spawnSync(cmd, argv, { cwd, stdio: 'inherit', windowsHide: true }); if (r.error) throw new Error(`${path.basename(argv[0])} を起動できません：${r.error.message}`); return r.status; };
@@ -165,7 +182,7 @@ async function main() {
     if (!fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで取り消せます。`); return; }
     await refine(dir, name); return;
   }
-  const cand = candidate(D, a), cloud = typeof a.objcloud === 'string' ? readCloud(path.resolve(a.objcloud), new Set(String(a['objcloud-skip'] ?? '').split(',').map(Number).filter((x) => x > 0))) : null;
+  const cand = candidate(D, a), cloud = typeof a.objcloud === 'string' ? readClouds(a.objcloud, new Set(String(a['objcloud-skip'] ?? '').split(',').map(Number).filter((x) => x > 0))) : null;
   const { holes, pixels, cloudPixels } = await dream.addView(D, cand, name, io, { cloud, backfaces: !!a['objcloud-backfaces'] });
   console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%${cloud ? `（物の点群 ${cloud.n} 点を重ねて、絵の ${(100 * cloudPixels / pixels).toFixed(1)}% を埋めました）` : ''}`);
   if (!holes) { fs.copyFileSync(path.join(S.P, `${name}_reproj.png`), path.join(S.P, `${name}_painted.png`)); console.log('穴が無いので、描き足しません。'); return; }
