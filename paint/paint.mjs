@@ -11,6 +11,7 @@
 //       previz プレビズの光に従う絵。下絵の日なた・日陰・落ちる影をそのまま守らせる。下絵は <視点>_lit.png。出すものは <視点>_painted_lit.png、<視点>_overlay_lit.png。
 //
 //   node paint.mjs fill --image <絵> --mask <穴の印（白が穴）> --out <出すファイル> [--style "..."] [--hint "..."] [--dry-run]
+//     --result <絵> は、もうある生成の絵（前に Codex が出した絵など）を使って、貼り合わせだけをやり直す。何も呼ばず、利用枠も減らない。
 //     --seam <画素> は、穴の縁の継ぎ目をなじませる幅（既定 40、0 で無し）。Codex の絵の色のずれを縁で測り、穴の内側へ薄めながら足す。穴の外は変えない。
 //     --hint は、穴の中に描く物についての追加の指示（1 文）。絵 1 枚から作った場面で、人を増やさないように頼むときなどに使う。
 //                       [--previz <同じ視点のプレビズの絵> --depth <その奥行きの絵> --overlay <確かめ用の絵>] [--light free|flat|previz]
@@ -267,7 +268,9 @@ async function runFill(o) {
   const hint = typeof o.hint === 'string' ? o.hint : '', seed = o.seed !== undefined && o.seed !== true && Number.isFinite(Number(o.seed)) ? Number(o.seed) : undefined;
   console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${givenLayout ? `下絵（${path.basename(givenLayout)}）をもとに、${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}` : o['dry-run'] && !(nvs && repaint) ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
   let file;
-  if (givenLayout) file = null; // 下絵はもうある。下で Codex に渡す
+  const given = typeof o.result === 'string' ? o.result : null; // --result：もうある生成の絵を使う（何も呼ばない）
+  if (given) file = given;
+  else if (givenLayout) file = null; // 下絵はもうある。下で Codex に渡す
   else if ((nvs || local) && (!o['dry-run'] || (nvs && repaint))) {
     fs.mkdirSync(path.join(workDir, 'references'), { recursive: true });
     fs.copyFileSync(holesFile, path.join(workDir, 'references', 'holes.png'));
@@ -287,7 +290,7 @@ async function runFill(o) {
       }
     } else file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel }, timeoutSeconds: Number(o.timeout) || 3600 });
   } else file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
-  if (repaint) {
+  if (repaint && !given) {
     // 下絵 = 穴に別視点のモデルの絵をはめた絵（穴の外は今の絵のまま）。視点ごとに残しておく（Codex だけやり直せるように）
     const layout = givenLayout ? resize(readPng(givenLayout), original.width, original.height) : composite(original, resize(readPng(file), original.width, original.height), mask);
     const layoutFile = path.join(workDir, 'layout-input.png');
@@ -315,7 +318,7 @@ async function runFill(o) {
   let generated = resize(readPng(file), original.width, original.height);
   // 継ぎ目をなじませる：Codex の絵は穴の外も描き直されて色が少しずれるので、縁でのずれを穴の内側へ薄めながら足す（--seam <画素>、0 で無し）。
   // PC のモデル（--local・--nvs だけ）の絵は、穴の外が何でもよい約束なので、合わせない
-  const byCodex = repaint || !(nvs || local), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
+  const byCodex = !!given || repaint || !(nvs || local), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
   if (byCodex && !sky && !plate && seam > 0) generated = matchSeam(original, generated, mask, { radius: seam });
   const result = composite(original, generated, mask);
   writePng(o.out, result);
