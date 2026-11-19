@@ -1,5 +1,6 @@
 // 「視点を足す」の、絵 1 枚から作った場面（プレビズの形が無い場面）のための部分。計算は studio/dream.js、ここはファイルの読み書きとの橋渡し。
 // 流れ（LucidDreamer の Dreaming の段と同じ）：すでにある絵を新しい視点へ写す → 穴を埋める（Codex かツール内）→ 埋めた絵の奥行きを推定して、分かっている所に合わせる。
+import { pullPush } from './layers.js';
 import { lookBasis as cameraBasis, cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
 
 /** この場面は、絵 1 枚から作った物か（cameras.json の source.kind）。 */
@@ -96,6 +97,41 @@ async function saveGeometry(D, name, c, z, cam, io, rgba = null) {
   await io.saveExport(`${name}_labels.png`, lab.type, c.W, c.H);
   await io.saveExport(`${name}_objects.png`, lab.object, c.W, c.H);
   await io.saveExport(`${name}_color.png`, typeColorPng(c.type, z, n, T.colors), c.W, c.H);
+}
+
+/**
+ * 「物を消した背景」の視点を足す：もとの視点と同じカメラで、人や動物（types の札）の所を穴にする。
+ * この穴を「物の後ろの背景」として埋めると（paint.mjs fill --plate）、物の後ろの芝や水が粒になり、横や前へ動いたときに物の陰から現れる。
+ * 立つ場所を動かした視点と違って、もとの絵は 1 画素も動かさないので、物の縁が伸びたり割れたりしない。
+ *   grow = 穴を外へ広げる画素数（輪郭ににじんだ物の色を残さないため）。mask（画素ごとに 1 = 消す）を渡すと、札の代わりにそれを使う（外で作った切り抜き）
+ * 保存する物は addView と同じ（写した絵 = 穴を灰色にしたもとの絵）と、穴をまわりの色でなめらかに埋めた目安の絵（<name>_plateguide.png）。返すのは { holes, pixels }。
+ */
+export async function addPlateView(D, name, io, { grow = 10, types = ['figure'], mask: given = null } = {}) {
+  const b = baseView(D), T = typeTable(D.cams), n = b.W * b.H, W = b.W, H = b.H;
+  const want = new Set(types.map((t) => T.ids[t]).filter((t) => t !== undefined && t !== T.ids.sky && t !== T.ids.ground));
+  if (!b.painted || (!given && (!b.type || !want.size))) throw new Error('この場面には、消す物の札（' + types.join('・') + '）がありません');
+  let hole = new Uint8Array(n); for (let i = 0; i < n; i++) if (given ? given[i] : want.has(b.type[i])) hole[i] = 1;
+  for (let pass = 0; pass < 2 && grow > 0; pass++) { // 横、縦の順に広げる
+    const out = new Uint8Array(n), len = pass ? H : W, lines = pass ? W : H, at = pass ? (l, t) => t * W + l : (l, t) => l * W + t;
+    for (let l = 0; l < lines; l++) { let last = -1e9; for (let t = 0; t < len; t++) { if (hole[at(l, t)]) last = t; if (t - last <= grow) out[at(l, t)] = 1; } last = 1e9; for (let t = len - 1; t >= 0; t--) { if (hole[at(l, t)]) last = t; if (last - t <= grow) out[at(l, t)] = 1; } }
+    hole = out;
+  }
+  const c = { W, H, rgba: new Uint8ClampedArray(b.painted), hole, holeCount: 0, z: new Float32Array(b.z), known: new Uint8Array(n), type: new Uint8Array(b.type), object: new Uint16Array(b.object || n) };
+  const keep = new Uint8Array(n), guide = new Uint8ClampedArray(b.painted), mask = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    keep[i] = hole[i] ? 0 : 1; c.known[i] = keep[i]; mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = hole[i] ? 255 : 0; mask[i * 4 + 3] = 255;
+    if (hole[i]) { c.holeCount++; c.z[i] = 0; c.type[i] = 0; c.object[i] = 0; c.rgba[i * 4] = c.rgba[i * 4 + 1] = c.rgba[i * 4 + 2] = 128; }
+  }
+  if (!c.holeCount) throw new Error('消す物が見つかりませんでした');
+  for (let ch = 0; ch < 3; ch++) { const v = new Float32Array(n); for (let i = 0; i < n; i++) v[i] = b.painted[i * 4 + ch]; const f = pullPush(v, keep, W, H); for (let i = 0; i < n; i++) if (hole[i]) guide[i * 4 + ch] = f[i]; }
+  const ex = b.def.extrinsics, cand = { position: [...ex.position], target: [...ex.target] }, cam = { W, H, fx: b.fx, fy: b.fy, cx: b.cx, cy: b.cy, c2w: b.c2w, w2c: b.w2c };
+  await io.savePaint(`${name}_reproj.png`, c.rgba, W, H);
+  await io.savePaint(`${name}_holes.png`, mask, W, H);
+  await io.savePaint(`${name}_new.png`, mask, W, H);
+  await io.savePaint(`${name}_plateguide.png`, guide, W, H);
+  await saveGeometry(D, name, c, extendDepth(c, { cam, groundY: groundY(D) }), cam, io);
+  await io.saveAdded([...(await io.loadAdded()).filter((v) => v.name !== name), { ...viewDef(D, name, cand, cam), plate: { types: given ? ['mask'] : types, grow } }]);
+  return { holes: c.holeCount, pixels: n };
 }
 
 /**

@@ -17,6 +17,9 @@
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
+//   node add-view.mjs --scene jatte --plate --fill codex [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
+//     「物を消した背景」の視点を足す：もとの視点のまま、人や動物の所を穴にして、その後ろの背景（芝・水・遠くの木）だけを Codex に描いてもらう（絵 1 枚）。
+//     物の後ろが粒になるので、横や前へ動いたときに物の陰に開く隙間が埋まる。もとの絵は動かさないので、物の縁が伸びたり割れたりしない。
 //   node add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
 //     もうある視点 R1 の、穴の奥行きだけを決め直す（絵は描かない。利用枠も使わない）。奥行きの決め方を直したあとに使う。
 //     前に推定した「近さ」の絵（R1_disp.png）をそのまま使う。--new-depth を付けると推定からやり直す
@@ -29,7 +32,7 @@ import { loadScene, rgbaOf, savePng } from './import-views.mjs';
 import * as dream from '../studio/dreamviews.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.resolve(HERE, '..');
-const FLAGS = new Set(['dry-run', 'new-depth']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'none'];
+const FLAGS = new Set(['dry-run', 'new-depth', 'plate']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'none'];
 
 function args() {
   const a = { scene: 'jatte', right: 0, forward: 0, up: 0, yaw: 0, pitch: 0, orbit: 0, 'orbit-dist': 8, fill: 'none' }, v = process.argv.slice(2);
@@ -102,15 +105,32 @@ async function main() {
     loadAdded: async () => (fs.existsSync(S.addedFile) ? JSON.parse(fs.readFileSync(S.addedFile, 'utf8')) : []),
     saveAdded: async (list) => fs.writeFileSync(S.addedFile, JSON.stringify(list, null, 1)),
   };
-  for (const kind of ['painted', 'disp', 'layout', 'overlay']) fs.rmSync(path.join(S.P, `${name}_${kind}.png`), { force: true }); // 同じ名前の古い絵が残っていたら消す
-  // 1. 写す
+  for (const kind of ['painted', 'disp', 'layout', 'overlay', 'plateguide']) fs.rmSync(path.join(S.P, `${name}_${kind}.png`), { force: true }); // 同じ名前の古い絵が残っていたら消す
+  // 1. 写す（--plate のときは、もとの視点のまま、人や動物の所を穴にする）
+  const P = (kind) => path.join(S.P, `${name}_${kind}.png`);
+  if (a.plate) {
+    const types = String(a['plate-types'] || 'figure').split(',').map((t) => t.trim()).filter(Boolean), grow = a['plate-grow'] === undefined ? 10 : a['plate-grow'];
+    let mask = null;
+    if (typeof a['plate-mask'] === 'string') { const b = dream.baseView(D), m = (await rgbaOf(path.resolve(a['plate-mask']), b.W, b.H)).data; mask = new Uint8Array(b.W * b.H); for (let i = 0; i < mask.length; i++) mask[i] = m[i * 4] > 127 ? 1 : 0; }
+    const { holes, pixels } = await dream.addPlateView(D, name, io, { grow, types, mask });
+    console.log(`視点 ${name}：もとの視点のまま、${mask ? '渡された切り抜き' : types.join('・')} の所を穴にしました（輪郭から ${grow} 画素ぶん広げて、絵の ${(100 * holes / pixels).toFixed(1)}%）。穴には、物の後ろの背景だけを描きます。`);
+    if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。'); return; }
+    if (a.fill !== 'codex') throw new Error('--plate の穴は、--fill codex か --fill none で埋めてください');
+    const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--plate', '--image', P('reproj'), '--mask', P('holes'), '--guide', P('plateguide'), '--out', P('painted'), '--grow', '0'];
+    if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
+    if (a['dry-run']) argv.push('--dry-run');
+    const code = run(process.execPath, argv, path.join(ROOT, 'paint'));
+    if (code !== 0) throw new Error(`穴を埋められませんでした（終了コード ${code}）。視点 ${name} は穴が残ったままです`);
+    if (a['dry-run'] || !fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで取り消せます。`); return; }
+    await refine(dir, name); return;
+  }
   const cand = candidate(D, a);
   const { holes, pixels } = await dream.addView(D, cand, name, io);
   console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%`);
   if (!holes) { fs.copyFileSync(path.join(S.P, `${name}_reproj.png`), path.join(S.P, `${name}_painted.png`)); console.log('穴が無いので、描き足しません。'); return; }
   if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。「視点を足す」のタブの「2. 穴を埋める」で埋められます。'); return; }
   // 2. 埋める（画面のサーバーと同じ引数で paint.mjs を呼ぶ）
-  const P = (kind) => path.join(S.P, `${name}_${kind}.png`), withLayout = a.fill === 'nvscodex';
+  const withLayout = a.fill === 'nvscodex';
   const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', withLayout ? dream.LAYOUT_HINT : dream.FILL_HINT];
   if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
   if (a.fill === 'local') { argv.push('--local', ...(process.env.PSF_INPAINT ? [process.env.PSF_INPAINT] : [])); if (a['local-model']) argv.push('--local-model', String(a['local-model'])); }

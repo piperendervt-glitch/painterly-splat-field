@@ -93,3 +93,23 @@ node painting/add-view.mjs --scene jatte --orbit 10 --orbit-dist 8 --fill none  
 ```
 PSF_SCENE=jatte PSF_NVS=$PWD/paint/test/fake-nvs.sh PSF_INPAINT=$PWD/paint/test/fake-inpaint.sh PAINT_CODEX=$PWD/paint/test/fake-codex.sh npx vite
 ```
+
+### 物を消した背景の視点（--plate）
+
+立つ場所を動かした視点は、もとの絵を奥行きで動かすので、人物の縁が伸びたり割れたりしやすい。物の陰に開く隙間を埋めるだけなら、もとの視点のまま「人や動物を消した背景」を描いてもらうほうが崩れない。
+
+```
+node painting/add-view.mjs --scene jatte --plate --fill codex [--plate-grow 10] [--plate-types figure] [--plate-mask 切り抜き.png] [--dry-run]
+```
+
+- もとの視点と同じカメラの視点を 1 つ足す。穴は、札が「人・動物」の所（`--plate-mask` を渡すと、その絵の白い所）を `--plate-grow` 画素ぶん広げた範囲。
+- 穴には、物の後ろの背景（芝・水・遠くの木）だけを Codex に描いてもらう（絵 1 枚）。描いた所は、奥行きを推定して地面の平面に載せ、物の後ろの粒になる。
+- 札は絵から自動で付けた物なので、人なのに札が付いていない所は残る。外で作った正確な切り抜きがあれば `--plate-mask` で渡す。
+
+### 穴の奥行きだけを決め直す（--redo-depth）
+
+```
+node painting/add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
+```
+
+絵は描かず、利用枠も使わない。奥行きの決め方を直したあとに、もうある視点へ反映するときに使う。
