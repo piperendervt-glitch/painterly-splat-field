@@ -4,7 +4,7 @@
 // 置き方は粒の空間と同じ（studio/objectmodel.js の fitContext・fitModel・modelSplats）。
 //
 //   node painting/objcloud.mjs --previz-export <dir> --paint-out <dir> [--seg depth|sam3] [--method hunyuanmv|hunyuan3d|trellismv|trellis|sam3d|best]
-//                              [--ids 3,5] [--pick 10043=trellis,...] [--stride 1.5] [--near 5] [--min-pixels 50] [--min-iou 0] [--min-thick 0.1] [--back paint|model] [--out <file.ply>]
+//                              [--ids 3,5] [--pick 10043=trellis,...] [--stride 1.5] [--near 5] [--min-pixels 50] [--min-iou 0] [--min-thick 0.1] [--back paint|model] [--jitter-tol 90] [--out <file.ply>]
 //
 // 出すもの（paint-out に）：
 //   objcloud_<版>_<作り方>.ply   点の ply（binary little endian）。世界座標（cameras.json の three.js の座標、m、+Y が上）
@@ -175,7 +175,7 @@ function rowsOf(view, target) {
   return rows;
 }
 /** 点の色を、絵の視点から見てその点を通る物の画素の色にする（--back paint） */
-function paintThrough(cols, n, view, target, rows) {
+function paintThrough(cols, n, view, target, rows, jitterTol = 90) {
   const { W, H, px } = view, w = view.w2c, { fx, fy, cx: icx, cy: icy } = view.intr, ys = [...rows.keys()];
   if (!ys.length) return;
   // 絵から見えない側の点は、引く画素を少し散らす（同じ行の画素が奥へ並んで、横の縞になるのを防ぐ）。散らす幅は物の大きさに比例
@@ -194,15 +194,21 @@ function paintThrough(cols, n, view, target, rows) {
       const e = near(u); u = view.object[v * W + u] === target.id ? u : near(2 * e - u + Math.sign(e - u) * 3);
     }
     const ex = eye[0] - x, ey = eye[1] - y, ez = eye[2] - z, facing = (cols.normal[i * 3] * ex + cols.normal[i * 3 + 1] * ey + cols.normal[i * 3 + 2] * ez) / 127 / (Math.hypot(ex, ey, ez) || 1);
-    if (facing < 0.2) for (let k = 0; k < 4; k++) { // 裏・横：近くの物の画素から 1 つ選ぶ
-      const a = rnd() * 2 * Math.PI, r = Math.sqrt(rnd()) * R, uu = Math.round(u + Math.cos(a) * r), vv = Math.round(v + Math.sin(a) * r);
-      if (uu >= 0 && vv >= 0 && uu < W && vv < H && view.object[vv * W + uu] === target.id) { u = uu; v = vv; break; }
+    if (facing < 0.2) { // 裏・横：近くの、色が近い物の画素から 1 つ選ぶ（顔や襟の色が上着に飛ばないように、縦は狭く、色が離れた画素は使わない）
+      const b = (v * W + u) * 4;
+      for (let k = 0; k < 6; k++) {
+        const uu = Math.round(u + (rnd() * 2 - 1) * R), vv = Math.round(v + (rnd() * 2 - 1) * Math.max(1, R * 0.25));
+        if (uu < 0 || vv < 0 || uu >= W || vv >= H || view.object[vv * W + uu] !== target.id) continue;
+        const q = (vv * W + uu) * 4;
+        if (Math.abs(px[q] - px[b]) + Math.abs(px[q + 1] - px[b + 1]) + Math.abs(px[q + 2] - px[b + 2]) > jitterTol) continue;
+        u = uu; v = vv; break;
+      }
     }
     const q = (v * W + u) * 4; cols.color[i * 3] = px[q]; cols.color[i * 3 + 1] = px[q + 1]; cols.color[i * 3 + 2] = px[q + 2];
   }
 }
 
-export async function objectCloud({ exportDir, paintOut, seg = 'depth', method = 'best', ids = null, stride = 1.5, near = 5, minPixels = 50, minIou = 0, minThick = 0.1, back = 'paint', pick = {}, log = console.log }) {
+export async function objectCloud({ exportDir, paintOut, seg = 'depth', method = 'best', ids = null, stride = 1.5, near = 5, minPixels = 50, minIou = 0, minThick = 0.1, back = 'paint', pick = {}, jitterTol = 90, log = console.log }) {
   const view = await loadView(exportDir, paintOut, seg);
   const targets = objectTargets(view, { front: FRONT, minPixels }).filter((t) => !ids || ids.includes(t.id));
   const files = modelFiles(paintOut, seg), labelOf = new Map((view.objectsMeta || []).map((o) => [o.id, o.label || o.class || o.name || o.type]));
@@ -228,7 +234,7 @@ export async function objectCloud({ exportDir, paintOut, seg = 'depth', method =
     const fallback = k ? [r / k, g / k, b / k] : [128, 128, 128];
     const spacing = target.depth / view.intr.fx * stride * (near > 0 && target.depth < near ? 0.5 : 1), n = Math.max(2000, Math.min(1500000, Math.round(fit.area * fit.scale * fit.scale / (spacing * spacing))));
     const p = modelSplats(model.points(n, fit.up, 2), fit, view, target, { spacing, px: view.px, paint: true, fallback });
-    if (back === 'paint') paintThrough(p.columns, p.count, view, target, rowsOf(view, target));
+    if (back === 'paint') paintThrough(p.columns, p.count, view, target, rowsOf(view, target), jitterTol);
     parts.push({ id: target.id, cols: p.columns, n: p.count, radius: spacing * 0.7 });
     report.push({ ...entry, method: m, file: path.basename(have[m]), iou: +fit.iou.toFixed(3), colorSim: fit.hasColor ? +fit.colorSim.toFixed(3) : null, yawDeg: Math.round(fit.offset * 180 / Math.PI), up: fit.up,
       thick: +fit.thick.toFixed(3), scale: +fit.scale.toFixed(4), center: fit.center.map((x) => +x.toFixed(3)), height: +fit.height.toFixed(3), points: p.count, seenFromPainting: p.seen, radius: +(spacing * 0.7).toFixed(4) });
@@ -265,7 +271,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (method !== 'best' && !METHODS.includes(method)) throw new Error(`--method は ${METHODS.join(' / ')} / best のどれかです`);
     const ids = typeof o.ids === 'string' ? o.ids.split(',').map(Number).filter((n) => n > 0) : null, paintOut = path.resolve(o['paint-out']);
     console.log(`物の点群を作ります（切り分け ${seg}、作り方 ${method}）`);
-    const t0 = Date.now(), { view, parts, report } = await objectCloud({ exportDir: path.resolve(o['previz-export']), paintOut, seg, method, ids, stride: Number(o.stride) || 1.5, near: o.near !== undefined ? Number(o.near) : 5, minPixels: Number(o['min-pixels']) || 50, minIou: Number(o['min-iou']) || 0, minThick: o['min-thick'] !== undefined ? Number(o['min-thick']) : 0.1, back: o.back === 'model' ? 'model' : 'paint', pick: Object.fromEntries(String(typeof o.pick === 'string' ? o.pick : '').split(',').map((x) => x.split('=')).filter(([k, v]) => Number(k) > 0 && (METHODS.includes(v) || v === 'best')).map(([k, v]) => [Number(k), v])) });
+    const t0 = Date.now(), { view, parts, report } = await objectCloud({ exportDir: path.resolve(o['previz-export']), paintOut, seg, method, ids, stride: Number(o.stride) || 1.5, near: o.near !== undefined ? Number(o.near) : 5, minPixels: Number(o['min-pixels']) || 50, minIou: Number(o['min-iou']) || 0, minThick: o['min-thick'] !== undefined ? Number(o['min-thick']) : 0.1, back: o.back === 'model' ? 'model' : 'paint', jitterTol: o['jitter-tol'] !== undefined ? Number(o['jitter-tol']) : 90, pick: Object.fromEntries(String(typeof o.pick === 'string' ? o.pick : '').split(',').map((x) => x.split('=')).filter(([k, v]) => Number(k) > 0 && (METHODS.includes(v) || v === 'best')).map(([k, v]) => [Number(k), v])) });
     const base = o.out ? path.resolve(String(o.out)).replace(/\.ply$/i, '') : path.join(paintOut, `objcloud_${seg}_${method}`);
     const total = writePointPly(`${base}.ply`, parts);
     const missing = report.filter((r) => r.missing).map((r) => r.id), rejected = report.filter((r) => r.rejected).map((r) => ({ id: r.id, reason: r.reason, method: r.method, iou: r.iou, thick: r.thick }));
