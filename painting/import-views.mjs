@@ -2,7 +2,7 @@
 // 外の手法で作った「絵＋奥行き＋カメラ」の組を、絵 1 枚の場面に「足した視点」として取り込む。
 //
 // 使い方：
-//   node import-views.mjs --scene jatte --run <views.json のあるフォルダ> [--prefix X] [--every 1] [--scale 1] [--all] [--no-carve] [--no-settle] [--min-conf 0] [--dry]
+//   node import-views.mjs --scene jatte --run <views.json のあるフォルダ> [--prefix X] [--every 1] [--scale 1] [--all] [--no-carve] [--no-settle] [--no-flatten] [--min-conf 0] [--dry]
 //
 // 入力（<run>/views.json。docs/external-methods.md の「視点の組の形式」）：
 //   camera_convention : OpenCV（+x 右、+y 下、+z 前）。c2w はカメラ → 世界。世界 = もとの絵（is_input が true のコマ）のカメラ座標
@@ -12,7 +12,8 @@
 //   1. カメラを、この道具の世界（もとの視点 J のカメラを基準、three.js の向き）へ直す。距離は --scale 倍する
 //   2. すでにある絵（もとの絵と、先に足した視点）をそのコマのカメラへ写し、写らなかった所だけを「新しい粒にする画素」にする（--all で全画素）。
 //      もとの視点から見て、絵に描かれた面より手前に来る点は、もとの絵と食い違うので捨てる（--no-carve で捨てない）
-//      新しい画素の奥行きは、場面の形に合わせて整える：物の陰から現れた所は背景の側の奥行き、地面は平面の式（--no-settle でそのまま使う）
+//      新しい画素の奥行きは、場面の形に合わせて整える：物の陰から現れた所は背景の側の奥行き、地面は平面の式（--no-settle でそのまま使う）。
+//      傾いて推定された地面（絵の端で芝が斜めの板になって浮く所）も平面に載せる（--no-flatten でやらない）
 //   3. 種類の札を、高さと色から付ける（studio/dream.js の labelHoles）
 //   4. scenes/<場面>/paint-out と previz-export に、足した視点と同じ名前の付け方で保存し、added_views.json に書き足す
 // 名前は <prefix>1, <prefix>2, …（初めは X。.gitignore が X<数字>_*.png を外してある）。
@@ -28,7 +29,7 @@ function args() {
   const a = { scene: 'jatte', prefix: 'X', every: 1, scale: 1, 'min-conf': 0 }, v = process.argv.slice(2);
   for (let i = 0; i < v.length; i++) {
     const k = v[i].replace(/^--/, '');
-    if (k === 'all' || k === 'dry' || k === 'no-carve' || k === 'no-settle') { a[k] = true; continue; }
+    if (k === 'all' || k === 'dry' || k === 'no-carve' || k === 'no-settle' || k === 'no-flatten') { a[k] = true; continue; }
     const x = v[++i]; a[k] = x !== '' && !isNaN(Number(x)) ? Number(x) : x;
   }
   if (!a.run) { console.error('--run <views.json のあるフォルダ> を指定してください'); process.exit(1); }
@@ -128,7 +129,7 @@ async function main() {
     // すでにある絵をこのカメラへ写す。写らなかった所が、新しく粒にする画素
     const c = compose(warp(cam, sources), sources, { skyType: ids.sky }), fresh = new Uint8Array(n);
     // 穴の奥行きを場面の形に合わせて整える：物の陰から現れた所は背景の側の奥行き、地面は平面の式（studio/dream.js の settleHoleDepth）
-    const settled = a['no-settle'] || a.all ? null : settleHoleDepth({ W, H, hole: c.hole, z: Float32Array.from(c.z, (v, i) => (c.hole[i] ? 0 : v)) }, z, { cam, groundY });
+    const settled = a['no-settle'] || a.all ? null : settleHoleDepth({ W, H, hole: c.hole, z: Float32Array.from(c.z, (v, i) => (c.hole[i] ? 0 : v)) }, z, { cam, groundY, maxSlope: a['no-flatten'] ? 0 : 35 });
     let count = 0, carved = 0;
     for (let i = 0; i < n; i++) {
       fresh[i] = (a.all || c.hole[i]) && z[i] > 0 ? 1 : 0;
@@ -145,7 +146,7 @@ async function main() {
       width: W, height: H, intrinsics: { fx: f.fx, fy: f.fy, cx: f.cx, cy: f.cy, fov_y_deg: +(2 * Math.atan(H / 2 / f.fy) * 180 / Math.PI).toFixed(6), K: [[f.fx, 0, f.cx], [0, f.fy, f.cy], [0, 0, 1]] },
       extrinsics: { position: pos.map((x) => +x.toFixed(4)), target: pos.map((x, k) => +(x + fwd[k] * 10).toFixed(4)), camera_to_world: rows(c2w), world_to_camera: rows(w2c) },
     };
-    console.log(`  ${name} ← ${f.image}：${W}×${H}、位置 ${def.extrinsics.position.join(', ')}、新しく粒にする画素 ${(100 * count / n).toFixed(1)}%（もとの絵と食い違うので捨てた画素 ${(100 * carved / n).toFixed(1)}%${settled ? `、背景の奥行きにした画素 ${(100 * settled.slivers / n).toFixed(1)}%、地面の平面に載せた画素 ${(100 * settled.snapped / n).toFixed(1)}%` : ''}）`);
+    console.log(`  ${name} ← ${f.image}：${W}×${H}、位置 ${def.extrinsics.position.join(', ')}、新しく粒にする画素 ${(100 * count / n).toFixed(1)}%（もとの絵と食い違うので捨てた画素 ${(100 * carved / n).toFixed(1)}%${settled ? `、背景の奥行きにした画素 ${(100 * settled.slivers / n).toFixed(1)}%、地面の平面に載せた画素 ${(100 * settled.snapped / n).toFixed(1)}%、傾いていたので地面に直した画素 ${(100 * settled.flattened / n).toFixed(1)}%` : ''}）`);
     if (a.dry) continue;
     const mask = new Uint8ClampedArray(n * 4); for (let i = 0; i < n; i++) { mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = fresh[i] ? 255 : 0; mask[i * 4 + 3] = 255; }
     const L = labelPngs(lab.type, lab.object, n);

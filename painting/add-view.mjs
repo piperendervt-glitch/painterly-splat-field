@@ -17,6 +17,9 @@
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
+//   node add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
+//     もうある視点 R1 の、穴の奥行きだけを決め直す（絵は描かない。利用枠も使わない）。奥行きの決め方を直したあとに使う。
+//     前に推定した「近さ」の絵（R1_disp.png）をそのまま使う。--new-depth を付けると推定からやり直す
 // できた視点は R1, R2, … の名前で added_views.json に加わる。取り消すときは「視点を足す」のタブの「取り消す」。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,7 +29,7 @@ import { loadScene, rgbaOf, savePng } from './import-views.mjs';
 import * as dream from '../studio/dreamviews.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.resolve(HERE, '..');
-const FLAGS = new Set(['dry-run']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'none'];
+const FLAGS = new Set(['dry-run', 'new-depth']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'none'];
 
 function args() {
   const a = { scene: 'jatte', right: 0, forward: 0, up: 0, yaw: 0, pitch: 0, orbit: 0, 'orbit-dist': 8, fill: 'none' }, v = process.argv.slice(2);
@@ -66,8 +69,28 @@ function candidate(D, a) {
 
 const run = (cmd, argv, cwd) => { const r = spawnSync(cmd, argv, { cwd, stdio: 'inherit', windowsHide: true }); if (r.error) throw new Error(`${path.basename(argv[0])} を起動できません：${r.error.message}`); return r.status; };
 
+// 3. 埋めた絵の奥行きを推定して、すでにある面に合わせる（reuse = true なら、前に推定した「近さ」の絵があればそれを使う）
+async function refine(dir, name, reuse = false) {
+  const { S, D } = await sceneData(dir), P = (kind) => path.join(S.P, `${name}_${kind}.png`);
+  const v = D.views.find((x) => x.name === name);
+  if (!v || !v.added) throw new Error(`足した視点 ${name} がありません`);
+  if (!fs.existsSync(P('painted')) || !fs.existsSync(P('holes'))) throw new Error(`視点 ${name} の埋めた絵（または穴の印）がありません`);
+  if (!(reuse && fs.existsSync(P('disp')))) {
+    if (!fs.existsSync(path.join(HERE, 'node_modules', 'onnxruntime-node'))) { console.log('奥行き推定の用意がまだ無いので、穴の奥行きは仮の値のままです（painting フォルダで npm install）。'); return; }
+    if (run(process.env.PSF_DEPTH_NODE || process.execPath, [path.join(HERE, 'depth.mjs'), '--image', P('painted'), '--out', P('disp')], HERE) !== 0) { console.log('奥行きを推定できませんでした。穴の奥行きは仮の値のままです。'); return; }
+  }
+  const io = { saveExport: (file, rgba, W, H) => savePng(path.join(S.E, file), rgba, W, H), savePaint: (file, rgba, W, H) => savePng(path.join(S.P, file), rgba, W, H) };
+  const holesImg = (await rgbaOf(P('holes'), v.W, v.H)).data, dp = (await rgbaOf(P('disp'), v.W, v.H)).data, disp = new Float32Array(v.W * v.H);
+  for (let i = 0; i < disp.length; i++) disp[i] = (dp[i * 4] * 256 + dp[i * 4 + 1]) / 65535;
+  const r = await dream.refineDepth(D, v, holesImg, disp, io);
+  console.log(r ? `埋めた絵の奥行きを推定して、すでにある面に合わせました（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}、もとの絵の手前に来たので粒にしない画素 ${r.carved}、物の陰で背景の奥行きにした画素 ${r.slivers}、地面の平面に載せた画素 ${r.snapped}、傾いていたので地面に直した画素 ${r.flattened}）。`
+    : '奥行きを合わせる手がかりが足りないので、穴の奥行きは仮の値のままです。');
+  console.log(`終わりました。「粒の空間」で「ファイルを読み直す」を押すと、視点 ${name} が${reuse ? '新しい奥行きになります' : '加わります'}。`);
+}
+
 async function main() {
   const a = args(), dir = path.join(ROOT, 'scenes', String(a.scene));
+  if (a['redo-depth'] !== undefined) { await refine(dir, String(a['redo-depth']), !a['new-depth']); return; } // もうある視点の、穴の奥行きだけを決め直す（何も描かない）
   let { S, D } = await sceneData(dir);
   if (!dream.baseView(D)) throw new Error('もとの視点の絵がありません');
   const used = new Set([...S.cams.views, ...S.added].map((v) => v.name));
@@ -105,18 +128,7 @@ async function main() {
   const code = run(process.execPath, argv, path.join(ROOT, 'paint'));
   if (code !== 0) throw new Error(`穴を埋められませんでした（終了コード ${code}）。視点 ${name} は穴が残ったままです`);
   if (a['dry-run'] || !fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで埋めるか、取り消してください。`); return; }
-  // 3. 埋めた絵の奥行きを推定して、すでにある面に合わせる
-  if (!fs.existsSync(path.join(HERE, 'node_modules', 'onnxruntime-node'))) { console.log('奥行き推定の用意がまだ無いので、穴の奥行きは仮の値のままです（painting フォルダで npm install）。'); return; }
-  if (run(process.env.PSF_DEPTH_NODE || process.execPath, [path.join(HERE, 'depth.mjs'), '--image', P('painted'), '--out', P('disp')], HERE) !== 0) { console.log('奥行きを推定できませんでした。穴の奥行きは仮の値のままです。'); return; }
-  ({ S, D } = await sceneData(dir));
-  const v = D.views.find((x) => x.name === name);
-  if (!v) throw new Error(`視点 ${name} を読み直せません`);
-  const holesImg = (await rgbaOf(P('holes'), v.W, v.H)).data, dp = (await rgbaOf(P('disp'), v.W, v.H)).data, disp = new Float32Array(v.W * v.H);
-  for (let i = 0; i < disp.length; i++) disp[i] = (dp[i * 4] * 256 + dp[i * 4 + 1]) / 65535;
-  const r = await dream.refineDepth(D, v, holesImg, disp, io);
-  console.log(r ? `埋めた絵の奥行きを推定して、すでにある面に合わせました（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}、もとの絵の手前に来たので粒にしない画素 ${r.carved}、物の陰で背景の奥行きにした画素 ${r.slivers}、地面の平面に載せた画素 ${r.snapped}）。`
-    : '奥行きを合わせる手がかりが足りないので、穴の奥行きは仮の値のままです。');
-  console.log(`終わりました。「粒の空間」で「ファイルを読み直す」を押すと、視点 ${name} が加わります。`);
+  await refine(dir, name);
 }
 
 main().catch((e) => { console.error(`止まりました：${e.message}`); process.exit(1); });

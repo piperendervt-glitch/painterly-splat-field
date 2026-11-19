@@ -204,12 +204,14 @@ export function foregroundSide(c, { cam = null, groundY = 0, ratio = 1.12, reach
  *      ただし、その画素を通る線が背景の物より手前で地面に当たるなら、見えるのは地面（背景の物の足もとより下）なので、平面の式の奥行きにする。
  *      奥行きの推定は物の輪郭でぼやけるので、推定のままだと穴の点が物の輪郭にまとわり付いたり、背景から浮いたりする。
  *   2. ほかの穴：地面より下に来た点は地面に載せる。高さが地面に近い点も平面の式に載せる（立っている物の足もと＝すぐ上が同じ奥行きで高い所は除く）。
- * 返すもの：{ slivers（1 で決めた画素）, snapped（2 で平面に載せた画素） }
+ *   3. 傾いて推定された地面：地面に載った所とつながっていて、面が寝ている所（傾き maxSlope 度まで、高さ maxLying m まで。maxSlope = 0 でやらない）。
+ *      奥行きの推定は絵の端で傾きやすく、芝が斜めの板になって地面から浮く。
+ * 返すもの：{ slivers（1 で決めた画素）, snapped（2 で平面に載せた画素）, flattened（3 で平面に載せた画素） }
  */
-export function settleHoleDepth(c, z, { cam = null, groundY = 0, side = null, skyZ = 400 } = {}) {
+export function settleHoleDepth(c, z, { cam = null, groundY = 0, side = null, skyZ = 400, maxSlope = 35, maxLying = 1.5 } = {}) {
   const { W, H } = c, n = W * H;
   side = side || foregroundSide(c, { cam, groundY });
-  let slivers = 0, snapped = 0;
+  let slivers = 0, snapped = 0, flattened = 0;
   const zp = new Float32Array(n);
   if (cam) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (c.hole[i]) { const p = planeDepth(cam, x, y, groundY); zp[i] = p > 0 && p < skyZ ? p : 0; } }
   for (let i = 0; i < n; i++) {
@@ -231,9 +233,38 @@ export function settleHoleDepth(c, z, { cam = null, groundY = 0, side = null, sk
       if (up >= 0) { const j = up * W + x, zj = zAt(j); if (zj > 0 && Math.abs(Math.log(zj / z[i])) < 0.1 && h[j] > 0.4) continue; }
       out[i] = zp[i]; snapped++;
     }
+    // 3. 傾いて推定された地面：地面に載った所とつながっていて、面が寝ている（奥へ行くほど少しずつ高くなる板のような）所は、地面として平面に載せる。
+    //    立っている物は面が立っている（上下の画素で、奥へはほとんど進まずに高さだけ変わる）ので、ここには入らない。
+    const m = cam.c2w, k = Math.max(4, Math.round(H / 128)), tan = Math.tan(maxSlope * Math.PI / 180);
+    const world = (x, y, zi) => { const xc = (x + 0.5 - cam.cx) / cam.fx * zi, yc = -(y + 0.5 - cam.cy) / cam.fy * zi; return [m[0] * xc + m[1] * yc - m[2] * zi + m[3], m[4] * xc + m[5] * yc - m[6] * zi + m[7], m[8] * xc + m[9] * yc - m[10] * zi + m[11]]; };
+    const lying = (x, y) => { // 上下 k 画素先との間で、面の傾きが maxSlope より寝ているか（比べられる相手がみな寝ていること）
+      const i = y * W + x, p = world(x, y, z[i]); let seen = 0;
+      for (const yy of [y - k, y + k]) {
+        if (yy < 0 || yy >= H) continue;
+        const zj = zAt(yy * W + x); if (!(zj > 0)) continue;
+        const q = world(x, yy, zj), run = Math.hypot(q[0] - p[0], q[2] - p[2]);
+        if (Math.abs(q[1] - p[1]) > run * tan) return false;
+        seen++;
+      }
+      return seen > 0;
+    };
+    const done = new Uint8Array(n); let queue = [];
+    for (let i = 0; i < n; i++) if (c.hole[i] ? zp[i] > 0 && out[i] === zp[i] : Math.abs(h[i]) < 0.12) { done[i] = 1; queue.push(i); }
+    while (maxSlope > 0 && queue.length) {
+      const next = [];
+      for (const i of queue) {
+        const x = i % W, y = (i - x) / W;
+        for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) {
+          if (j < 0 || done[j] || !c.hole[j] || side.run[j] || !(zp[j] > 0) || !(z[j] > 0) || !(h[j] > 0 && h[j] <= maxLying)) continue;
+          if (!lying(j % W, (j / W) | 0)) continue;
+          done[j] = 1; out[j] = zp[j]; flattened++; next.push(j);
+        }
+      }
+      queue = next;
+    }
     z.set(out);
   }
-  return { slivers, snapped };
+  return { slivers, snapped, flattened };
 }
 
 /**
@@ -261,9 +292,9 @@ export function extendDepth(c, { cam = null, groundY = 0 } = {}) {
  *   3. とても遠い所（skyZ より遠い）と、近さがほぼ 0 の所は空にする
  *   4. 手前の物に接した穴は背景の側の奥行きに寄せ、地面の高さの所は平面の式に載せる（settleHoleDepth。cam = { fx, fy, cx, cy, c2w } があるとき）
  * 2 と 4 では、穴に接した「手前の物」の面（foregroundSide）を手がかりから外す。
- * 返すもの：{ z（穴も埋まった奥行き。空は 0）, a, b, samples, skyHoles, slivers, snapped } または null（合わせられなかった）
+ * 返すもの：{ z（穴も埋まった奥行き。空は 0）, a, b, samples, skyHoles, slivers, snapped, flattened } または null（合わせられなかった）
  */
-export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, groundY = 0 } = {}) {
+export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, groundY = 0, maxSlope = 35 } = {}) {
   const { W, H } = c, n = W * H;
   let lo = Infinity, hi = -Infinity; for (let i = 0; i < n; i++) { if (disp[i] < lo) lo = disp[i]; if (disp[i] > hi) hi = disp[i]; }
   if (!(hi > lo)) return null;
@@ -289,7 +320,7 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, ground
     const iz = a * disp[i] + b + f[i];
     if (iz < 1 / skyZ || disp[i] - lo < 0.01 * (hi - lo)) { z[i] = 0; skyHoles++; } else z[i] = Math.max(minZ, 1 / iz);
   }
-  const settled = settleHoleDepth(c, z, { cam, groundY, side });
+  const settled = settleHoleDepth(c, z, { cam, groundY, side, maxSlope });
   return { z, a, b, samples: xs.length, skyHoles, ...settled };
 }
 
