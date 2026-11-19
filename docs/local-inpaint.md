@@ -113,3 +113,17 @@ node painting/add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
 ```
 
 絵は描かず、利用枠も使わない。奥行きの決め方を直したあとに、もうある視点へ反映するときに使う。
+
+### もとの絵の切り抜きを取り替える（painting/relabel.mjs）
+
+`painting/build.mjs` の「人・動物」の切り抜きは奥行きの推定から作るので粗い（人なのに木や地面の札になる、日傘が半分だけ人になる、足もとが四角くなる）。外で作った正確な切り抜き（物ごとの番号の絵）があれば、それで札と奥行きを書き直せる。
+
+```
+node painting/relabel.mjs --scene jatte --instances instances.png --json instances.json [--dry]
+```
+
+- `instances.png` は画素ごとの物の番号（0 = 物なし。16bit の灰色か、8bit の RGB で番号 = R + G × 256）、`instances.json` は `[{ "id": 1, "class": "person" }, …]`。class に `trunk` を含む物は木の幹として扱う。
+- 切り抜きの中は、物ごとに 1 枚の立った板にそろえる。奥行きは、足もとが地面に着く所（地面の平面の式）。足もとが絵の端で切れている物・ほかの物に隠れている物・小さなかけらは、今の奥行きを使う。
+- 切り抜きの外で今まで「人・動物」だった所は、地面（地平線より上はまわりの背景）に戻す。
+- 前の奥行き・札・cameras.json は `_v1` の名前で残す。`--dry` は表だけ出して何も書かない。
+- もとの視点の形が変わるので、足した視点は入れ直す（`import-views.mjs` をやり直す、`add-view.mjs --redo-depth`）。
