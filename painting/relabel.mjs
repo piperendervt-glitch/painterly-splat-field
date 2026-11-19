@@ -14,6 +14,7 @@
 //      どの物も、まわりに見えている背景より奥には置かない（遠くの舟や岸の人は、地面の式だと奥へ行きすぎる）。
 //      幹は、今の奥行きが「立っている」値ならそのまま（上の葉と離れないように）、地面に寝ていたら足もとの奥行きにする。
 //   2. 切り抜きの外で、今まで「人・動物」だった所（四角い足もとなど）：地平線より下は地面に、上はまわりの背景に戻す。
+//      ただし、立っている物にはさまれた細い線（傘の柄、杖）は、地面ではなく、その物の奥行きにする（遠い芝の筋が物を横切らないように）。
 //   3. 前の奥行き・札は <名前>_v1.png に残す（もうあれば上書きしない）。cameras.json の labels.objects も書き直す。
 // 足した視点（R…、X…）の絵は変えない。もとの視点の形が変わるので、足した視点は奥行きを決め直す（add-view --redo-depth、import-views のやり直し）とよい。
 import fs from 'node:fs';
@@ -143,8 +144,27 @@ async function main() {
     if (o.z > 0) { z[i] = o.z; lifted++; }
     else if (!(z[i] > 0)) z[i] = o.zOld > 0 ? o.zOld : far; // 幹で今の奥行きを使うとき、空だった画素だけ埋める
   }
+  // 切り抜きの外に残った細い線（傘の柄、杖など）：上の決まりでは地面の奥行きになるが、線の両側が立っている物（人、幹、遠くの群れ）なら、
+  // 線だけが遠い芝の奥行きになって、横から見ると物を横切る筋になる。細い所（幅 thin 画素まで）で両側が立っている物なら、近い側の奥行き・種類・番号にする
+  let joined = 0;
+  {
+    const thin = Math.max(6, Math.round(W / 128)), standing = (i, x, y) => { if (lost[i]) return false; if (type[i] === T.ground || type[i] === T.water || type[i] === T.sky || !(z[i] > 0)) return false; const zp = zPlane(x, y); return !(zp > 0) || z[i] < zp * 0.9; };
+    const side = (x, y, dx, dy) => { for (let k = 1; k <= thin; k++) { const xx = x + dx * k, yy = y + dy * k; if (xx < 0 || yy < 0 || xx >= W || yy >= H) return null; const j = yy * W + xx; if (!lost[j]) return { j, k, x: xx, y: yy }; } return null; };
+    const set = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; if (!lost[i]) continue;
+      let best = null;
+      for (const [dx, dy] of [[0, 1], [1, 0]]) {
+        const p = side(x, y, -dx, -dy), q = side(x, y, dx, dy);
+        if (!p || !q || p.k + q.k > thin + 1 || !standing(p.j, p.x, p.y) || !standing(q.j, q.x, q.y)) continue;
+        if (!best || p.k + q.k < best.span) best = { span: p.k + q.k, j: p.k <= q.k ? p.j : q.j };
+      }
+      if (best) set.push(i, best.j);
+    }
+    for (let k = 0; k < set.length; k += 2) { const i = set[k], j = set[k + 1]; z[i] = z[j]; type[i] = type[j]; object[i] = object[j]; joined++; }
+  }
   // ---- 報告 ----
-  console.log(`場面 ${a.scene}：切り抜き ${inst.size} 個（人・動物など ${order.filter((o) => !o.trunk).length}、幹 ${order.filter((o) => o.trunk).length}）。板の奥行きにそろえた画素 ${(100 * lifted / n).toFixed(1)}%、物から背景に戻した画素 ${(100 * cleared / n).toFixed(1)}%`);
+  console.log(`場面 ${a.scene}：切り抜き ${inst.size} 個（人・動物など ${order.filter((o) => !o.trunk).length}、幹 ${order.filter((o) => o.trunk).length}）。板の奥行きにそろえた画素 ${(100 * lifted / n).toFixed(1)}%、物から背景に戻した画素 ${(100 * cleared / n).toFixed(1)}%（そのうち、立っている物にはさまれた細い線なので、その物の奥行きにした画素 ${joined}）`);
   for (const o of order) console.log(`  ${String(o.id).padStart(4)} ${o.cls.padEnd(12)} ${String(o.count).padStart(7)} px  足もとの行 ${String(o.foot).padStart(4)}  今 ${o.zOld ? o.zOld.toFixed(2) : '  - '} m（立っている画素 ${(100 * o.standing).toFixed(0)}%）→ ${o.z ? o.z.toFixed(2) + ' m' : 'そのまま'}  ${o.rule}`);
   if (a.dry) { console.log('--dry：何も書き換えていません。'); return; }
   // ---- 書き出し（前の物は _v1 に残す） ----
