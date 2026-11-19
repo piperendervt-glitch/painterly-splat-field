@@ -73,7 +73,7 @@ node painting/objcloud.mjs --previz-export scenes/<場面>/previz-export --paint
 ブラウザを使わずに、物ごとの 3D を粒の空間と同じやり方（fitContext・fitModel・modelSplats）で絵の物の輪郭に合わせて置き、全部の向きの点にして書く。
 - `objcloud_<版>_<作り方>.ply`：点の ply。世界座標（cameras.json の three.js の座標、m、+Y が上）。x y z、nx ny nz、red green blue（絵から見えている側は絵の色、裏はモデルの色か物の平均色）、object_id、radius（m）
 - `objcloud_<版>_<作り方>.json`：物ごとの作り方・モデルのファイル・輪郭の重なり・色の近さ・向き・大きさ・高さ・点の数。モデルが無い物は missing
-- `--method best`：物ごとに、ある作り方のうち輪郭の重なりがいちばん高いもの。`--stride`：点の間隔を、その物の距離での絵の画素いくつぶんにするか
+- `--method best`：物ごとに、ある作り方のうち輪郭の重なりがいちばん高いもの。`--min-iou 0.6` などで、合わない物を外せる（json の rejected。受け取る側はその物を絵からの点のままにする）。`--stride`：点の間隔を、その物の距離での絵の画素いくつぶんにするか
 
 ## 流れを確かめるための、にせの道具
 
