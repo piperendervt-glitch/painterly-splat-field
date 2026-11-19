@@ -17,8 +17,9 @@
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
-//   node add-view.mjs --scene jatte --plate --fill codex [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
+//   node add-view.mjs --scene jatte --plate --fill codex|local [--local-model <名前>] [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
 //     「物を消した背景」の視点を足す：もとの視点のまま、人や動物の所を穴にして、その後ろの背景（芝・水・遠くの木）だけを Codex に描いてもらう（絵 1 枚）。
+//     --fill local なら PC の画像生成モデルで描く（利用枠なし）。
 //     物の後ろが粒になるので、横や前へ動いたときに物の陰に開く隙間が埋まる。もとの絵は動かさないので、物の縁が伸びたり割れたりしない。
 //   node add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
 //     もうある視点 R1 の、穴の奥行きだけを決め直す（絵は描かない。利用枠も使わない）。奥行きの決め方を直したあとに使う。
@@ -115,9 +116,13 @@ async function main() {
     const { holes, pixels } = await dream.addPlateView(D, name, io, { grow, types, mask });
     console.log(`視点 ${name}：もとの視点のまま、${mask ? '渡された切り抜き' : types.join('・')} の所を穴にしました（輪郭から ${grow} 画素ぶん広げて、絵の ${(100 * holes / pixels).toFixed(1)}%）。穴には、物の後ろの背景だけを描きます。`);
     if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。'); return; }
-    if (a.fill !== 'codex') throw new Error('--plate の穴は、--fill codex か --fill none で埋めてください');
+    if (a.fill !== 'codex' && a.fill !== 'local') throw new Error('--plate の穴は、--fill codex（ChatGPT）か --fill local（PC の画像生成モデル）か --fill none で埋めてください');
     const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--plate', '--image', P('reproj'), '--mask', P('holes'), '--guide', P('plateguide'), '--out', P('painted'), '--grow', '0'];
     if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
+    if (a.fill === 'local') { // PC の画像生成モデル（利用枠なし）。画風と「背景だけ」の指示を文で渡す
+      argv.push('--local', ...(process.env.PSF_INPAINT ? [process.env.PSF_INPAINT] : []), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', dream.PLATE_HINT);
+      if (a['local-model']) argv.push('--local-model', String(a['local-model']));
+    }
     if (a['dry-run']) argv.push('--dry-run');
     const code = run(process.execPath, argv, path.join(ROOT, 'paint'));
     if (code !== 0) throw new Error(`穴を埋められませんでした（終了コード ${code}）。視点 ${name} は穴が残ったままです`);

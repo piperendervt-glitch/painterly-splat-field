@@ -22,6 +22,9 @@ export const FILL_HINT = 'The magenta areas are parts of the same place that lie
 // 別視点のモデルの絵を下絵にして Codex に頼むとき：何を描くかは下絵が決めるので、「人を増やさない」とは言わず、つながりだけを頼む
 export const LAYOUT_HINT = 'The magenta areas are parts of the same place that lie outside or behind what the original painting shows. Keep the same horizon line, the same scale and the same eye height as the painted parts, so that ground, water and far bank continue without a seam.';
 
+// 物を消した背景（addPlateView の穴）を PC の画像生成モデルで描くとき：穴は人や動物のあった所で、その後ろの背景だけを描く
+export const PLATE_HINT = 'The magenta areas are where people, animals and boats were removed from the picture. Paint only the empty background that lies behind them: continue the lawn and its shadows, the water, the far bank and the trees straight through every hole. No people, no animals, no umbrellas, no boats, no new objects.';
+
 /** もとの視点（足した視点ではない、最初の視点）。 */
 export const baseView = (D) => D.views.find((v) => !v.added) || D.views[0];
 
