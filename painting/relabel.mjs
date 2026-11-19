@@ -11,6 +11,7 @@
 //   1. 切り抜きの中：種類を「人・動物」（幹は「木」）にして、物ごとに 1 枚の立った板の奥行きにそろえる。
 //      板の奥行きは、切り抜きのいちばん下（足もと）が地面に着く所の奥行き（地面の平面の式）。
 //      足もとが絵の下の端で切れている物・ほかの物に隠れている物は、今の奥行き（中央の値）を使い、隠している物より手前には置かない。
+//      どの物も、まわりに見えている背景より奥には置かない（遠くの舟や岸の人は、地面の式だと奥へ行きすぎる）。
 //      幹は、今の奥行きが「立っている」値ならそのまま（上の葉と離れないように）、地面に寝ていたら足もとの奥行きにする。
 //   2. 切り抜きの外で、今まで「人・動物」だった所（四角い足もとなど）：地平線より下は地面に、上はまわりの背景に戻す。
 //   3. 前の奥行き・札は <名前>_v1.png に残す（もうあれば上書きしない）。cameras.json の labels.objects も書き直す。
@@ -90,6 +91,15 @@ async function main() {
     o.zContact = median(planes.filter((z) => z > 0));
     for (let y = o.y0; y <= o.y1; y++) for (let x = o.x0; x <= o.x1; x++) { const i = y * W + x; if (ids[i] !== o.id) continue; const z = b.z[i], zp = zPlane(x, y); if (z > 0 && (!(zp > 0) || z < zp * 0.85)) olds.push(z); }
     o.zOld = median(olds); o.standing = olds.length / o.count;
+    // まわりの背景の奥行き：切り抜きを囲む帯（物でない画素）の中央の値。物は、自分の後ろに見えている背景より奥には置けない
+    const ring = [], pad = Math.max(6, Math.round(Math.min(o.x1 - o.x0, o.y1 - o.y0) * 0.25));
+    for (let y = Math.max(0, o.y0 - pad); y <= Math.min(H - 1, o.y1 + pad); y += 2) for (let x = Math.max(0, o.x0 - pad); x <= Math.min(W - 1, o.x1 + pad); x += 2) {
+      const i = y * W + x; if (ids[i] || !(b.z[i] > 0) || b.type[i] === T.figure) continue;
+      if (x >= o.x0 && x <= o.x1 && y >= o.y0 && y <= o.y1 && y > o.foot) continue; // 足もとより下（手前の地面）は背景ではない
+      if (y > o.foot) continue;
+      ring.push(b.z[i]);
+    }
+    o.zBack = median(ring);
   }
   // ---- 板の奥行きを決める（手前の物から。隠している物より手前には置かない） ----
   const order = [...inst.values()].sort((p, q) => q.foot - p.foot), zOf = new Map();
@@ -103,6 +113,7 @@ async function main() {
     else if (o.occluder && zOf.get(o.occluder) > 0) { z = zOf.get(o.occluder) + 0.5; rule = '隠れている：隠している物の少し奥'; }
     else if (o.zContact > 0) { z = o.zContact; rule = '足もとが地面に着く所（切れているかもしれない）'; }
     else { z = far; rule = '手がかりなし：遠く'; }
+    if (z > 0 && o.zBack > 0 && z > o.zBack * 1.15) { z = o.zBack * 0.97; rule += '、後ろの背景より奥にならないように'; } // 地平線の近くでは、数行の違いで地面の式の奥行きが大きく変わる（遠くの舟や岸の人）
     if (z > 0 && o.cut) { const zb = zPlane((o.x0 + o.x1) / 2, H - 1); if (zb > 0 && z > zb) { z = zb * 0.95; rule += '、下の端の地面より手前に'; } }
     if (z > 0 && o.occluder && zOf.get(o.occluder) > 0 && z < zOf.get(o.occluder) + 0.2) { z = zOf.get(o.occluder) + 0.2; rule += '、隠している物の奥に'; }
     if (z > 0) z = Math.max(0.8, Math.min(far, z));
