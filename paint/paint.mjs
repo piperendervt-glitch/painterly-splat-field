@@ -11,6 +11,7 @@
 //       previz プレビズの光に従う絵。下絵の日なた・日陰・落ちる影をそのまま守らせる。下絵は <視点>_lit.png。出すものは <視点>_painted_lit.png、<視点>_overlay_lit.png。
 //
 //   node paint.mjs fill --image <絵> --mask <穴の印（白が穴）> --out <出すファイル> [--style "..."] [--hint "..."] [--dry-run]
+//     --seam <画素> は、穴の縁の継ぎ目をなじませる幅（既定 40、0 で無し）。Codex の絵の色のずれを縁で測り、穴の内側へ薄めながら足す。穴の外は変えない。
 //     --hint は、穴の中に描く物についての追加の指示（1 文）。絵 1 枚から作った場面で、人を増やさないように頼むときなどに使う。
 //                       [--previz <同じ視点のプレビズの絵> --depth <その奥行きの絵> --overlay <確かめ用の絵>] [--light free|flat|previz]
 //     穴をマゼンタで塗った絵を見せて「マゼンタの所だけ描いて」と頼み、できた絵の穴の所だけを元の絵に貼る。
@@ -42,7 +43,7 @@ import path from 'node:path';
 import { buildPrompt, generate, askJson } from './codex.mjs';
 import { localInpaint, defaultCommand } from './localinpaint.mjs';
 import { nvsJob, nvsGenerate, defaultNvsCommand } from './nvs.mjs';
-import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange } from './image.mjs';
+import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange, matchSeam } from './image.mjs';
 
 const DEFAULT_STYLE = 'a loose, painterly oil painting with visible brush strokes, soft atmospheric perspective, warm late-afternoon light';
 // 光を描き分けるときは、画風の文に光のことを入れない（光は LIGHT の文で決める）。
@@ -120,8 +121,9 @@ function layoutFillInstructions({ style, hasStyleRef, hint = '' }) {
     `references/holes.png is ${style}. The bright magenta (#FF00FF) areas are holes with no paint yet.`,
     'references/layout.png is the same picture from exactly the same camera, with the holes filled in by an automatic view-synthesis model. It shows WHAT lies in each hole and WHERE. Inside the magenta areas, follow layout.png for the position, size and silhouette of everything: the horizon and shoreline, ground and water, tree trunks and foliage, figures, objects and cast shadows.',
     'layout.png is low in resolution and blurry inside the holes, and its colours and texture there may be smeared, washed out or photographic. Do NOT copy its texture or blur. Paint the same content as a real part of the painting: the same brush or dot texture, dot size, palette, light and level of detail as the painted parts around the holes.',
-    'Where layout.png shows only a shapeless smear or an obvious artefact inside a hole, paint the most natural continuation of the surrounding scene instead.',
-    'Do not add people, animals, boats, buildings or other objects that are not in layout.png, and do not leave out or move the ones that are.',
+    'layout.png also contains mistakes of the view-synthesis model. Flat geometric shapes (triangles, wedges, bars, circles), blurred blobs and stains, orange or pale patches, ponds or puddles that have no shoreline in the painted parts, transparent or ghost-like figures, and anything else that is not clearly a real, recognisable part of this park scene are artefacts: do NOT paint them. Paint the natural continuation of the lawn, the water, the trees or the sky at that place instead.',
+    'Keep and place exactly as in layout.png only the things that are clearly real: the horizon, the shoreline and far bank, tree trunks and foliage masses, solid figures, objects that continue from the painted parts, and their cast shadows.',
+    'Do not add people, animals, boats, buildings or other objects that are not in layout.png.',
     hasStyleRef ? 'style.png is the original painting that this view belongs to, seen from its original camera. Match its painting technique, palette, light and atmosphere exactly, so that this view looks like another part of the same canvas. Use style.png for style only (and to recognise things that reappear here); the composition comes from holes.png and layout.png.' : '',
     'Paint ONLY inside the magenta areas. Everything outside the magenta areas must stay exactly as it is: same camera, same composition, same position of everything. Do not crop, zoom, shift or mirror the image. No magenta may remain in the result.',
     hint,
@@ -137,7 +139,8 @@ function repaintInstructions({ style, hasStyleRef, hint = '' }) {
       : 'view.png was made by an automatic view-synthesis model, so it is low in resolution and blurry, and parts of it are smeared or look photographic.',
     'Keep the camera and the composition of view.png EXACTLY: the same viewpoint, the same horizon height, the same perspective, and the same position, size and silhouette of everything in it (ground, water, shoreline, trees, figures, objects, cast shadows).',
     'Do not crop, zoom, pan, mirror or add a border. The painting must line up with view.png when overlaid pixel for pixel.',
-    'Do not add people, animals, boats, buildings or other objects that are not in view.png, and do not leave out or move the ones that are. Where view.png shows only a shapeless smear, paint the most natural continuation of the scene around it.',
+    'Do not add people, animals, boats, buildings or other objects that are not in view.png, and do not move the ones that are clearly real.',
+    'view.png also contains mistakes of the view-synthesis model: flat geometric shapes (triangles, wedges, bars, circles), blurred blobs and stains, odd coloured patches and transparent or ghost-like figures are artefacts. Do NOT paint them: paint the natural continuation of the lawn, water, trees or sky at that place instead.',
     hasStyleRef ? 'style.png is the original painting. Match its painting technique, brush or dot texture and dot size, palette, light and atmosphere exactly, so that the result looks like the same canvas seen from the new position. Use style.png for style only, not for composition: do NOT return to its camera position.' : '',
     'Do not copy the blur or the texture of view.png: every part of the result must be crisp painted texture.',
     hint,
@@ -309,7 +312,11 @@ async function runFill(o) {
     if (!file) { console.log(`  → ${codexDir}`); return; }
   }
   if (!file) { console.log(`  → ${workDir}`); return; }
-  const generated = resize(readPng(file), original.width, original.height);
+  let generated = resize(readPng(file), original.width, original.height);
+  // 継ぎ目をなじませる：Codex の絵は穴の外も描き直されて色が少しずれるので、縁でのずれを穴の内側へ薄めながら足す（--seam <画素>、0 で無し）。
+  // PC のモデル（--local・--nvs だけ）の絵は、穴の外が何でもよい約束なので、合わせない
+  const byCodex = repaint || !(nvs || local), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
+  if (byCodex && !sky && !plate && seam > 0) generated = matchSeam(original, generated, mask, { radius: seam });
   const result = composite(original, generated, mask);
   writePng(o.out, result);
   if (hasPreviz && typeof o.overlay === 'string') writePng(o.overlay, overlay(result, resize(readPng(o.previz), original.width, original.height)));

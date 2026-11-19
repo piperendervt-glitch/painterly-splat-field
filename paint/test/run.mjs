@@ -83,6 +83,28 @@ assert.ok(outsideSame, '穴の外が変わった');
 assert.ok(inside > 19 * 29 * 0.75, `穴が埋まっていない（${inside}）`);
 console.log('ok fill：穴の所だけ置き換え、穴の外は元のまま');
 
+// 継ぎ目：生成した絵が全体に 20 明るいとき、穴の縁ではその分だけ引かれ、穴の奥（幅より内側）と穴の外は変わらない
+{
+  const { matchSeam, composite } = await import('../image.mjs');
+  const w = 120, h = 80, orig = blank(w, h), gen = blank(w, h), m = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, hole = x >= 30 && x < 100 && y >= 10 && y < 70;
+    m[i] = hole ? 1 : 0;
+    orig.data.set([100, 120, 90, 255], i * 4);
+    gen.data.set(hole ? [150, 150, 150, 255] : [120, 140, 110, 255], i * 4);
+  }
+  const res = composite(orig, matchSeam(orig, gen, m, { radius: 10 }), m), at = (x, y) => Array.from(res.data.slice((y * w + x) * 4, (y * w + x) * 4 + 3));
+  assert.deepEqual(at(30, 40), [130, 130, 130], '穴の縁で、色のずれが引かれていない');
+  assert.deepEqual(at(65, 40), [150, 150, 150], '穴の奥まで変わった');
+  assert.deepEqual(at(29, 40), [100, 120, 90], '穴の外が変わった');
+  const mid = at(35, 40)[0]; assert.ok(mid > 130 && mid < 150, `縁から奥へ、なだらかに戻っていない（${mid}）`);
+  // 縁で元の絵とまるで違う絵（別物に描き直された）は、合わせない
+  for (let i = 0; i < w * h; i++) if (!m[i]) gen.data.set([250, 20, 20, 255], i * 4);
+  const res2 = composite(orig, matchSeam(orig, gen, m, { radius: 10 }), m);
+  assert.deepEqual(Array.from(res2.data.slice((40 * w + 30) * 4, (40 * w + 30) * 4 + 3)), [150, 150, 150], '大きすぎる差まで合わせた');
+  console.log('ok 継ぎ目：縁の色のずれを穴の内側へ薄めて足す。穴の外と奥は変えない');
+}
+
 // fill --plate：手前の物を消した背景の絵。文は「物の後ろの背景だけ」を頼み、目安の絵（guide.png）を見せる。穴の外は元のまま
 const plate = path.join(tmp, 'fill', 'A_plate.png');
 run('fill', '--plate', '--image', path.join(inDir, 'A_color.png'), '--mask', path.join(tmp, 'mask.png'), '--guide', path.join(inDir, 'A_color.png'), '--out', plate, '--codex', fake, '--grow', '0');
