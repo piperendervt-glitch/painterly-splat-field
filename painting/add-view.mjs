@@ -15,6 +15,7 @@
 //       local     PC の画像生成モデル（/opt/psf-ext/inpaint/run.sh、PSF_INPAINT）。利用枠なし
 //       none      埋めない（写すところまで。後から画面で埋められる）
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
+//     （--fill nvs に --refine を付けず --stipple だけ付けると、別視点のモデルの絵に点を足したものをそのまま使う。細い穴に、物を描き足されたくないとき）
 //     --stipple [強さ]  PC のモデルで仕上げる前（--fill nvs --refine）や、背景を描く前（--plate --fill local）に、穴の中へ、もとの絵の点の細かさだけを足す
 //       （モデルなしの計算。配置を保ったまま点描に戻すための下ごしらえ。強さを書かなければ、もとの絵と同じ細かさに合わせる）。点の見本は、もとの視点の絵の、人と空を除いた所
 //     --objcloud <.ply>  物ごとの 3D を置いた点群（世界の座標で x y z、red green blue、object_id、radius〔m〕。バイナリ little endian）。
@@ -181,6 +182,7 @@ async function main() {
       if (a['nvs-model']) argv.push('--nvs-model', String(a['nvs-model']));
       if (withLayout) argv.push('--repaint');
       else if (a.refine !== undefined) { argv.push('--refine', ...(a.refine === true ? [] : [String(a.refine)]), ...(process.env.PSF_INPAINT ? ['--local', process.env.PSF_INPAINT] : []), ...await stippleArgs()); if (a['local-model']) argv.push('--local-model', String(a['local-model'])); }
+      else if (a.stipple !== undefined) argv.push(...await stippleArgs()); // 仕上げなし：別視点のモデルの絵に点を足すだけ（何も描き足されない）
     }
   }
   if (a.seam !== undefined) argv.push('--seam', String(a.seam));

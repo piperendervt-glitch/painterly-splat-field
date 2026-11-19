@@ -31,6 +31,7 @@
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
 // fill だけ：--local [コマンド] で、Codex の代わりに手元の PC の画像生成モデルで描く（--local-model <名前>、--seed <数>。既定の待ち時間は 3600 秒）
 //            --stipple [強さ] で、PC のモデルに渡す前の絵（--refine の下地、--guide の絵）の穴の中に、もとの絵の「点の細かさ」だけを足す（モデルなしの計算。強さを書かなければ、見本の絵と同じ細かさになるように合わせる）。
+//              --nvs に --refine を付けずに --stipple だけ付けると、別視点のモデルの絵に点を足したものをそのまま穴に使う（PC の画像生成モデルは呼ばない）。
 //              配置を保ったまま点描に戻すための下ごしらえ。点の見本は --stipple-source <絵>（既定は --style-ref、無ければ、もとの視点の絵）、
 //              --stipple-exclude <絵> の白い所（人や空）は見本に使わない。
 //            --local に --guide <穴を埋めた目安の絵> と --init-strength [強さ]（既定 0.35）を付けると、目安の絵（--stipple があれば点を足した絵）から、その強さで描き直す。
@@ -328,6 +329,11 @@ async function runFill(o) {
         const strength = Number.isFinite(Number(o.refine)) && o.refine !== true ? Math.min(1, Math.max(0.05, Number(o.refine))) : 0.45;
         console.log(`  絵の細かさを戻す仕上げ（強さ ${strength}）を PC の生成モデルでしています`);
         file = await localInpaint({ command: cmdOf(o.local || true, defaultCommand), workDir, holesFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600, outName: 'refined.png' });
+      } else if (stip && !repaint) { // 仕上げなしで点だけ足す：生成モデルに描き直させないので、何も描き足されない（細い穴向き）
+        const dotted = path.join(workDir, 'nvs-stippled.png');
+        writePng(dotted, dots(composite(original, resize(readPng(file), original.width, original.height), mask)));
+        fs.copyFileSync(file, path.join(workDir, 'nvs-raw.png'));
+        file = dotted;
       }
     } else if (typeof o.guide === 'string' && (stip || o['init-strength'] !== undefined)) { // 目安の絵（と点）から、弱く描き直す
       const init = path.join(workDir, 'guide-init.png');
