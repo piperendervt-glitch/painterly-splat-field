@@ -159,12 +159,16 @@ export function compose(w, sources, { skyType = 0 } = {}) {
  * 点は、その画素に今ある面より手前のときだけ書く（穴・空の所には必ず書く）。1 点は、半径に合わせた大きさの円で書く（minPx〜maxPx 画素）。
  * 返すのは { pixels（点で埋めた画素）, holes（そのうち穴だった画素） }。
  */
-export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx = 8, close = 2 } = {}) {
+export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx = 8, close = 2, cull = -0.3, through = 0.08 } = {}) {
   const { W, H } = c, n = W * H, w = target.w2c, inv = new Float32Array(n), pick = new Int32Array(n).fill(-1);
   const rOf = typeof cloud.radius === 'number' ? () => cloud.radius : (k) => cloud.radius[k];
+  // カメラの位置（世界）。面の向き（cloud.normal）があれば、はっきり向こうを向いた点（裏側の面）は写さない：
+  //   手前の面の点のすき間から、裏側の暗い点がのぞいて見えるのを防ぐ。cull = 向きと視線の内積がこれより小さい点を捨てる（-1〜0。null で捨てない）
+  const eye = [-(w[0] * w[3] + w[4] * w[7] + w[8] * w[11]), -(w[1] * w[3] + w[5] * w[7] + w[9] * w[11]), -(w[2] * w[3] + w[6] * w[7] + w[10] * w[11])], nrm = cull === null ? null : cloud.normal;
   for (let k = 0; k < cloud.n; k++) {
     const x = cloud.xyz[k * 3], y = cloud.xyz[k * 3 + 1], z = cloud.xyz[k * 3 + 2];
     const Z = -(w[8] * x + w[9] * y + w[10] * z + w[11]); if (!(Z > NEAR)) continue;
+    if (nrm) { const nx = nrm[k * 3], ny = nrm[k * 3 + 1], nz = nrm[k * 3 + 2], nl = Math.hypot(nx, ny, nz); if (nl > 0.5) { const vx = eye[0] - x, vy = eye[1] - y, vz = eye[2] - z; if ((nx * vx + ny * vy + nz * vz) / (nl * Math.hypot(vx, vy, vz)) < cull) continue; } }
     const px = target.cx + (w[0] * x + w[1] * y + w[2] * z + w[3]) / Z * target.fx - 0.5, py = target.cy - (w[4] * x + w[5] * y + w[6] * z + w[7]) / Z * target.fy - 0.5;
     const r = Math.max(minPx, Math.min(maxPx, rOf(k) * target.fx / Z)), iz = 1 / Z;
     const x0 = Math.max(0, Math.ceil(px - r)), x1 = Math.min(W - 1, Math.floor(px + r)), y0 = Math.max(0, Math.ceil(py - r)), y1 = Math.min(H - 1, Math.floor(py + r));
@@ -175,16 +179,19 @@ export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx =
   }
   // 点と点のすき間を閉じる：近くで見ると点の間隔が画素より広くなり、物の中に点々と抜けが出る。
   //   抜けた画素の左右（または上下）close 画素以内の両側に同じ物体の点があれば、近いほうの点で埋める。物の外側（片側しか点が無い所）は広げない。
+  //   すき間から裏側の点がのぞいた画素（両側より through m より奥）も同じように置き換える。
   if (close > 0) for (const [dx, dy] of [[1, 0], [0, 1]]) {
     const add = [];
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const o = y * W + x; if (pick[o] >= 0) continue;
+      const o = y * W + x;
       let a = -1, b = -1, da = 0, db = 0;
       for (let k = 1; k <= close && a < 0; k++) { const xx = x - dx * k, yy = y - dy * k; if (xx < 0 || yy < 0) break; if (pick[yy * W + xx] >= 0) { a = yy * W + xx; da = k; } }
       if (a < 0) continue;
       for (let k = 1; k <= close && b < 0; k++) { const xx = x + dx * k, yy = y + dy * k; if (xx >= W || yy >= H) break; if (pick[yy * W + xx] >= 0) { b = yy * W + xx; db = k; } }
       if (b < 0) continue;
       if (cloud.object && cloud.object[pick[a]] !== cloud.object[pick[b]]) continue; // 別々の物の間は埋めない
+      // 点がある画素でも、両側の点より through m より奥なら、すき間から裏側がのぞいた点なので、手前の点で置き換える
+      if (pick[o] >= 0 && !(through > 0 && 1 / inv[o] - Math.max(1 / inv[a], 1 / inv[b]) > through)) continue;
       add.push(o, da <= db ? a : b);
     }
     for (let k = 0; k < add.length; k += 2) { pick[add[k]] = pick[add[k + 1]]; inv[add[k]] = inv[add[k + 1]]; }

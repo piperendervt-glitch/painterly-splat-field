@@ -148,13 +148,13 @@ export async function addPlateView(D, name, io, { grow = 10, types = ['figure'],
  * io = { saveExport(name, rgba, W, H), savePaint(name, rgba, W, H), loadAdded(), saveAdded(list) }。返すのは { holes, pixels, cloudPixels }。
  * cloud（物ごとの 3D を置いた点群。dream.js の overlayPoints の形）を渡すと、その物体は、もとの絵の画素の代わりに点群で写す。
  */
-export async function addView(D, cand, name, io, { cloud = null } = {}) {
+export async function addView(D, cand, name, io, { cloud = null, backfaces = false } = {}) {
   const hide = cloud && cloud.object ? new Set(cloud.object) : null; hide && hide.delete(0);
   const cam = targetCamera(D, cand), src = sources(D, name, hide), T = typeTable(D.cams);
   if (!src.length) throw new Error('写せる絵がありませんでした');
   const c = compose(warp(cam, src), src, { skyType: T.ids.sky }), n = c.W * c.H;
   // 物ごとの 3D の点群があれば、その物体の画素は写さず（上の hide）、点群をこの視点から見た形で重ねる
-  const over = cloud ? overlayPoints(c, cam, cloud, { type: T.ids.figure !== undefined ? T.ids.figure : T.ids.ground }) : null;
+  const over = cloud ? overlayPoints(c, cam, cloud, { type: T.ids.figure !== undefined ? T.ids.figure : T.ids.ground, ...(backfaces ? { cull: null } : {}) }) : null;
   const mask = new Uint8ClampedArray(n * 4); for (let i = 0; i < n; i++) { mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = c.hole[i] ? 255 : 0; mask[i * 4 + 3] = 255; }
   await io.savePaint(`${name}_reproj.png`, c.rgba, c.W, c.H);
   await io.savePaint(`${name}_holes.png`, mask, c.W, c.H);
