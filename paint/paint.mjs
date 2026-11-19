@@ -40,6 +40,8 @@
 //            --nvs に --repaint を足すと、別視点のモデルの絵を「下絵」にして、Codex（ChatGPT）に穴を描いてもらう（視点は下絵のまま、画風はもとの絵）。
 //              下絵は <出すファイルの所>/<視点>_layout.png に残る。--layout <絵> で、すでにある下絵（穴を埋めた、同じ視点の絵）を渡すと、モデルを呼ばずに Codex だけ動かす。
 //              --style-ref <絵> は画風の見本（既定は、もとの視点の絵）。
+//              --layout に --draft を付けると、下絵が別視点のモデルの絵ではなく、道具が自分で作った下書き（物は 3D から写し、穴はなめらかな色と点で埋めた絵）だと伝える：
+//              細い穴は下書きの色のまま背景を描き、広い穴は下書きを写さず、まわりから続く背景（芝・川・対岸・木・空）を描いてもらう。人や物は足さない。
 //
 //   node paint.mjs repaint --image <別視点の絵> --style-ref <もとの絵> --out <出すファイル> [--style "..."] [--hint "..."] [--overlay <確かめ用の絵>] [--dry-run]
 //     別視点のモデルが作った絵を、構図と視点をそのままに、もとの絵の画風で 1 枚まるごと描き直してもらう（穴だけでなく全体）。
@@ -123,7 +125,20 @@ function fillInstructions({ style, hasPreviz, lightLines = [], hint = '' }) {
 }
 
 // 別視点のモデルの絵を下絵にして、穴を描いてもらうときの文。layout.png = 穴に下絵をはめた絵、style.png = もとの絵
-function layoutFillInstructions({ style, hasStyleRef, hint = '' }) {
+function layoutFillInstructions({ style, hasStyleRef, hint = '', draft = false }) {
+  // draft：下絵が別視点のモデルの絵ではなく、道具が自分で作った下書き（物は 3D から写してあり、穴はなめらかな色と点で埋めてある）のとき
+  if (draft) return [
+    `references/holes.png is ${style}. The bright magenta (#FF00FF) areas are holes with no paint yet. Everything that is not magenta is finished and correct: the people, animals, trees and ground there are already in the right place for this camera.`,
+    'references/layout.png is a rough draft of the same picture from exactly the same camera, in which the holes were filled automatically with a smooth guess of the surrounding colours plus dot texture. It contains no new information about what lies in the holes.',
+    'Narrow holes (thin strips beside figures and tree trunks): the draft is already about right there. Paint the background that continues behind the figure or trunk (lawn with its light and shadow patches, water, far bank, foliage), following the colours of the draft.',
+    'Large holes (wide areas at the edges of the picture, or wide gaps): the draft is only a flat haze there and must NOT be copied. Paint what this place would really show there, as a natural continuation of the painted parts that border the hole: the lawn with sunlit and shaded patches, the river and its far bank with trees and small buildings, tree trunks and foliage masses, the sky. Keep the same horizon line, scale and eye height as the painted parts, so that ground, water, far bank and sky continue without a seam.',
+    'Do not add people, animals, boats, umbrellas or other objects. Only background: ground, water, far bank, trees, sky and cast shadows.',
+    'Paint it as a real part of the painting: the same brush or dot texture, dot size, palette, light and level of detail as the painted parts around the holes.',
+    'At the border of every magenta area the picture must continue without a visible join: lawn texture, light and shadow patches, edges and outlines that reach the border on the painted side carry on across it in the same direction, tone and dot pattern. Do not start or end a shadow, a colour patch or a line exactly on the border of a hole.',
+    hasStyleRef ? 'style.png is the original painting that this view belongs to, seen from its original camera. Match its painting technique, palette, light and atmosphere exactly, so that this view looks like another part of the same canvas. Use style.png for style only (and to recognise things that reappear here); the composition comes from holes.png.' : '',
+    'Paint ONLY inside the magenta areas. Everything outside the magenta areas must stay exactly as it is: same camera, same composition, same position of everything. Do not crop, zoom, shift or mirror the image. No magenta may remain in the result.',
+    hint,
+  ].filter(Boolean).join('\n');
   return [
     `references/holes.png is ${style}. The bright magenta (#FF00FF) areas are holes with no paint yet.`,
     'references/layout.png is the same picture from exactly the same camera, with the holes filled in by an automatic view-synthesis model. It shows WHAT lies in each hole and WHERE. Inside the magenta areas, follow layout.png for the position, size and silhouette of everything: the horizon and shoreline, ground and water, tree trunks and foliage, figures, objects and cast shadows.',
@@ -357,10 +372,10 @@ async function runFill(o) {
     }
     const refs = [
       { name: 'holes.png', file: holesFile, note: 'painting with magenta holes to fill' },
-      { name: 'layout.png', file: layoutFile, note: 'the same picture from the same camera with the holes filled by a view-synthesis model (layout to follow inside the holes; not its texture)' },
+      { name: 'layout.png', file: layoutFile, note: o.draft ? 'rough draft of the same picture from the same camera: holes filled automatically with smooth colours and dots (no real content in the holes)' : 'the same picture from the same camera with the holes filled by a view-synthesis model (layout to follow inside the holes; not its texture)' },
       ...(styleRef ? [{ name: 'style.png', file: styleRef, note: 'the original painting (style, palette and atmosphere to match)' }] : []),
     ];
-    const text = buildPrompt({ width: original.width, height: original.height, references: refs, instructions: layoutFillInstructions({ style, hasStyleRef: !!styleRef, hint }) });
+    const text = buildPrompt({ width: original.width, height: original.height, references: refs, instructions: layoutFillInstructions({ style, hasStyleRef: !!styleRef, hint, draft: !!o.draft }) });
     const codexDir = path.join(workDir, 'codex'); // 別視点のモデルの作業の物と混ざらないように、Codex は別のフォルダで動かす
     fs.mkdirSync(codexDir, { recursive: true });
     console.log(`  ${o['dry-run'] ? '下絵ができました。Codex に送る文と条件の絵を用意します（Codex は呼びません）' : '下絵ができました。Codex で、もとの絵の画風で描いています（30 秒〜数分）'}`);

@@ -25,6 +25,7 @@
 //       ファイルはコンマで並べられる。ファイル@10043+10045 と書くと、そのファイルからはその物体だけ使う。同じ物体は先に書いたファイルが優先
 //       （例：--objcloud trellis.ply@10043,best.ply で、10043 だけ trellis、残りは best）
 //       --objcloud-backfaces を付けると、向こうを向いた点（裏側の面）も写す（既定は写さない。面の向きが当てにならない点群のとき用）
+//     --draft  --layout の絵が、この道具で作った下書き（--fill local --stipple などで仕上げた同じ視点の絵）のときに付ける。Codex への文が、広い穴には下書きを写さず背景を描く頼み方に変わる
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
 //   node add-view.mjs --scene jatte --plate --fill codex|local [--local-model <名前>] [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
@@ -45,7 +46,7 @@ import * as dream from '../studio/dreamviews.js';
 import { parsePly } from '../studio/sharp.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.resolve(HERE, '..');
-const FLAGS = new Set(['dry-run', 'new-depth', 'plate', 'objcloud-backfaces']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'plain', 'none'];
+const FLAGS = new Set(['dry-run', 'new-depth', 'plate', 'objcloud-backfaces', 'draft']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'plain', 'none'];
 
 function args() {
   const a = { scene: 'jatte', right: 0, forward: 0, up: 0, yaw: 0, pitch: 0, orbit: 0, 'orbit-dist': 8, fill: 'none' }, v = process.argv.slice(2);
@@ -198,7 +199,7 @@ async function main() {
   }
   if (a.fill === 'plain') argv.push('--plain', '--guide', P('guide'), ...await stippleArgs()); // モデルなし：なめらかに埋めた絵（と点）をそのまま使う。細い穴向き
   if (a.fill === 'nvs' || withLayout) {
-    if (withLayout && typeof a.layout === 'string') argv.push('--layout', path.resolve(a.layout), '--export-dir', S.E, '--view', name);
+    if (withLayout && typeof a.layout === 'string') argv.push('--layout', path.resolve(a.layout), '--export-dir', S.E, '--view', name, ...(a.draft ? ['--draft'] : []));
     else {
       argv.push('--nvs', ...(process.env.PSF_NVS ? [process.env.PSF_NVS] : []), '--export-dir', S.E, '--view', name);
       if (a['nvs-model']) argv.push('--nvs-model', String(a['nvs-model']));
