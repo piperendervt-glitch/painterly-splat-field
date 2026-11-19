@@ -4,7 +4,7 @@
 // 置き方は粒の空間と同じ（studio/objectmodel.js の fitContext・fitModel・modelSplats）。
 //
 //   node painting/objcloud.mjs --previz-export <dir> --paint-out <dir> [--seg depth|sam3] [--method hunyuanmv|hunyuan3d|trellismv|trellis|sam3d|best]
-//                              [--ids 3,5] [--stride 1.5] [--min-pixels 50] [--out <file.ply>]
+//                              [--ids 3,5] [--stride 1.5] [--min-pixels 50] [--min-iou 0] [--out <file.ply>]
 //
 // 出すもの（paint-out に）：
 //   objcloud_<版>_<作り方>.ply   点の ply（binary little endian）。世界座標（cameras.json の three.js の座標、m、+Y が上）
@@ -13,6 +13,7 @@
 //   objcloud_<版>_<作り方>.json  物ごと：id、作り方、モデルのファイル、輪郭の重なり（iou）、色の近さ、向き、大きさ、高さ、点の数。モデルが無い物は missing
 //
 // --method best：物ごとに、ある作り方のうち輪郭の重なりがいちばん高いものを使う。
+// --min-iou：輪郭の重なりがこれより低い物は点群に入れない（json の rejected に載る。受け取る側は、その物を絵からの点のままにする）
 // --stride：点の間隔を、その物の距離での絵の画素いくつぶんにするか（1〜2 が目安。小さいほど点が多い）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -160,7 +161,7 @@ function fitOne(model, cx) {
   return best;
 }
 
-export async function objectCloud({ exportDir, paintOut, seg = 'depth', method = 'best', ids = null, stride = 1.5, minPixels = 50, log = console.log }) {
+export async function objectCloud({ exportDir, paintOut, seg = 'depth', method = 'best', ids = null, stride = 1.5, minPixels = 50, minIou = 0, log = console.log }) {
   const view = await loadView(exportDir, paintOut, seg);
   const targets = objectTargets(view, { front: FRONT, minPixels }).filter((t) => !ids || ids.includes(t.id));
   const files = modelFiles(paintOut, seg), labelOf = new Map((view.objectsMeta || []).map((o) => [o.id, o.label || o.class || o.name || o.type]));
@@ -179,6 +180,7 @@ export async function objectCloud({ exportDir, paintOut, seg = 'depth', method =
     }
     if (!best) { report.push({ ...entry, missing: true, error: 'モデルを読めませんでした' }); continue; }
     const { m, model, fit } = best;
+    if (fit.iou < minIou) { report.push({ ...entry, rejected: true, method: m, iou: +fit.iou.toFixed(3) }); log(`  物体 ${target.id}：${m} の輪郭の重なり ${Math.round(fit.iou * 100)}% が --min-iou より低いので入れません`); continue; }
     let r = 0, g = 0, b = 0, k = 0; // 物の絵の色の平均（モデルに色が無いときの、見えていない側の色）
     for (let o = 0; o < cx.mask.length; o++) if (cx.mask[o] === 1) { r += cx.pc[o * 3]; g += cx.pc[o * 3 + 1]; b += cx.pc[o * 3 + 2]; k++; }
     const fallback = k ? [r / k, g / k, b / k] : [128, 128, 128];
@@ -220,12 +222,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (method !== 'best' && !METHODS.includes(method)) throw new Error(`--method は ${METHODS.join(' / ')} / best のどれかです`);
     const ids = typeof o.ids === 'string' ? o.ids.split(',').map(Number).filter((n) => n > 0) : null, paintOut = path.resolve(o['paint-out']);
     console.log(`物の点群を作ります（切り分け ${seg}、作り方 ${method}）`);
-    const t0 = Date.now(), { view, parts, report } = await objectCloud({ exportDir: path.resolve(o['previz-export']), paintOut, seg, method, ids, stride: Number(o.stride) || 1.5, minPixels: Number(o['min-pixels']) || 50 });
+    const t0 = Date.now(), { view, parts, report } = await objectCloud({ exportDir: path.resolve(o['previz-export']), paintOut, seg, method, ids, stride: Number(o.stride) || 1.5, minPixels: Number(o['min-pixels']) || 50, minIou: Number(o['min-iou']) || 0 });
     const base = o.out ? path.resolve(String(o.out)).replace(/\.ply$/i, '') : path.join(paintOut, `objcloud_${seg}_${method}`);
     const total = writePointPly(`${base}.ply`, parts);
-    const missing = report.filter((r) => r.missing).map((r) => r.id);
-    fs.writeFileSync(`${base}.json`, JSON.stringify({ seg, method, view: view.name, color: path.basename(view.colorFile), frame: 'world frame of cameras.json (three.js, metres, +Y up)', stride: Number(o.stride) || 1.5, points: total, objects: report.filter((r) => !r.missing), missing }, null, 1));
-    console.log(`→ ${path.basename(base)}.ply（物 ${parts.length} 個、点 ${total.toLocaleString()}）と .json。モデルが無い物 ${missing.length} 個。${Math.round((Date.now() - t0) / 1000)} 秒`);
+    const missing = report.filter((r) => r.missing).map((r) => r.id), rejected = report.filter((r) => r.rejected).map((r) => ({ id: r.id, method: r.method, iou: r.iou }));
+    fs.writeFileSync(`${base}.json`, JSON.stringify({ seg, method, view: view.name, color: path.basename(view.colorFile), frame: 'world frame of cameras.json (three.js, metres, +Y up)', stride: Number(o.stride) || 1.5, points: total, minIou: Number(o['min-iou']) || 0, objects: report.filter((r) => !r.missing && !r.rejected), missing, rejected }, null, 1));
+    console.log(`→ ${path.basename(base)}.ply（物 ${parts.length} 個、点 ${total.toLocaleString()}）と .json。モデルが無い物 ${missing.length} 個、合わずに外した物 ${rejected.length} 個。${Math.round((Date.now() - t0) / 1000)} 秒`);
   };
   run().catch((e) => { console.error(`止まりました：${e.message}`); process.exit(1); });
 }
