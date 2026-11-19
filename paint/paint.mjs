@@ -266,7 +266,7 @@ async function runFill(o) {
   const givenLayout = !sky && !plate && typeof o.layout === 'string' ? o.layout : null, repaint = !sky && !plate && ((nvs && !!o.repaint) || !!givenLayout);
   if (repaint && refine) throw new Error('--repaint（Codex で描く）と --refine（PC のモデルで仕上げる）は、どちらか片方にしてください');
   const hint = typeof o.hint === 'string' ? o.hint : '', seed = o.seed !== undefined && o.seed !== true && Number.isFinite(Number(o.seed)) ? Number(o.seed) : undefined;
-  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${givenLayout ? `下絵（${path.basename(givenLayout)}）をもとに、${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}` : o['dry-run'] && !(nvs && repaint) ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
+  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${typeof o.result === 'string' ? `もうある生成の絵（${path.basename(o.result)}）で、貼り合わせをやり直します（何も呼びません）` : givenLayout ? `下絵（${path.basename(givenLayout)}）をもとに、${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}` : o['dry-run'] && !(nvs && repaint) ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
   let file;
   const given = typeof o.result === 'string' ? o.result : null; // --result：もうある生成の絵を使う（何も呼ばない）
   if (given) file = given;
