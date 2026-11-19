@@ -60,17 +60,18 @@ function objectModels() {
 
 // 物を切り出して動かす（paint/objects.mjs）：切り分けの版（J_seg_<版>.json）、物ごとの 3D（obj3d_<版>_<作り方>_<番号>.glb / .ply / .json）、
 // Codex が描き足した物の全身（obj_<版>_<番号>_full.png）
-const OBJ3D = /^obj3d_([a-z0-9]+)_([a-z0-9]+)_(\d{1,5})\.(glb|ply|json)$/, OBJ_FULL = /^obj_([a-z0-9]+)_(\d{1,5})_full\.png$/;
-const OBJ3D_METHODS = ['trellis', 'hunyuan3d', 'sam3d'];
+const OBJ3D = /^obj3d_([a-z0-9]+)_([a-z0-9]+)_(\d{1,5})\.(glb|ply|json)$/, OBJ_FULL = /^obj_([a-z0-9]+)_(\d{1,5})_full\.png$/, OBJ_VIEW = /^obj_([a-z0-9]+)_(\d{1,5})_view_(front|left|back|right)\.png$/;
+const OBJ3D_METHODS = ['trellis', 'hunyuan3d', 'sam3d', 'hunyuanmv', 'trellismv'];
 function objectParts() {
-  const out = { seg: {}, obj3d: [], full: [] };
+  const out = { seg: {}, obj3d: [], full: [], views: [] }; // views：Codex が 4 つの向きから描いた物の絵（obj_<版>_<番号>_view_<向き>.png）
   try { for (const n of fs.readdirSync(DIRS['previz-export'])) { const m = /^[A-Za-z0-9]+_seg_([a-z0-9]+)\.json$/.exec(n); if (m) out.seg[m[1]] = n; } } catch { /* まだ無い */ }
   let names = []; try { names = fs.readdirSync(DIRS['paint-out']); } catch { return out; }
   const by = new Map();
   for (const n of names.sort()) {
     let m = OBJ3D.exec(n);
     if (m) { const k = `${m[1]}_${m[2]}_${m[3]}`; let e = by.get(k); if (!e) by.set(k, (e = { seg: m[1], method: m[2], id: Number(m[3]) })); e[m[4]] = n; continue; }
-    m = OBJ_FULL.exec(n); if (m) out.full.push({ seg: m[1], id: Number(m[2]), file: n });
+    m = OBJ_FULL.exec(n); if (m) { out.full.push({ seg: m[1], id: Number(m[2]), file: n }); continue; }
+    m = OBJ_VIEW.exec(n); if (m) out.views.push({ seg: m[1], id: Number(m[2]), view: m[3], file: n });
   }
   out.obj3d = [...by.values()].filter((e) => e.glb || e.ply);
   return out;
@@ -196,8 +197,8 @@ function runObjects(body) {
     if (typeof body.prompts === 'string' && body.prompts.trim()) args.push('--prompts', body.prompts.replace(/[^A-Za-z0-9 ,'-]/g, '').slice(0, 400));
     if (body.segMode === 'masks') args.push('--seg-mode', 'masks');
   }
-  if (body.cmd === 'complete') { if (body.dryRun) args.push('--dry-run'); if (process.env.PAINT_CODEX) args.push('--codex', process.env.PAINT_CODEX); }
-  startProcess(process.execPath, args, path.join(ROOT, 'paint'), body.cmd === 'complete' && !!body.dryRun);
+  if (body.cmd === 'complete' || body.cmd === 'views') { if (body.dryRun) args.push('--dry-run'); if (body.perView) args.push('--per-view'); if (body.source === 'cut') args.push('--source', 'cut'); if (process.env.PAINT_CODEX) args.push('--codex', process.env.PAINT_CODEX); }
+  startProcess(process.execPath, args, path.join(ROOT, 'paint'), (body.cmd === 'complete' || body.cmd === 'views') && !!body.dryRun);
 }
 function stopPaint() {
   const child = job.child; if (!child) return;
@@ -325,7 +326,7 @@ export async function handle(req, res, next) {
     if (p === '/api/objects/run' && req.method === 'POST') {
       if (job.running) return json(res, 409, { error: 'いま実行中です' });
       const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
-      if (!['segment', 'complete', 'make3d'].includes(body.cmd)) return json(res, 400, { error: 'cmd が使えません' });
+      if (!['segment', 'complete', 'views', 'make3d'].includes(body.cmd)) return json(res, 400, { error: 'cmd が使えません' });
       if (body.cmd !== 'segment' && !/^[a-z0-9]+$/.test(body.seg || '')) return json(res, 400, { error: '切り分けの版の名前が使えません' });
       if (body.cmd === 'make3d' && !OBJ3D_METHODS.includes(body.method)) return json(res, 400, { error: '3D の作り方の名前が使えません' });
       if (body.cmd !== 'segment' && !(Array.isArray(body.ids) && body.ids.length)) return json(res, 400, { error: '物体を選んでください' });

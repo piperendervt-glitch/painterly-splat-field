@@ -243,6 +243,8 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
       <button type="button" data-v="trellis" aria-pressed="false">TRELLIS</button>
       <button type="button" data-v="hunyuan3d" aria-pressed="false">Hunyuan3D</button>
       <button type="button" data-v="sam3d" aria-pressed="false">SAM 3D Objects</button>
+      <button type="button" data-v="hunyuanmv" aria-pressed="false">Hunyuan3D-2mv（4 つの向きの絵から）</button>
+      <button type="button" data-v="trellismv" aria-pressed="false">TRELLIS（4 つの向きの絵から）</button>
     </div>
     <p class="note" id="obj3dInfo"></p>
     <label class="check" for="obj3dFull"><input type="checkbox" id="obj3dFull" checked><span>隠れた所を描き足した全身の絵があれば、そこから作る</span></label>
@@ -252,6 +254,10 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <button type="button" class="plain" id="fullOne">選んだ物の隠れた所を Codex で描き足す（Codex 1 回）</button>
     <button type="button" class="plain" id="fullAll">手前の物を全部、Codex で描き足す</button>
     <button type="button" class="plain" id="fullDry">描き足しを頼む文と絵だけ用意する（Codex は呼ばない）</button>
+    <label class="check" for="viewsPer"><input type="checkbox" id="viewsPer"><span>向きごとに別々に描いてもらう（Codex 3 回。外すと 2×2 の 1 枚で 1 回）</span></label>
+    <button type="button" class="plain" id="viewsOne">選んだ物を、Codex で前・左・後ろ・右から描く</button>
+    <button type="button" class="plain" id="viewsAll">手前の物を全部、Codex で 4 つの向きから描く</button>
+    <button type="button" class="plain" id="viewsDry">4 つの向きを頼む文と絵だけ用意する（Codex は呼ばない）</button>
     <button type="button" class="plain" id="partsStop" hidden>止める</button>
     <p class="note" id="partsLog" hidden style="white-space:pre-wrap;max-height:220px;overflow:auto"></p>
     <div class="label">歩く画面で動かす</div>
@@ -260,7 +266,7 @@ input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--line);
     <label class="check" for="moveBoxes"><input type="checkbox" id="moveBoxes"><span>動かせる物の当たりの箱を表示する</span></label>
     <button type="button" class="plain" id="moveReset">動かした物を全部元に戻す</button>
     <p class="note" id="moveInfo"></p>
-    <p class="note">流れ：(1) SAM 3 で絵の中の物を 1 つずつ切り抜く（「物の切り分け」で今までの分け方と見比べられます）→ (2) 隠れた所を Codex で描き足す（任意）→ (3) 絵 1 枚から物の 3D を作る道具で、物ごとに 3D にする（作り方を切り替えて見比べられます。「手で選んだモデル」は下の「物体ごとの 3D モデル」で選んだもの）→ (4) 歩く画面で、物を持つ・動かす・投げる・消す。物を消した後ろには、背後の層（AI が描いた背景の絵があればその色）が見えます。SAM 3・TRELLIS・Hunyuan3D・SAM 3D Objects は手元の PC の WSL で動かします（docs/object-interaction.md）。</p>
+    <p class="note">流れ：(1) SAM 3 で絵の中の物を 1 つずつ切り抜く（「物の切り分け」で今までの分け方と見比べられます）→ (2) 隠れた所を Codex で描き足す、または Codex に前・左・後ろ・右の 4 つの向きから描いてもらう（任意。4 つの向きの絵は Hunyuan3D-2mv と TRELLIS の複数画像で使います）→ (3) 絵 1 枚から物の 3D を作る道具で、物ごとに 3D にする（作り方を切り替えて見比べられます。「手で選んだモデル」は下の「物体ごとの 3D モデル」で選んだもの）→ (4) 歩く画面で、物を持つ・動かす・投げる・消す。物を消した後ろには、背後の層（AI が描いた背景の絵があればその色）が見えます。SAM 3・TRELLIS・Hunyuan3D・SAM 3D Objects は手元の PC の WSL で動かします（docs/object-interaction.md）。</p>
   </div>
 
   <div class="group">

@@ -11,7 +11,7 @@ for (let y = 0; y < cut.height; y++) for (let x = 0; x < cut.width; x++) { const
 const col = n ? [r / n / 255, g / n / 255, b / n / 255] : [0.5, 0.5, 0.5], hw = n ? (x1 - x0 + 1) / (y1 - y0 + 1) : 0.4; // 幅 ÷ 高さ
 fs.mkdirSync(job.out_dir, { recursive: true });
 const t0 = Date.now();
-if (job.method === 'hunyuan3d') {
+if (job.method.startsWith('hunyuan3d')) { // hunyuan3d と hunyuan3d_mv（複数の向き）
   // 箱（幅 hw、高さ 1、奥行き hw/2）。glTF の決まり：+Y が上
   const sx = hw / 2, sy = 0.5, sz = hw / 4, P = [], I = [], C = [];
   const face = (a, bb, c, d) => { const k = P.length / 3; P.push(...a, ...bb, ...c, ...d); I.push(k, k + 1, k + 2, k, k + 2, k + 3); for (let i = 0; i < 4; i++) C.push(...col, 1); };

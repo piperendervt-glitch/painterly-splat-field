@@ -114,7 +114,7 @@ async function loadData() {
   const state = stateRes.ok ? await stateRes.json() : { views: [] };
   const { near, far } = cams.depth;
   // 物の切り分けの版：SAM 3 で切り抜いた版を選んでいて、その版があれば、奥行き・種類・物体の絵をその版に替える
-  const parts = state.parts || { seg: {}, obj3d: [], full: [] };
+  const parts = state.parts || { seg: {}, obj3d: [], full: [], views: [] };
   let segDoc = null;
   if (ui.seg !== 'depth' && parts.seg[ui.seg]) { const r = await fetch(`/files/previz-export/${parts.seg[ui.seg]}`, { cache: 'no-store' }); if (r.ok) segDoc = await r.json(); }
   const segUsed = segDoc ? ui.seg : 'depth';
@@ -1202,7 +1202,7 @@ async function forgetObjectModel(id) {
 }
 
 // ---- 物を切り出して動かす（paint/objects.mjs、studio/interact.js、studio/physics.js） ----
-const METHOD_NAMES = { manual: '手で選んだモデル', trellis: 'TRELLIS', hunyuan3d: 'Hunyuan3D', sam3d: 'SAM 3D Objects' };
+const METHOD_NAMES = { manual: '手で選んだモデル', trellis: 'TRELLIS', hunyuan3d: 'Hunyuan3D', sam3d: 'SAM 3D Objects', hunyuanmv: 'Hunyuan3D-2mv（4 つの向き）', trellismv: 'TRELLIS（4 つの向き）' };
 const objLabel = (id) => { const o = (data.segObjects || []).find((x) => x.id === id); return o ? (o.label || o.type || '') : ''; };
 // 動かせる物：手前の物（木は ui.move.trees のときだけ）で、300 画素以上
 function movableList() {
@@ -1260,12 +1260,13 @@ function showParts() {
   $('segRun').disabled = !painting;
   press($('obj3dMethod'), ui.objects.method);
   const mine = (data.parts.obj3d || []).filter((e) => e.seg === data.segUsed), fulls = (data.parts.full || []).filter((e) => e.seg === data.segUsed);
-  const count = (m) => mine.filter((e) => e.method === m).length;
-  $('obj3dInfo').textContent = `この切り分けで作った 3D：${['trellis', 'hunyuan3d', 'sam3d'].map((m) => `${METHOD_NAMES[m]} ${count(m)} 個`).join('、')}。描き足した全身の絵 ${fulls.length} 枚。${ui.objects.method === 'manual' ? '' : `いまは ${METHOD_NAMES[ui.objects.method]} の 3D を置いています（無い物は、輪郭をふくらませた形か絵の粒のまま）。`}`;
+  const count = (m) => mine.filter((e) => e.method === m).length, viewed = new Set((data.parts.views || []).filter((e) => e.seg === data.segUsed).map((e) => e.id));
+  $('obj3dInfo').textContent = `この切り分けで作った 3D：${['trellis', 'hunyuan3d', 'sam3d', 'hunyuanmv', 'trellismv'].map((m) => `${METHOD_NAMES[m]} ${count(m)} 個`).join('、')}。描き足した全身の絵 ${fulls.length} 枚。4 つの向きの絵 ${viewed.size} 個分。${ui.objects.method === 'manual' ? '' : `いまは ${METHOD_NAMES[ui.objects.method]} の 3D を置いています（無い物は、輪郭をふくらませた形か絵の粒のまま）。`}`;
   $('obj3dFull').checked = ui.objects.full; $('obj3dTexture').checked = ui.objects.texture;
   const targets = objectTargetList();
   $('fullAll').textContent = `手前の物を全部（${targets.length} 個）、Codex で描き足す（Codex ${targets.length} 回）`;
   $('obj3dAll').textContent = `手前の物を全部（${targets.length} 個）、この作り方で 3D にする`;
+  $('viewsAll').textContent = `手前の物を全部（${targets.length} 個）、Codex で 4 つの向きから描く（Codex ${targets.length * ($('viewsPer').checked ? 3 : 1)} 回）`;
   for (const id of ['obj3dOne', 'obj3dAll']) $(id).disabled = ui.objects.method === 'manual';
   $('moveOn').checked = ui.move.on; $('moveTrees').checked = ui.move.trees; $('moveBoxes').checked = ui.move.boxes;
 }
@@ -2129,6 +2130,11 @@ for (const [id, all] of [['obj3dOne', false], ['obj3dAll', true]]) $(id).addEven
 for (const [id, all, dry] of [['fullOne', false, false], ['fullAll', true, false], ['fullDry', false, true]]) $(id).addEventListener('click', () => {
   const ids = pickedIds(all); if (!ids.length) return;
   runParts({ cmd: 'complete', seg: data.segUsed, ids, dryRun: dry }, dry ? '頼む文と絵を用意しています' : `Codex で ${ids.length} 個の物の全身を描いています`);
+});
+for (const [id, all, dry] of [['viewsOne', false, false], ['viewsAll', true, false], ['viewsDry', false, true]]) $(id).addEventListener('click', () => {
+  const ids = pickedIds(all); if (!ids.length) return;
+  const per = $('viewsPer').checked;
+  runParts({ cmd: 'views', seg: data.segUsed, ids, dryRun: dry, perView: per, source: ui.objects.full ? 'full' : 'cut' }, dry ? '頼む文と絵を用意しています' : `Codex で ${ids.length} 個の物を 4 つの向きから描いています（Codex ${ids.length * (per ? 3 : 1)} 回）`);
 });
 $('partsStop').addEventListener('click', () => { partsStop = true; });
 $('moveOn').addEventListener('change', () => { ui.move.on = $('moveOn').checked; saveParts(); rebuild(); });

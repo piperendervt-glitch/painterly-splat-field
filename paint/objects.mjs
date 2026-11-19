@@ -13,8 +13,15 @@
 //     Codex に、物の隠れた所（手前の物に隠れた所、絵の端で切れた所）を描き足した「物の全身」を描いてもらう（1 つにつき 1 回）。
 //     出すもの：obj_<seg>_<番号>_full.png（白い所は透明にしたもの）
 //
-//   node objects.mjs make3d --paint-out <dir> --previz-export <dir> --seg depth|sam3 --method trellis|hunyuan3d|sam3d --ids 3,5 [--source full|cut] [--texture]
+//   node objects.mjs views --paint-out <dir> --previz-export <dir> --seg depth|sam3 --ids 3,5 [--per-view] [--dry-run]
+//     Codex に、物を 4 つの向き（前・左・後ろ・右）から描いてもらう。既定は 1 回で 2×2 の「回り込みの絵」を描いてもらい 4 つに切る（向きどうしの食い違いが少ない）。
+//     --per-view：向きごとに 1 回ずつ（左・後ろ・右の 3 回。前は絵の切り抜きか描き足した全身）。
+//     出すもの：obj_<seg>_<番号>_view_{front,left,back,right}.png（白い所は透明にしたもの）。
+//     向きの決まり（Hunyuan3D-2mv と同じ）：front = 絵で見えている向き、left = 物を上から見て時計回りに 90° 回した（物の左の横腹が見える）、back = 180°、right = 270°
+//
+//   node objects.mjs make3d --paint-out <dir> --previz-export <dir> --seg depth|sam3 --method trellis|hunyuan3d|sam3d|hunyuanmv|trellismv --ids 3,5 [--source full|cut] [--texture]
 //     外の道具（絵 1 枚から物の 3D を作るもの。コマンド：環境変数 PSF_OBJ3D）で、物ごとの 3D を作る。
+//     hunyuanmv（Hunyuan3D-2mv）と trellismv（TRELLIS の複数画像）は、views で描いた 4 つの向きの絵から作る。
 //     出すもの：obj3d_<seg>_<method>_<番号>.glb / .ply / .json（paint-out に。粒の空間が読む）
 //
 // 共通：--codex <コマンド>（complete のとき。既定 codex）
@@ -24,11 +31,14 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readPng, writePng, resize } from './image.mjs';
 import { buildPrompt, generate } from './codex.mjs';
-import { runJob, convertJob, WIN } from './extcmd.mjs';
+import { runJob, convertJob, wslPath, WIN } from './extcmd.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.resolve(HERE, '..');
 export const DEFAULT_PROMPTS = ['person', 'woman', 'man', 'child', 'dog', 'monkey', 'umbrella', 'parasol', 'boat', 'sailboat', 'tree'];
-export const METHODS = ['trellis', 'hunyuan3d', 'sam3d'];
+export const METHODS = ['trellis', 'hunyuan3d', 'sam3d', 'hunyuanmv', 'trellismv'];
+// 複数の向きの絵から作る作り方 → 外の道具に渡す method の名前（道具の側は views があれば複数画像で作る）
+export const MULTI_VIEW = { hunyuanmv: 'hunyuan3d_mv', trellismv: 'trellis' };
+export const VIEW_NAMES = ['front', 'left', 'back', 'right'];
 const SEG_CMD = () => process.env.PSF_SEG || (WIN ? 'wsl -- /opt/psf-ext/sam3/run.sh' : '/opt/psf-ext/sam3/run.sh');
 const OBJ3D_CMD = () => process.env.PSF_OBJ3D || (WIN ? 'wsl -- /opt/psf-ext/obj3d/run.sh' : '/opt/psf-ext/obj3d/run.sh');
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
@@ -190,6 +200,75 @@ async function runComplete(o) {
   }
 }
 
+function sheetInstructions(label) {
+  return [
+    `object.png shows ONE object cut out of a painting${label ? ` (it is: ${label})` : ''}; transparent / white areas are not part of it. context.png shows where it sits in the painting (red outline).`,
+    'Paint a TURNAROUND SHEET of this same single object: one square image split into exactly four equal square panels in a 2 x 2 grid, no borders, no gaps, no labels, no text.',
+    'Top-left panel: the FRONT view, i.e. exactly the view seen in object.png (same pose, same direction).',
+    'Top-right panel: the object rotated 90 degrees clockwise as seen from above, so we see its LEFT side (camera moved to the object\'s left).',
+    'Bottom-left panel: the BACK view (rotated 180 degrees).',
+    'Bottom-right panel: the object rotated 270 degrees, so we see its RIGHT side.',
+    'All four panels: the same object with the same shape, proportions, pose, colours and the same painting style and brush texture as object.png, the same size and height in every panel, the camera at the same height, orthographic-looking, the WHOLE object visible (complete any part hidden or cut off in the painting, for a person the whole body including feet), centred, on a plain pure white background (#FFFFFF).',
+    'Do not paint any other object, person, ground, floor, cast shadow, frame or text.',
+  ].join('\n');
+}
+function viewInstructions(label, view) {
+  const how = { left: 'rotated 90 degrees clockwise as seen from above, so we see its LEFT side (camera moved to the object\'s left)', back: 'seen from directly BEHIND (rotated 180 degrees)', right: 'rotated 270 degrees, so we see its RIGHT side (camera moved to the object\'s right)' }[view];
+  return [
+    `object.png shows ONE object cut out of a painting${label ? ` (it is: ${label})` : ''} as seen from the front; transparent / white areas are not part of it. context.png shows where it sits in the painting (red outline).`,
+    `Paint this same single object ${how}.`,
+    'Same shape, proportions, pose, colours and the same painting style and brush texture as object.png; the WHOLE object visible (complete hidden parts), centred, filling about 80% of the frame height, camera at the same height, on a plain pure white background (#FFFFFF).',
+    'Do not paint any other object, person, ground, floor, cast shadow, frame or text.',
+  ].join('\n');
+}
+const viewFile = (out, seg, id, v) => path.join(out, `obj_${seg}_${id}_view_${v}.png`);
+/** 2×2 の回り込みの絵を 4 つに切る（左上 = 前、右上 = 左、左下 = 後ろ、右下 = 右） */
+export function splitSheet(img) {
+  const W = img.width, H = img.height, w = W >> 1, h = H >> 1, out = {};
+  [['front', 0, 0], ['left', 1, 0], ['back', 0, 1], ['right', 1, 1]].forEach(([v, cx, cy]) => {
+    const d = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) img.data.copy(d, y * w * 4, ((cy * h + y) * W + cx * w) * 4, ((cy * h + y) * W + cx * w + w) * 4);
+    out[v] = { width: w, height: h, data: d };
+  });
+  return out;
+}
+
+async function runViews(o) {
+  const ctx = load(o), list = pickIds(o, ctx.stats), perView = !!o['per-view'];
+  if (!list.length) throw new Error('描く物体がありません（--ids）');
+  const labels = new Map((ctx.info.objects || []).map((x) => [x.id, x.label || x.type]));
+  console.log(`物を 4 つの向きから描いてもらいます：${list.length} 個（Codex を ${list.length * (perView ? 3 : 1)} 回呼びます）`);
+  for (const [k, id] of list.entries()) {
+    const s = ctx.stats.get(id), workDir = path.join(ctx.out, 'work', `objviews-${ctx.seg}-${id}-${stamp()}`);
+    fs.mkdirSync(workDir, { recursive: true });
+    const full = file(ctx.out, ctx.seg, id, 'full'), objFile = path.join(workDir, 'object-input.png'), ctxFile = path.join(workDir, 'context-input.png');
+    const front = fs.existsSync(full) && o.source !== 'cut' ? readPng(full) : cutout(ctx.px, ctx.ids, s);
+    writePng(objFile, front); writePng(ctxFile, contextImage(ctx.px, ctx.ids, s));
+    const references = [{ name: 'object.png', file: objFile, note: 'the object cut out of the painting, front view (transparent outside)' }, { name: 'context.png', file: ctxFile, note: 'the painting around the object, with the object outlined in red' }];
+    const tag = `(${k + 1}/${list.length}) 物体 ${id}${labels.get(id) ? `（${labels.get(id)}）` : ''}`;
+    const ask = async (dir, instructions) => {
+      fs.mkdirSync(dir, { recursive: true });
+      return generate({ workDir: dir, prompt: buildPrompt({ width: 1024, height: 1024, references, instructions }), references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
+    };
+    if (!perView) {
+      console.log(`${tag}：${o['dry-run'] ? '文と条件の絵だけ用意します' : 'Codex で 2×2 の回り込みの絵を描いています'}`);
+      const got = await ask(workDir, sheetInstructions(labels.get(id)));
+      if (!got) { console.log(`  → ${workDir}`); continue; }
+      const parts = splitSheet(resize(readPng(got), 1024, 1024));
+      for (const v of VIEW_NAMES) writePng(viewFile(ctx.out, ctx.seg, id, v), whiteToAlpha(parts[v]));
+    } else {
+      if (!o['dry-run']) writePng(viewFile(ctx.out, ctx.seg, id, 'front'), front);
+      for (const v of VIEW_NAMES.slice(1)) {
+        console.log(`${tag} の ${v}：${o['dry-run'] ? '文と条件の絵だけ用意します' : 'Codex で描いています'}`);
+        const got = await ask(path.join(workDir, v), viewInstructions(labels.get(id), v));
+        if (!got) { console.log(`  → ${path.join(workDir, v)}`); continue; }
+        writePng(viewFile(ctx.out, ctx.seg, id, v), whiteToAlpha(resize(readPng(got), 1024, 1024)));
+      }
+    }
+    if (!o['dry-run']) console.log(`  → obj_${ctx.seg}_${id}_view_{${VIEW_NAMES.join(',')}}.png`);
+  }
+}
+
 async function runMake3d(o) {
   const ctx = load(o), method = String(o.method || '');
   if (!METHODS.includes(method)) throw new Error(`--method は ${METHODS.join(' / ')} のどれかです`);
@@ -200,12 +279,16 @@ async function runMake3d(o) {
   console.log(`${method} で ${list.length} 個の物を 3D にします（${command}）`);
   for (const [k, id] of list.entries()) {
     const full = file(ctx.out, ctx.seg, id, 'full'), useFull = o.source !== 'cut' && fs.existsSync(full);
+    const mv = MULTI_VIEW[method], views = mv ? Object.fromEntries(VIEW_NAMES.map((v) => [v, viewFile(ctx.out, ctx.seg, id, v)]).filter(([, f]) => fs.existsSync(f))) : null;
+    if (mv && Object.keys(views).length < 2) { failed.push(id); console.log(`  × 物体 ${id}：向きごとの絵がありません（先に views で描いてください）`); continue; }
     const outDir = path.join(ctx.out, 'work', 'obj3d', `${ctx.seg}-${method}-${id}`);
     fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
-    const job = { method, image, mask: file(ctx.out, ctx.seg, id, 'mask'), cutout: useFull ? full : file(ctx.out, ctx.seg, id, 'cut'), cutout_is_completed: useFull, out_dir: outDir, seed: Number(o.seed) || 0, texture: !!o.texture };
+    const job = { method: mv || method, image, mask: file(ctx.out, ctx.seg, id, 'mask'), cutout: views ? (views.front || Object.values(views)[0]) : useFull ? full : file(ctx.out, ctx.seg, id, 'cut'), cutout_is_completed: useFull || !!views, out_dir: outDir, seed: Number(o.seed) || 0, texture: !!o.texture };
+    const wsl = /^\s*"?wsl/i.test(command) && WIN;
+    if (views) job.views = wsl ? Object.fromEntries(Object.entries(views).map(([v, f]) => [v, wslPath(f)])) : views;
     const jobFile = path.join(outDir, 'job.json');
-    fs.writeFileSync(jobFile, JSON.stringify(/^\s*"?wsl/i.test(command) && WIN ? convertJob(job, ['image', 'mask', 'cutout', 'out_dir']) : job, null, 1));
-    console.log(`(${k + 1}/${list.length}) 物体 ${id}：${useFull ? '描き足した全身' : '絵からの切り抜き'}から作ります`);
+    fs.writeFileSync(jobFile, JSON.stringify(wsl ? convertJob(job, ['image', 'mask', 'cutout', 'out_dir']) : job, null, 1));
+    console.log(`(${k + 1}/${list.length}) 物体 ${id}：${views ? `向きごとの絵 ${Object.keys(views).length} 枚（${Object.keys(views).join('・')}）` : useFull ? '描き足した全身' : '絵からの切り抜き'}から作ります`);
     const t0 = Date.now();
     try {
       await runJob({ command, jobFile, logFile: path.join(outDir, 'log.txt'), label: `${method}（物の 3D）`, envName: 'PSF_OBJ3D', timeoutSeconds: Number(o.timeout) || 7200 });
@@ -213,7 +296,7 @@ async function runMake3d(o) {
       for (const ext of ['glb', 'ply']) { fs.rmSync(`${base}.${ext}`, { force: true }); if (fs.existsSync(path.join(outDir, `model.${ext}`))) fs.copyFileSync(path.join(outDir, `model.${ext}`), `${base}.${ext}`); }
       if (!fs.existsSync(`${base}.glb`) && !fs.existsSync(`${base}.ply`)) throw new Error('model.glb も model.ply もできませんでした');
       let info = {}; try { info = JSON.parse(fs.readFileSync(path.join(outDir, 'info.json'), 'utf8')); } catch { /* 無くてよい */ }
-      fs.writeFileSync(`${base}.json`, JSON.stringify({ ...info, method, seg: ctx.seg, object: id, source: useFull ? 'full' : 'cut', seconds_total: Math.round((Date.now() - t0) / 100) / 10 }, null, 1));
+      fs.writeFileSync(`${base}.json`, JSON.stringify({ ...info, method, seg: ctx.seg, object: id, source: views ? `views:${Object.keys(views).join(',')}` : useFull ? 'full' : 'cut', seconds_total: Math.round((Date.now() - t0) / 100) / 10 }, null, 1));
       console.log(`  → ${path.basename(base)}（${Math.round((Date.now() - t0) / 1000)} 秒${info.peak_vram_gb ? `、GPU メモリ ${info.peak_vram_gb} GB` : ''}）`);
     } catch (e) { failed.push(id); console.log(`  × 物体 ${id}：${e.message}`); }
   }
@@ -248,7 +331,7 @@ async function runSegment(o) {
     '--masks', inst, '--variant', 'sam3', '--seg', o['seg-mode'] === 'masks' ? 'masks' : 'both', '--minscore', String(o['min-score'] ?? 0.4)], path.join(ROOT, 'painting'));
 }
 
-const COMMANDS = { segment: runSegment, cutouts: runCutouts, complete: runComplete, make3d: runMake3d };
+const COMMANDS = { segment: runSegment, cutouts: runCutouts, complete: runComplete, views: runViews, make3d: runMake3d };
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const o = parseArgs(process.argv.slice(2));
   for (const k of ['paint-out', 'previz-export']) if (typeof o[k] === 'string') o[k] = path.resolve(o[k]);
