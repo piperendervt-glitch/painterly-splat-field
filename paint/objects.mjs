@@ -17,7 +17,8 @@
 //     Codex に、物を 4 つの向き（前・左・後ろ・右）から描いてもらう。既定は 1 回で 2×2 の「回り込みの絵」を描いてもらい 4 つに切る（向きどうしの食い違いが少ない）。
 //     --per-view：向きごとに 1 回ずつ（左・後ろ・右の 3 回。前は絵の切り抜きか描き足した全身）。
 //     出すもの：obj_<seg>_<番号>_view_{front,left,back,right}.png（白い所は透明にしたもの）。
-//     向きの決まり（Hunyuan3D-2mv と同じ）：front = 絵で見えている向き、left = 物を上から見て時計回りに 90° 回した（物の左の横腹が見える）、back = 180°、right = 270°
+//     向きの決まり（Hunyuan3D-2mv と同じ）：front = 絵のカメラの位置、left = 物を上から見て時計回りに 90° 回した（＝カメラが反時計回りに 90° 回り込み、絵の右の端が手前に来る）、
+//     back = 180°、right = 270°（絵の左の端が手前）。向きは「物のどちら側か」ではなく「カメラがどこに立つか」で Codex に伝える（物が絵で横向きでも、back は絵から 180°）
 //
 //   node objects.mjs make3d --paint-out <dir> --previz-export <dir> --seg depth|sam3 --method trellis|hunyuan3d|sam3d|hunyuanmv|trellismv --ids 3,5 [--source full|cut] [--texture]
 //     外の道具（絵 1 枚から物の 3D を作るもの。コマンド：環境変数 PSF_OBJ3D）で、物ごとの 3D を作る。
@@ -202,21 +203,22 @@ async function runComplete(o) {
 
 function sheetInstructions(label) {
   return [
-    `object.png shows ONE object cut out of a painting${label ? ` (it is: ${label})` : ''}; transparent / white areas are not part of it. context.png shows where it sits in the painting (red outline).`,
-    'Paint a TURNAROUND SHEET of this same single object: one square image split into exactly four equal square panels in a 2 x 2 grid, no borders, no gaps, no labels, no text.',
-    'Top-left panel: the FRONT view, i.e. exactly the view seen in object.png (same pose, same direction).',
-    'Top-right panel: the object rotated 90 degrees clockwise as seen from above, so we see its LEFT side (camera moved to the object\'s left).',
-    'Bottom-left panel: the BACK view (rotated 180 degrees).',
-    'Bottom-right panel: the object rotated 270 degrees, so we see its RIGHT side.',
-    'All four panels: the same object with the same shape, proportions, pose, colours and the same painting style and brush texture as object.png, the same size and height in every panel, the camera at the same height, orthographic-looking, the WHOLE object visible (complete any part hidden or cut off in the painting, for a person the whole body including feet), centred, on a plain pure white background (#FFFFFF).',
+    `object.png shows ONE object cut out of a painting${label ? ` (it is: ${label})` : ''}; transparent / white areas are not part of it. If it is a group (for example two people standing together), treat the whole group as one object and keep EVERY member of it in every panel. context.png shows where it sits in the painting (red outline).`,
+    'Paint a TURNAROUND SHEET of this object: one square image split into exactly four equal square panels in a 2 x 2 grid, no borders, no gaps, no labels, no text.',
+    'IMPORTANT: the four panels are defined by where the CAMERA stands, relative to the camera of the painting, NOT by which side of the subject faces us. The object stays still; the camera walks around it at the same height and distance. In the painting the object may be seen in profile, from behind or at an angle: that is fine, keep it so in panel 1.',
+    'Panel 1 (top-left): camera exactly where the painting\'s camera is. This panel must look like object.png (same pose, same direction the object faces).',
+    'Panel 2 (top-right): the camera walked a quarter circle (90 degrees) around the object, starting by stepping to its own RIGHT (counter-clockwise as seen from above). Whatever was at the RIGHT edge of panel 1 is now nearest to the camera, in the middle of the panel.',
+    'Panel 3 (bottom-left): camera on the opposite side, 180 degrees from the painting\'s camera. The left and right of panel 1 are swapped. If panel 1 shows a profile facing right, panel 3 shows a profile facing left.',
+    'Panel 4 (bottom-right): the camera walked a quarter circle (90 degrees) around the object the other way, starting by stepping to its own LEFT (clockwise as seen from above). Whatever was at the LEFT edge of panel 1 is now nearest to the camera. Panel 4 is the mirror-side view of panel 2.',
+    'All four panels: the same object with the same shape, proportions, pose, colours and the same painting style and brush texture as object.png, the same size and height in every panel, orthographic-looking, the WHOLE object visible (complete any part hidden or cut off in the painting, for a person the whole body including feet), centred, on a plain pure white background (#FFFFFF).',
     'Do not paint any other object, person, ground, floor, cast shadow, frame or text.',
   ].join('\n');
 }
 function viewInstructions(label, view) {
-  const how = { left: 'rotated 90 degrees clockwise as seen from above, so we see its LEFT side (camera moved to the object\'s left)', back: 'seen from directly BEHIND (rotated 180 degrees)', right: 'rotated 270 degrees, so we see its RIGHT side (camera moved to the object\'s right)' }[view];
+  const how = { left: 'with the camera walked a quarter circle (90 degrees) around it, starting by stepping to its own RIGHT (counter-clockwise as seen from above); whatever was at the RIGHT edge of object.png is now nearest to the camera', back: 'with the camera on the opposite side, 180 degrees from the painting\'s camera (left and right of object.png are swapped; a profile facing right becomes a profile facing left)', right: 'with the camera walked a quarter circle (90 degrees) around it, starting by stepping to its own LEFT (clockwise as seen from above); whatever was at the LEFT edge of object.png is now nearest to the camera' }[view];
   return [
-    `object.png shows ONE object cut out of a painting${label ? ` (it is: ${label})` : ''} as seen from the front; transparent / white areas are not part of it. context.png shows where it sits in the painting (red outline).`,
-    `Paint this same single object ${how}.`,
+    `object.png shows ONE object cut out of a painting${label ? ` (it is: ${label})` : ''}; transparent / white areas are not part of it. If it is a group, treat the whole group as one object and keep every member of it. context.png shows where it sits in the painting (red outline).`,
+    `Paint this same object, standing still, ${how}. The direction is defined by where the camera stands relative to the painting's camera, not by which side of the subject faces us (in the painting it may be seen in profile or from behind).`,
     'Same shape, proportions, pose, colours and the same painting style and brush texture as object.png; the WHOLE object visible (complete hidden parts), centred, filling about 80% of the frame height, camera at the same height, on a plain pure white background (#FFFFFF).',
     'Do not paint any other object, person, ground, floor, cast shadow, frame or text.',
   ].join('\n');
