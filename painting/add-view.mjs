@@ -15,6 +15,8 @@
 //       local     PC の画像生成モデル（/opt/psf-ext/inpaint/run.sh、PSF_INPAINT）。利用枠なし
 //       none      埋めない（写すところまで。後から画面で埋められる）
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
+//     --objcloud <.ply>  物ごとの 3D を置いた点群（世界の座標で x y z、red green blue、object_id、radius〔m〕。バイナリ little endian）。
+//       その物体は、もとの絵の画素を動かす代わりに、点群をこの視点から見た形で写す（横から見た形になる）
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
 //   node add-view.mjs --scene jatte --plate --fill codex|local [--local-model <名前>] [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
@@ -31,6 +33,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadScene, rgbaOf, savePng } from './import-views.mjs';
 import * as dream from '../studio/dreamviews.js';
+import { parsePly } from '../studio/sharp.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.resolve(HERE, '..');
 const FLAGS = new Set(['dry-run', 'new-depth', 'plate']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'none'];
@@ -69,6 +72,15 @@ function candidate(D, a) {
   const y = yaw * Math.PI / 180, p = a.pitch * Math.PI / 180, dirv = [Math.sin(y) * Math.cos(p), Math.sin(p), Math.cos(y) * Math.cos(p)]; // 右・上・前
   const target = at(position, dirv[0] * 10, dirv[1] * 10, dirv[2] * 10);
   return { position: position.map((x) => +x.toFixed(4)), target: target.map((x) => +x.toFixed(4)) };
+}
+
+// 物ごとの 3D を置いた点群（.ply。バイナリ little endian。世界の座標で x y z、red green blue、object_id、radius〔m〕）を読む
+function readCloud(file) {
+  const buf = fs.readFileSync(file), { count, props: p } = parsePly(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), ['x', 'y', 'z', 'red', 'green', 'blue', 'object_id', 'radius']);
+  for (const k of ['x', 'y', 'z', 'red', 'green', 'blue']) if (!p[k]) throw new Error(`点群に ${k} の列がありません：${file}`);
+  const xyz = new Float32Array(count * 3), rgb = new Uint8Array(count * 3), object = p.object_id ? new Uint16Array(count) : null;
+  for (let i = 0; i < count; i++) { xyz[i * 3] = p.x[i]; xyz[i * 3 + 1] = p.y[i]; xyz[i * 3 + 2] = p.z[i]; rgb[i * 3] = p.red[i]; rgb[i * 3 + 1] = p.green[i]; rgb[i * 3 + 2] = p.blue[i]; if (object) object[i] = p.object_id[i]; }
+  return { n: count, xyz, rgb, object, radius: p.radius || 0.01 };
 }
 
 const run = (cmd, argv, cwd) => { const r = spawnSync(cmd, argv, { cwd, stdio: 'inherit', windowsHide: true }); if (r.error) throw new Error(`${path.basename(argv[0])} を起動できません：${r.error.message}`); return r.status; };
@@ -129,9 +141,9 @@ async function main() {
     if (a['dry-run'] || !fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで取り消せます。`); return; }
     await refine(dir, name); return;
   }
-  const cand = candidate(D, a);
-  const { holes, pixels } = await dream.addView(D, cand, name, io);
-  console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%`);
+  const cand = candidate(D, a), cloud = typeof a.objcloud === 'string' ? readCloud(path.resolve(a.objcloud)) : null;
+  const { holes, pixels, cloudPixels } = await dream.addView(D, cand, name, io, { cloud });
+  console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%${cloud ? `（物の点群 ${cloud.n} 点を重ねて、絵の ${(100 * cloudPixels / pixels).toFixed(1)}% を埋めました）` : ''}`);
   if (!holes) { fs.copyFileSync(path.join(S.P, `${name}_reproj.png`), path.join(S.P, `${name}_painted.png`)); console.log('穴が無いので、描き足しません。'); return; }
   if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。「視点を足す」のタブの「2. 穴を埋める」で埋められます。'); return; }
   // 2. 埋める（画面のサーバーと同じ引数で paint.mjs を呼ぶ）

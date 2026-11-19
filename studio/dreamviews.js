@@ -1,7 +1,7 @@
 // 「視点を足す」の、絵 1 枚から作った場面（プレビズの形が無い場面）のための部分。計算は studio/dream.js、ここはファイルの読み書きとの橋渡し。
 // 流れ（LucidDreamer の Dreaming の段と同じ）：すでにある絵を新しい視点へ写す → 穴を埋める（Codex かツール内）→ 埋めた絵の奥行きを推定して、分かっている所に合わせる。
 import { pullPush } from './layers.js';
-import { lookBasis as cameraBasis, cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
+import { lookBasis as cameraBasis, cameraMatrices, warp, compose, overlayPoints, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
 
 /** この場面は、絵 1 枚から作った物か（cameras.json の source.kind）。 */
 export const isPainting = (cams) => !!(cams && cams.source && cams.source.kind === 'painting');
@@ -34,9 +34,15 @@ export function targetCamera(D, cand) {
   return { W: b.W, H: b.H, fx: b.fx, fy: b.fy, cx: b.cx, cy: b.cy, ...cameraMatrices(cand.position, cameraBasis(cand.position, cand.target)) };
 }
 // 写すもとになる視点：絵のある視点すべて。足した視点は、新しく描いた画素だけを使う
-function sources(D, except) {
+// hide（物体の番号の Set）を渡すと、その物体の画素は写さない（物ごとの 3D の点群で置き換えるとき。点群は overlayPoints で重ねる）
+function sources(D, except, hide = null) {
+  const shown = (v) => {
+    if (!hide || !hide.size || !v.object) return v.added ? v.fresh : null;
+    const m = new Uint8Array(v.W * v.H); for (let i = 0; i < m.length; i++) m[i] = (v.added ? v.fresh[i] : 1) && !hide.has(v.object[i]) ? 1 : 0;
+    return m;
+  };
   return D.views.filter((v) => v.painted && v.name !== except && !(v.added && !v.fresh)).map((v) => ({
-    name: v.name, W: v.W, H: v.H, fx: v.fx, fy: v.fy, cx: v.cx, cy: v.cy, c2w: v.c2w, w2c: v.w2c, z: v.z, type: v.type, object: v.object, valid: v.added ? v.fresh : null, painted: v.painted,
+    name: v.name, W: v.W, H: v.H, fx: v.fx, fy: v.fy, cx: v.cx, cy: v.cy, c2w: v.c2w, w2c: v.w2c, z: v.z, type: v.type, object: v.object, valid: shown(v), painted: v.painted,
   }));
 }
 
@@ -139,19 +145,23 @@ export async function addPlateView(D, name, io, { grow = 10, types = ['figure'],
 
 /**
  * 候補の視点を足す：すでにある絵を写し、写した絵・穴の印・仮の奥行き（穴は、まわりからなめらかに伸ばした値）を保存する。
- * io = { saveExport(name, rgba, W, H), savePaint(name, rgba, W, H), loadAdded(), saveAdded(list) }。返すのは { holes, pixels }。
+ * io = { saveExport(name, rgba, W, H), savePaint(name, rgba, W, H), loadAdded(), saveAdded(list) }。返すのは { holes, pixels, cloudPixels }。
+ * cloud（物ごとの 3D を置いた点群。dream.js の overlayPoints の形）を渡すと、その物体は、もとの絵の画素の代わりに点群で写す。
  */
-export async function addView(D, cand, name, io) {
-  const cam = targetCamera(D, cand), src = sources(D, name);
+export async function addView(D, cand, name, io, { cloud = null } = {}) {
+  const hide = cloud && cloud.object ? new Set(cloud.object) : null; hide && hide.delete(0);
+  const cam = targetCamera(D, cand), src = sources(D, name, hide), T = typeTable(D.cams);
   if (!src.length) throw new Error('写せる絵がありませんでした');
-  const c = compose(warp(cam, src), src, { skyType: typeTable(D.cams).ids.sky }), n = c.W * c.H;
+  const c = compose(warp(cam, src), src, { skyType: T.ids.sky }), n = c.W * c.H;
+  // 物ごとの 3D の点群があれば、その物体の画素は写さず（上の hide）、点群をこの視点から見た形で重ねる
+  const over = cloud ? overlayPoints(c, cam, cloud, { type: T.ids.figure !== undefined ? T.ids.figure : T.ids.ground }) : null;
   const mask = new Uint8ClampedArray(n * 4); for (let i = 0; i < n; i++) { mask[i * 4] = mask[i * 4 + 1] = mask[i * 4 + 2] = c.hole[i] ? 255 : 0; mask[i * 4 + 3] = 255; }
   await io.savePaint(`${name}_reproj.png`, c.rgba, c.W, c.H);
   await io.savePaint(`${name}_holes.png`, mask, c.W, c.H);
   await io.savePaint(`${name}_new.png`, mask, c.W, c.H); // 粒にするのは穴だった画素だけ
   await saveGeometry(D, name, c, extendDepth(c, { cam, groundY: groundY(D) }), cam, io);
   await io.saveAdded([...(await io.loadAdded()).filter((v) => v.name !== name), viewDef(D, name, cand, cam)]);
-  return { holes: c.holeCount, pixels: n };
+  return { holes: c.holeCount, pixels: n, cloudPixels: over ? over.pixels : 0 };
 }
 
 /**

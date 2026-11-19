@@ -114,6 +114,14 @@ node painting/add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
 
 絵は描かず、利用枠も使わない。奥行きの決め方を直したあとに、もうある視点へ反映するときに使う。
 
+### 物ごとの 3D の点群を重ねて写す（--objcloud）
+
+`node painting/add-view.mjs --scene <場面> --right 0.75 --objcloud scenes/<場面>/paint-out/objcloud_depth_best.ply --fill ...`
+
+物ごとの 3D を絵の輪郭に合わせて置いた点群（`painting/objcloud.mjs` が書く ply。世界の座標で x y z、red green blue、object_id、radius〔m〕。docs/object-interaction.md）を渡すと、
+点群に入っている物体は、もとの絵の画素を動かす代わりに、点群を新しい視点から見た形で写す（板ではなく、横から見た形になる）。点群に無い物体は今までどおり絵の画素を動かす。
+物の後ろに開く穴は今までどおり穴として残り、--fill の描き手が埋める。点群の画素は「分かっている画素」として扱い、粒にはしない（粒の空間では、物は「物体ごとの 3D モデル」の層が受け持つ）。
+
 ### もとの絵の切り抜きを取り替える（painting/relabel.mjs）
 
 `painting/build.mjs` の「人・動物」の切り抜きは奥行きの推定から作るので粗い（人なのに木や地面の札になる、日傘が半分だけ人になる、足もとが四角くなる）。外で作った正確な切り抜き（物ごとの番号の絵）があれば、それで札と奥行きを書き直せる。

@@ -151,6 +151,40 @@ export function compose(w, sources, { skyType = 0 } = {}) {
   return { W, H, rgba, hole, holeCount, z, known, type, object };
 }
 
+/**
+ * 点の集まり（物ごとの 3D を置いた点群）を新しい視点へ写して、compose の結果 c に重ねる（c を書き換える）。
+ * 人や物は、もとの絵の画素を奥行きで動かすと 1 枚の板のままだが、別の処理で立体にした点群なら、横から見た形になる。
+ *   cloud = { n, xyz（世界の座標。Float32Array 3n）, rgb（Uint8Array 3n）, object（点ごとの物体の番号。無ければ null）, radius（点の半径 m。Float32Array n か数） }
+ *   type  = 点の画素に付ける種類の番号
+ * 点は、その画素に今ある面より手前のときだけ書く（穴・空の所には必ず書く）。1 点は、半径に合わせた大きさの円で書く（minPx〜maxPx 画素）。
+ * 返すのは { pixels（点で埋めた画素）, holes（そのうち穴だった画素） }。
+ */
+export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx = 8 } = {}) {
+  const { W, H } = c, n = W * H, w = target.w2c, inv = new Float32Array(n), pick = new Int32Array(n).fill(-1);
+  const rOf = typeof cloud.radius === 'number' ? () => cloud.radius : (k) => cloud.radius[k];
+  for (let k = 0; k < cloud.n; k++) {
+    const x = cloud.xyz[k * 3], y = cloud.xyz[k * 3 + 1], z = cloud.xyz[k * 3 + 2];
+    const Z = -(w[8] * x + w[9] * y + w[10] * z + w[11]); if (!(Z > NEAR)) continue;
+    const px = target.cx + (w[0] * x + w[1] * y + w[2] * z + w[3]) / Z * target.fx - 0.5, py = target.cy - (w[4] * x + w[5] * y + w[6] * z + w[7]) / Z * target.fy - 0.5;
+    const r = Math.max(minPx, Math.min(maxPx, rOf(k) * target.fx / Z)), iz = 1 / Z;
+    const x0 = Math.max(0, Math.ceil(px - r)), x1 = Math.min(W - 1, Math.floor(px + r)), y0 = Math.max(0, Math.ceil(py - r)), y1 = Math.min(H - 1, Math.floor(py + r));
+    for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) {
+      if ((xx - px) ** 2 + (yy - py) ** 2 > r * r + 0.25) continue;
+      const o = yy * W + xx; if (iz > inv[o]) { inv[o] = iz; pick[o] = k; }
+    }
+  }
+  let pixels = 0, holes = 0;
+  for (let o = 0; o < n; o++) {
+    const k = pick[o]; if (k < 0) continue;
+    if (!c.hole[o] && c.z[o] > 0 && inv[o] <= 1.001 / c.z[o]) continue; // 今ある面のほうが手前
+    if (c.hole[o]) { holes++; c.hole[o] = 0; c.holeCount--; }
+    c.rgba[o * 4] = cloud.rgb[k * 3]; c.rgba[o * 4 + 1] = cloud.rgb[k * 3 + 1]; c.rgba[o * 4 + 2] = cloud.rgb[k * 3 + 2];
+    c.z[o] = 1 / inv[o]; c.known[o] = 1; c.type[o] = type; if (c.object) c.object[o] = cloud.object ? cloud.object[k] : 0;
+    pixels++;
+  }
+  return { pixels, holes };
+}
+
 // カメラ cam の画素 (x, y)・奥行き z の点の、世界での高さ
 const heightAt = (cam, x, y, z) => { const m = cam.c2w; return m[4] * ((x + 0.5 - cam.cx) / cam.fx * z) + m[5] * (-(y + 0.5 - cam.cy) / cam.fy * z) - m[6] * z + m[7]; };
 // カメラ cam の画素 (x, y) を通る線が、高さ groundY の水平な面に当たる所の奥行き（当たらなければ 0）
