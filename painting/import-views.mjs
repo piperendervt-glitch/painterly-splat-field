@@ -54,13 +54,13 @@ export function readNpy(file) {
   return { shape, data: out };
 }
 
-const rgbaOf = async (file, W, H) => { // 絵を RGBA（W×H。大きさが違えば合わせる）で読む
+export const rgbaOf = async (file, W, H) => { // 絵を RGBA（W×H。大きさが違えば合わせる）で読む
   let s = sharp(file).removeAlpha().ensureAlpha();
   if (W && H) s = s.resize(W, H, { fit: 'fill' });
   const { data, info } = await s.raw().toBuffer({ resolveWithObject: true });
   return { data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.length), W: info.width, H: info.height };
 };
-const savePng = (file, rgba, W, H) => sharp(Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength), { raw: { width: W, height: H, channels: 4 } }).png().toFile(file);
+export const savePng = (file, rgba, W, H) => sharp(Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength), { raw: { width: W, height: H, channels: 4 } }).png().toFile(file);
 
 // 4×4（行ごとの 16 個）の掛け算と、回転＋平行移動の行列の逆
 const mul = (a, b) => { const o = new Array(16).fill(0); for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) for (let k = 0; k < 4; k++) o[r * 4 + c] += a[r * 4 + k] * b[k * 4 + c]; return o; };
@@ -72,7 +72,7 @@ const rigidInverse = (m) => {
 const rows = (m) => [0, 4, 8, 12].map((i) => m.slice(i, i + 4).map((x) => +x.toFixed(8)));
 
 // 場面の視点（もとの絵と、すでに足した視点）を、写す計算の形で読む
-async function loadScene(dir) {
+export async function loadScene(dir) {
   const E = path.join(dir, 'previz-export'), P = path.join(dir, 'paint-out');
   const cams = JSON.parse(fs.readFileSync(path.join(E, 'cameras.json'), 'utf8'));
   if (!cams.source || cams.source.kind !== 'painting') throw new Error('この場面は絵 1 枚から作った場面ではありません');

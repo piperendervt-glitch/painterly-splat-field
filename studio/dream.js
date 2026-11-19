@@ -18,6 +18,17 @@ export function cameraMatrices(position, { r, u, f }) {
   const w2c = [r[0], r[1], r[2], -(r[0] * px + r[1] * py + r[2] * pz), u[0], u[1], u[2], -(u[0] * px + u[1] * py + u[2] * pz), -f[0], -f[1], -f[2], f[0] * px + f[1] * py + f[2] * pz, 0, 0, 0, 1];
   return { c2w, w2c };
 }
+/** 位置と見る先から、カメラの向き（右・上・前）を作る。three.js の lookAt と同じ手順で、傾きは付けない（studio/viewdata.js の cameraBasis と同じ結果）。 */
+export function lookBasis(position, target) {
+  const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; }, cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  let z = [position[0] - target[0], position[1] - target[1], position[2] - target[2]];
+  if (!(Math.hypot(...z) > 0)) z = [0, 0, 1];
+  z = norm(z);
+  let x = cross([0, 1, 0], z);
+  if (!(Math.hypot(...x) > 0)) { z = norm([z[0], z[1], z[2] + 0.0001]); x = cross([0, 1, 0], z); }
+  x = norm(x);
+  return { r: x, u: cross(z, x), f: [-z[0], -z[1], -z[2]] };
+}
 const mul = (a, b) => { const o = new Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) o[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + a[i * 4 + 3] * b[12 + j]; return o; };
 
 /**

@@ -63,6 +63,18 @@ node paint/paint.mjs repaint --image <別視点の絵> --style-ref <もとの絵
 
 `--dry-run` を付けると、Codex は呼ばずに、送る文と条件の絵だけを作業フォルダに作る（別視点のモデルは動く）。
 
+## 画面を開かずに視点を足す（`painting/add-view.mjs`）
+
+「視点を足す」のタブと同じ計算を、同じ順（写す → 穴を埋める → 埋めた絵の奥行きを合わせる）でコマンドから動かす。位置と向きは、もとの絵のカメラから見た量で指定する。
+
+```
+node painting/add-view.mjs --scene jatte --right 0.75 --fill nvscodex       # 右へ 0.75 m。別視点のモデル → Codex（Codex を 1 回使う）
+node painting/add-view.mjs --scene jatte --yaw 20 --fill nvs --nvs-model seva   # その場で右へ 20°。別視点のモデルだけ（利用枠なし）
+node painting/add-view.mjs --scene jatte --orbit 10 --orbit-dist 8 --fill none  # 正面 8 m の点のまわりを 10°。写すところまで
+```
+
+できた視点は R1, R2, … として `added_views.json` に加わり、「粒の空間」で「ファイルを読み直す」を押すと出る。
+
 ## PC の画像生成モデルとの約束（`paint/localinpaint.mjs`）
 
 ```

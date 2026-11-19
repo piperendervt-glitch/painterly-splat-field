@@ -1,7 +1,6 @@
 // 「視点を足す」の、絵 1 枚から作った場面（プレビズの形が無い場面）のための部分。計算は studio/dream.js、ここはファイルの読み書きとの橋渡し。
 // 流れ（LucidDreamer の Dreaming の段と同じ）：すでにある絵を新しい視点へ写す → 穴を埋める（Codex かツール内）→ 埋めた絵の奥行きを推定して、分かっている所に合わせる。
-import { cameraBasis } from './viewdata.js';
-import { cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
+import { lookBasis as cameraBasis, cameraMatrices, warp, compose, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
 
 /** この場面は、絵 1 枚から作った物か（cameras.json の source.kind）。 */
 export const isPainting = (cams) => !!(cams && cams.source && cams.source.kind === 'painting');
