@@ -64,6 +64,17 @@ out_dir に書くもの：`model.glb`（メッシュ）と／または `model.pl
 
 モデルの向き・大きさ・位置は、絵の物の輪郭にいちばん重なるように探す（objectmodel.js の fitModel。.ply と .obj は +Y 上・+Z 上の両方を試す）。
 
+## 置いた物を点群として書き出す（ほかの処理に渡す）
+
+```
+node painting/objcloud.mjs --previz-export scenes/<場面>/previz-export --paint-out scenes/<場面>/paint-out --seg depth --method best [--ids 3,5] [--stride 1.5]
+```
+
+ブラウザを使わずに、物ごとの 3D を粒の空間と同じやり方（fitContext・fitModel・modelSplats）で絵の物の輪郭に合わせて置き、全部の向きの点にして書く。
+- `objcloud_<版>_<作り方>.ply`：点の ply。世界座標（cameras.json の three.js の座標、m、+Y が上）。x y z、nx ny nz、red green blue（絵から見えている側は絵の色、裏はモデルの色か物の平均色）、object_id、radius（m）
+- `objcloud_<版>_<作り方>.json`：物ごとの作り方・モデルのファイル・輪郭の重なり・色の近さ・向き・大きさ・高さ・点の数。モデルが無い物は missing
+- `--method best`：物ごとに、ある作り方のうち輪郭の重なりがいちばん高いもの。`--stride`：点の間隔を、その物の距離での絵の画素いくつぶんにするか
+
 ## 流れを確かめるための、にせの道具
 
 本物のモデルが無くても流れを試せる（結果は本物ではない）。
