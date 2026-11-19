@@ -19,6 +19,7 @@
 //       （モデルなしの計算。配置を保ったまま点描に戻すための下ごしらえ。強さを書かなければ、もとの絵と同じ細かさに合わせる）。点の見本は、もとの視点の絵の、人と空を除いた所
 //     --objcloud <.ply>  物ごとの 3D を置いた点群（世界の座標で x y z、red green blue、object_id、radius〔m〕。バイナリ little endian）。
 //       その物体は、もとの絵の画素を動かす代わりに、点群をこの視点から見た形で写す（横から見た形になる）
+//       --objcloud-skip 10043,10037 で、点群のうちその番号の物体は使わない（絵の画素を動かす写し方のまま）
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
 //   node add-view.mjs --scene jatte --plate --fill codex|local [--local-model <名前>] [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
@@ -79,12 +80,17 @@ function candidate(D, a) {
 }
 
 // 物ごとの 3D を置いた点群（.ply。バイナリ little endian。世界の座標で x y z、red green blue、object_id、radius〔m〕）を読む
-function readCloud(file) {
+function readCloud(file, skip = null) {
   const buf = fs.readFileSync(file), { count, props: p } = parsePly(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), ['x', 'y', 'z', 'red', 'green', 'blue', 'object_id', 'radius']);
   for (const k of ['x', 'y', 'z', 'red', 'green', 'blue']) if (!p[k]) throw new Error(`点群に ${k} の列がありません：${file}`);
   const xyz = new Float32Array(count * 3), rgb = new Uint8Array(count * 3), object = p.object_id ? new Uint16Array(count) : null;
   for (let i = 0; i < count; i++) { xyz[i * 3] = p.x[i]; xyz[i * 3 + 1] = p.y[i]; xyz[i * 3 + 2] = p.z[i]; rgb[i * 3] = p.red[i]; rgb[i * 3 + 1] = p.green[i]; rgb[i * 3 + 2] = p.blue[i]; if (object) object[i] = p.object_id[i]; }
-  return { n: count, xyz, rgb, object, radius: p.radius || 0.01 };
+  if (!skip || !skip.size || !object) return { n: count, xyz, rgb, object, radius: p.radius || 0.01 };
+  // --objcloud-skip：その物体の点は使わない（絵の画素を動かす、今までの写し方に戻る）
+  const keep = []; for (let i = 0; i < count; i++) if (!skip.has(object[i])) keep.push(i);
+  const m = keep.length, xyz2 = new Float32Array(m * 3), rgb2 = new Uint8Array(m * 3), obj2 = new Uint16Array(m), rad2 = p.radius ? new Float32Array(m) : 0.01;
+  keep.forEach((i, k) => { xyz2.set(xyz.subarray(i * 3, i * 3 + 3), k * 3); rgb2.set(rgb.subarray(i * 3, i * 3 + 3), k * 3); obj2[k] = object[i]; if (p.radius) rad2[k] = p.radius[i]; });
+  return { n: m, xyz: xyz2, rgb: rgb2, object: obj2, radius: rad2 };
 }
 
 const run = (cmd, argv, cwd) => { const r = spawnSync(cmd, argv, { cwd, stdio: 'inherit', windowsHide: true }); if (r.error) throw new Error(`${path.basename(argv[0])} を起動できません：${r.error.message}`); return r.status; };
@@ -155,7 +161,7 @@ async function main() {
     if (!fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで取り消せます。`); return; }
     await refine(dir, name); return;
   }
-  const cand = candidate(D, a), cloud = typeof a.objcloud === 'string' ? readCloud(path.resolve(a.objcloud)) : null;
+  const cand = candidate(D, a), cloud = typeof a.objcloud === 'string' ? readCloud(path.resolve(a.objcloud), new Set(String(a['objcloud-skip'] ?? '').split(',').map(Number).filter((x) => x > 0))) : null;
   const { holes, pixels, cloudPixels } = await dream.addView(D, cand, name, io, { cloud });
   console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%${cloud ? `（物の点群 ${cloud.n} 点を重ねて、絵の ${(100 * cloudPixels / pixels).toFixed(1)}% を埋めました）` : ''}`);
   if (!holes) { fs.copyFileSync(path.join(S.P, `${name}_reproj.png`), path.join(S.P, `${name}_painted.png`)); console.log('穴が無いので、描き足しません。'); return; }

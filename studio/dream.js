@@ -159,7 +159,7 @@ export function compose(w, sources, { skyType = 0 } = {}) {
  * 点は、その画素に今ある面より手前のときだけ書く（穴・空の所には必ず書く）。1 点は、半径に合わせた大きさの円で書く（minPx〜maxPx 画素）。
  * 返すのは { pixels（点で埋めた画素）, holes（そのうち穴だった画素） }。
  */
-export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx = 8 } = {}) {
+export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx = 8, close = 2 } = {}) {
   const { W, H } = c, n = W * H, w = target.w2c, inv = new Float32Array(n), pick = new Int32Array(n).fill(-1);
   const rOf = typeof cloud.radius === 'number' ? () => cloud.radius : (k) => cloud.radius[k];
   for (let k = 0; k < cloud.n; k++) {
@@ -172,6 +172,22 @@ export function overlayPoints(c, target, cloud, { type = 0, minPx = 0.8, maxPx =
       if ((xx - px) ** 2 + (yy - py) ** 2 > r * r + 0.25) continue;
       const o = yy * W + xx; if (iz > inv[o]) { inv[o] = iz; pick[o] = k; }
     }
+  }
+  // 点と点のすき間を閉じる：近くで見ると点の間隔が画素より広くなり、物の中に点々と抜けが出る。
+  //   抜けた画素の左右（または上下）close 画素以内の両側に同じ物体の点があれば、近いほうの点で埋める。物の外側（片側しか点が無い所）は広げない。
+  if (close > 0) for (const [dx, dy] of [[1, 0], [0, 1]]) {
+    const add = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const o = y * W + x; if (pick[o] >= 0) continue;
+      let a = -1, b = -1, da = 0, db = 0;
+      for (let k = 1; k <= close && a < 0; k++) { const xx = x - dx * k, yy = y - dy * k; if (xx < 0 || yy < 0) break; if (pick[yy * W + xx] >= 0) { a = yy * W + xx; da = k; } }
+      if (a < 0) continue;
+      for (let k = 1; k <= close && b < 0; k++) { const xx = x + dx * k, yy = y + dy * k; if (xx >= W || yy >= H) break; if (pick[yy * W + xx] >= 0) { b = yy * W + xx; db = k; } }
+      if (b < 0) continue;
+      if (cloud.object && cloud.object[pick[a]] !== cloud.object[pick[b]]) continue; // 別々の物の間は埋めない
+      add.push(o, da <= db ? a : b);
+    }
+    for (let k = 0; k < add.length; k += 2) { pick[add[k]] = pick[add[k + 1]]; inv[add[k]] = inv[add[k + 1]]; }
   }
   let pixels = 0, holes = 0;
   for (let o = 0; o < n; o++) {
