@@ -4,7 +4,7 @@
 // 置き方は粒の空間と同じ（studio/objectmodel.js の fitContext・fitModel・modelSplats）。
 //
 //   node painting/objcloud.mjs --previz-export <dir> --paint-out <dir> [--seg depth|sam3] [--method hunyuanmv|hunyuan3d|trellismv|trellis|sam3d|best]
-//                              [--ids 3,5] [--stride 1.5] [--min-pixels 50] [--min-iou 0] [--out <file.ply>]
+//                              [--ids 3,5] [--stride 1.5] [--near 5] [--min-pixels 50] [--min-iou 0] [--min-thick 0.2] [--back paint|model] [--out <file.ply>]
 //
 // 出すもの（paint-out に）：
 //   objcloud_<版>_<作り方>.ply   点の ply（binary little endian）。世界座標（cameras.json の three.js の座標、m、+Y が上）
@@ -14,6 +14,10 @@
 //
 // --method best：物ごとに、ある作り方のうち輪郭の重なりがいちばん高いものを使う。
 // --min-iou：輪郭の重なりがこれより低い物は点群に入れない（json の rejected に載る。受け取る側は、その物を絵からの点のままにする）
+// --min-thick：薄すぎるモデル（背景ごと 1 枚の札になったもの）を外す。水平の奥行き ÷ 幅がこれより小さいか、高さが一番長い辺の 5% 未満なら外す。0 で外さない
+// --back paint（既定）：点の色を、絵の視点から見てその点を通る画素の、物の絵の色にする（裏や横も、表の点描の色と筆致になる。
+//                       その画素が物の外なら、同じ行のいちばん近い物の画素）。model：絵から見えない側はモデルの色（前のやり方）
+// --near：これより近い物（m）は、点の間隔を半分にする（近くで点のすき間が見えないように）。0 で変えない
 // --stride：点の間隔を、その物の距離での絵の画素いくつぶんにするか（1〜2 が目安。小さいほど点が多い）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -156,12 +160,41 @@ function fitOne(model, cx) {
   let best = null;
   for (const up of model.ups) {
     const pts = model.points(12000, up, 1), f = fitModel(pts, cx);
-    if (!best || f.auto.iou > best.auto.iou) best = { ...f, up, height: pts.size[1] * f.scale, hasColor: pts.hasColor, area: pts.area };
+    if (!best || f.auto.iou > best.auto.iou) best = { ...f, up, height: pts.size[1] * f.scale, hasColor: pts.hasColor, area: pts.area, size: pts.size };
   }
+  const [sx, sy, sz] = best.size;
+  best.thick = Math.min(sx, sz) / Math.max(1e-9, Math.max(sx, sz)); // 水平の薄さ（1 = 丸い、0 = 札）
+  best.flat = sy / Math.max(1e-9, sx, sy, sz);                      // 高さの割合（0 に近い = 寝た札）
   return best;
 }
 
-export async function objectCloud({ exportDir, paintOut, seg = 'depth', method = 'best', ids = null, stride = 1.5, minPixels = 50, minIou = 0, log = console.log }) {
+/** 物の画素の、行ごとの x の一覧（色を引くため） */
+function rowsOf(view, target) {
+  const rows = new Map();
+  for (let y = target.by0; y <= target.by1; y++) { const xs = []; for (let x = target.bx0; x <= target.bx1; x++) if (view.object[y * view.W + x] === target.id) xs.push(x); if (xs.length) rows.set(y, xs); }
+  return rows;
+}
+/** 点の色を、絵の視点から見てその点を通る物の画素の色にする（--back paint） */
+function paintThrough(cols, n, view, target, rows) {
+  const { W, H, px } = view, w = view.w2c, { fx, fy, cx: icx, cy: icy } = view.intr, ys = [...rows.keys()];
+  if (!ys.length) return;
+  const nearestRow = (v) => { let lo = 0, hi = ys.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (ys[m] < v) lo = m + 1; else hi = m; } return lo > 0 && Math.abs(ys[lo - 1] - v) <= Math.abs(ys[lo] - v) ? ys[lo - 1] : ys[lo]; };
+  for (let i = 0; i < n; i++) {
+    const x = cols.position[i * 3], y = cols.position[i * 3 + 1], z = cols.position[i * 3 + 2];
+    const dd = -(w[8] * x + w[9] * y + w[10] * z + w[11]); if (!(dd > 0.01)) continue;
+    let u = Math.floor(icx + (w[0] * x + w[1] * y + w[2] * z + w[3]) / dd * fx), v = Math.floor(icy - (w[4] * x + w[5] * y + w[6] * z + w[7]) / dd * fy);
+    if (u < 0 || v < 0 || u >= W || v >= H || view.object[v * W + u] !== target.id) {
+      // 物の外に写る点：いちばん近い物の縁で折り返して、物の内側（縁から少し入った所）の画素を使う。同じ縁の色が筋のように並ばないように
+      if (!rows.has(v)) { const e = nearestRow(v), r = 2 * e - v + Math.sign(e - v) * 3; v = rows.has(r) ? r : nearestRow(r); }
+      const xs = rows.get(v); if (!xs || !xs.length) continue;
+      const near = (t) => { let lo = 0, hi = xs.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (xs[m] < t) lo = m + 1; else hi = m; } return lo > 0 && Math.abs(xs[lo - 1] - t) <= Math.abs(xs[lo] - t) ? xs[lo - 1] : xs[lo]; };
+      const e = near(u); u = view.object[v * W + u] === target.id ? u : near(2 * e - u + Math.sign(e - u) * 3);
+    }
+    const q = (v * W + u) * 4; cols.color[i * 3] = px[q]; cols.color[i * 3 + 1] = px[q + 1]; cols.color[i * 3 + 2] = px[q + 2];
+  }
+}
+
+export async function objectCloud({ exportDir, paintOut, seg = 'depth', method = 'best', ids = null, stride = 1.5, near = 5, minPixels = 50, minIou = 0, minThick = 0.2, back = 'paint', log = console.log }) {
   const view = await loadView(exportDir, paintOut, seg);
   const targets = objectTargets(view, { front: FRONT, minPixels }).filter((t) => !ids || ids.includes(t.id));
   const files = modelFiles(paintOut, seg), labelOf = new Map((view.objectsMeta || []).map((o) => [o.id, o.label || o.class || o.name || o.type]));
@@ -174,21 +207,23 @@ export async function objectCloud({ exportDir, paintOut, seg = 'depth', method =
     let best = null;
     for (const m of cands) {
       try {
-        const model = await loadModel(have[m]), fit = fitOne(model, cx);
-        if (!best || fit.auto.iou > best.fit.auto.iou) best = { m, model, fit };
+        const model = await loadModel(have[m]), fit = fitOne(model, cx), thin = minThick > 0 && (fit.thick < minThick || fit.flat < 0.05);
+        if (!best || (best.thin && !thin) || (best.thin === thin && fit.auto.iou > best.fit.auto.iou)) best = { m, model, fit, thin }; // 薄くない物を先に、その中で輪郭がよく合う物
       } catch (e) { log(`  物体 ${target.id}：${path.basename(have[m])} を読めませんでした（${e.message}）`); }
     }
     if (!best) { report.push({ ...entry, missing: true, error: 'モデルを読めませんでした' }); continue; }
     const { m, model, fit } = best;
-    if (fit.iou < minIou) { report.push({ ...entry, rejected: true, method: m, iou: +fit.iou.toFixed(3) }); log(`  物体 ${target.id}：${m} の輪郭の重なり ${Math.round(fit.iou * 100)}% が --min-iou より低いので入れません`); continue; }
+    if (best.thin) { report.push({ ...entry, rejected: true, reason: 'thin', method: m, iou: +fit.iou.toFixed(3), thick: +fit.thick.toFixed(3), flat: +fit.flat.toFixed(3) }); log(`  物体 ${target.id}：${m} のモデルが薄すぎる（奥行き ÷ 幅 ${fit.thick.toFixed(2)}、高さの割合 ${fit.flat.toFixed(2)}）ので入れません`); continue; }
+    if (fit.iou < minIou) { report.push({ ...entry, rejected: true, reason: 'iou', method: m, iou: +fit.iou.toFixed(3) }); log(`  物体 ${target.id}：${m} の輪郭の重なり ${Math.round(fit.iou * 100)}% が --min-iou より低いので入れません`); continue; }
     let r = 0, g = 0, b = 0, k = 0; // 物の絵の色の平均（モデルに色が無いときの、見えていない側の色）
     for (let o = 0; o < cx.mask.length; o++) if (cx.mask[o] === 1) { r += cx.pc[o * 3]; g += cx.pc[o * 3 + 1]; b += cx.pc[o * 3 + 2]; k++; }
     const fallback = k ? [r / k, g / k, b / k] : [128, 128, 128];
-    const spacing = target.depth / view.intr.fx * stride, n = Math.max(2000, Math.min(600000, Math.round(fit.area * fit.scale * fit.scale / (spacing * spacing))));
+    const spacing = target.depth / view.intr.fx * stride * (near > 0 && target.depth < near ? 0.5 : 1), n = Math.max(2000, Math.min(1500000, Math.round(fit.area * fit.scale * fit.scale / (spacing * spacing))));
     const p = modelSplats(model.points(n, fit.up, 2), fit, view, target, { spacing, px: view.px, paint: true, fallback });
+    if (back === 'paint') paintThrough(p.columns, p.count, view, target, rowsOf(view, target));
     parts.push({ id: target.id, cols: p.columns, n: p.count, radius: spacing * 0.7 });
     report.push({ ...entry, method: m, file: path.basename(have[m]), iou: +fit.iou.toFixed(3), colorSim: fit.hasColor ? +fit.colorSim.toFixed(3) : null, yawDeg: Math.round(fit.offset * 180 / Math.PI), up: fit.up,
-      scale: +fit.scale.toFixed(4), center: fit.center.map((x) => +x.toFixed(3)), height: +fit.height.toFixed(3), points: p.count, seenFromPainting: p.seen, radius: +(spacing * 0.7).toFixed(4) });
+      thick: +fit.thick.toFixed(3), scale: +fit.scale.toFixed(4), center: fit.center.map((x) => +x.toFixed(3)), height: +fit.height.toFixed(3), points: p.count, seenFromPainting: p.seen, radius: +(spacing * 0.7).toFixed(4) });
     log(`  物体 ${target.id}${entry.label ? `（${entry.label}）` : ''}：${m}、輪郭の重なり ${Math.round(fit.iou * 100)}%、高さ ${fit.height.toFixed(2)} m、点 ${p.count.toLocaleString()}`);
   }
   return { view, parts, report };
@@ -222,11 +257,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (method !== 'best' && !METHODS.includes(method)) throw new Error(`--method は ${METHODS.join(' / ')} / best のどれかです`);
     const ids = typeof o.ids === 'string' ? o.ids.split(',').map(Number).filter((n) => n > 0) : null, paintOut = path.resolve(o['paint-out']);
     console.log(`物の点群を作ります（切り分け ${seg}、作り方 ${method}）`);
-    const t0 = Date.now(), { view, parts, report } = await objectCloud({ exportDir: path.resolve(o['previz-export']), paintOut, seg, method, ids, stride: Number(o.stride) || 1.5, minPixels: Number(o['min-pixels']) || 50, minIou: Number(o['min-iou']) || 0 });
+    const t0 = Date.now(), { view, parts, report } = await objectCloud({ exportDir: path.resolve(o['previz-export']), paintOut, seg, method, ids, stride: Number(o.stride) || 1.5, near: o.near !== undefined ? Number(o.near) : 5, minPixels: Number(o['min-pixels']) || 50, minIou: Number(o['min-iou']) || 0, minThick: o['min-thick'] !== undefined ? Number(o['min-thick']) : 0.2, back: o.back === 'model' ? 'model' : 'paint' });
     const base = o.out ? path.resolve(String(o.out)).replace(/\.ply$/i, '') : path.join(paintOut, `objcloud_${seg}_${method}`);
     const total = writePointPly(`${base}.ply`, parts);
-    const missing = report.filter((r) => r.missing).map((r) => r.id), rejected = report.filter((r) => r.rejected).map((r) => ({ id: r.id, method: r.method, iou: r.iou }));
-    fs.writeFileSync(`${base}.json`, JSON.stringify({ seg, method, view: view.name, color: path.basename(view.colorFile), frame: 'world frame of cameras.json (three.js, metres, +Y up)', stride: Number(o.stride) || 1.5, points: total, minIou: Number(o['min-iou']) || 0, objects: report.filter((r) => !r.missing && !r.rejected), missing, rejected }, null, 1));
+    const missing = report.filter((r) => r.missing).map((r) => r.id), rejected = report.filter((r) => r.rejected).map((r) => ({ id: r.id, reason: r.reason, method: r.method, iou: r.iou, thick: r.thick }));
+    fs.writeFileSync(`${base}.json`, JSON.stringify({ seg, method, view: view.name, color: path.basename(view.colorFile), frame: 'world frame of cameras.json (three.js, metres, +Y up)', stride: Number(o.stride) || 1.5, near: o.near !== undefined ? Number(o.near) : 5, back: o.back === 'model' ? 'model' : 'paint', minThick: o['min-thick'] !== undefined ? Number(o['min-thick']) : 0.2, points: total, minIou: Number(o['min-iou']) || 0, objects: report.filter((r) => !r.missing && !r.rejected), missing, rejected }, null, 1));
     console.log(`→ ${path.basename(base)}.ply（物 ${parts.length} 個、点 ${total.toLocaleString()}）と .json。モデルが無い物 ${missing.length} 個、合わずに外した物 ${rejected.length} 個。${Math.round((Date.now() - t0) / 1000)} 秒`);
   };
   run().catch((e) => { console.error(`止まりました：${e.message}`); process.exit(1); });
