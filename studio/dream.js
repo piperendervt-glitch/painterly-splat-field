@@ -140,13 +140,106 @@ export function compose(w, sources, { skyType = 0 } = {}) {
   return { W, H, rgba, hole, holeCount, z, known, type, object };
 }
 
-/** 穴の奥行きを、分かっている面の奥行きからなめらかに広げて埋める（奥行きの推定が使えないときの代わり）。z を書き換える。 */
-export function extendDepth(c) {
+// カメラ cam の画素 (x, y)・奥行き z の点の、世界での高さ
+const heightAt = (cam, x, y, z) => { const m = cam.c2w; return m[4] * ((x + 0.5 - cam.cx) / cam.fx * z) + m[5] * (-(y + 0.5 - cam.cy) / cam.fy * z) - m[6] * z + m[7]; };
+// カメラ cam の画素 (x, y) を通る線が、高さ groundY の水平な面に当たる所の奥行き（当たらなければ 0）
+const planeDepth = (cam, x, y, groundY) => { const m = cam.c2w, dy = m[4] * ((x + 0.5 - cam.cx) / cam.fx) + m[5] * (-(y + 0.5 - cam.cy) / cam.fy) - m[6]; return dy < -1e-6 ? (groundY - m[7]) / dy : 0; };
+
+/**
+ * 穴の「手前の物の側」を見つける。視点を動かしてできた穴（物の陰から現れた所）は、片側が手前の物、反対側が背景で、
+ * 穴の中に見えるのは背景のほう。だから、穴の奥行きを決めるときは、手前の物の奥行きを手がかりにしてはいけない。
+ *   穴の横（縦）の並びごとに両端の分かっている画素を比べ、ratio 倍より手前にある側を「手前の物」とする（空は無限に遠い背景）。
+ *   地面の高さの画素は手前の物にしない（平らな地面は、行が違うだけで奥行きが変わる）。
+ * 返すもの：fg（1 = 穴に接した手前の物の面。分かっている画素。縁から reach 歩ぶん、同じ面をたどって広げる）、
+ *           run（穴の画素ごと：1 = 手前の物と背景にはさまれた並びの中）、bgz（その並びの背景の側の端の奥行き。空なら 0）
+ */
+export function foregroundSide(c, { cam = null, groundY = 0, ratio = 1.12, reach = 64 } = {}) {
+  const { W, H } = c, n = W * H, fg = new Uint8Array(n), run = new Uint8Array(n), bgz = new Float32Array(n), seeds = [];
+  const far = (i) => (c.z[i] > 0 ? c.z[i] : Infinity);
+  const ground = (i) => !!cam && c.z[i] > 0 && Math.abs(heightAt(cam, i % W, (i / W) | 0, c.z[i]) - groundY) < 0.12;
+  const scan = (lines, len, idx) => {
+    for (let l = 0; l < lines; l++) for (let t = 0; t < len;) {
+      if (!c.hole[idx(l, t)]) { t++; continue; }
+      const start = t; while (t < len && c.hole[idx(l, t)]) t++;
+      if (start === 0 || t === len) continue; // 絵の端まで続く穴は、比べる相手が無い
+      const a = idx(l, start - 1), b = idx(l, t), za = far(a), zb = far(b);
+      const f = za < zb / ratio && !ground(a) ? a : zb < za / ratio && !ground(b) ? b : -1;
+      if (f < 0) continue;
+      if (!fg[f]) { fg[f] = 1; seeds.push(f); }
+      const back = c.z[f === a ? b : a];
+      for (let q = start; q < t; q++) { const i = idx(l, q); if (!run[i]) { run[i] = 1; bgz[i] = back; } } // 横の並びを先に見るので、横が優先
+    }
+  };
+  scan(H, W, (l, t) => l * W + t); // 横の並び
+  scan(W, H, (l, t) => t * W + l); // 縦の並び
+  let queue = seeds;
+  for (let step = 0; step < reach && queue.length; step++) { // 同じ面（奥行きがつながっている所）をたどって広げる
+    const next = [];
+    for (const i of queue) {
+      const x = i % W, y = (i - x) / W;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) {
+        if (j < 0 || fg[j] || c.hole[j] || !(c.z[j] > 0) || Math.abs(Math.log(c.z[j] / c.z[i])) > 0.06) continue;
+        fg[j] = 1; next.push(j);
+      }
+    }
+    queue = next;
+  }
+  return { fg, run, bgz };
+}
+
+/**
+ * 決めた穴の奥行き z（空は 0）を、場面の形に合わせて整える（z を書き換える）。cam = { fx, fy, cx, cy, c2w } があれば地面の平面（高さ groundY）も使う。
+ *   1. 手前の物と背景にはさまれた穴（物の陰から現れた所）：そこに見えるのは背景。背景の側の端の奥行きにする。
+ *      ただし、その画素を通る線が背景の物より手前で地面に当たるなら、見えるのは地面（背景の物の足もとより下）なので、平面の式の奥行きにする。
+ *      奥行きの推定は物の輪郭でぼやけるので、推定のままだと穴の点が物の輪郭にまとわり付いたり、背景から浮いたりする。
+ *   2. ほかの穴：地面より下に来た点は地面に載せる。高さが地面に近い点も平面の式に載せる（立っている物の足もと＝すぐ上が同じ奥行きで高い所は除く）。
+ * 返すもの：{ slivers（1 で決めた画素）, snapped（2 で平面に載せた画素） }
+ */
+export function settleHoleDepth(c, z, { cam = null, groundY = 0, side = null, skyZ = 400 } = {}) {
+  const { W, H } = c, n = W * H;
+  side = side || foregroundSide(c, { cam, groundY });
+  let slivers = 0, snapped = 0;
+  const zp = new Float32Array(n);
+  if (cam) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (c.hole[i]) { const p = planeDepth(cam, x, y, groundY); zp[i] = p > 0 && p < skyZ ? p : 0; } }
+  for (let i = 0; i < n; i++) {
+    if (!c.hole[i] || !side.run[i]) continue;
+    const zb = side.bgz[i];
+    if (zb > 0) { z[i] = zp[i] > 0 ? Math.min(zp[i], zb) : zb; slivers++; }
+    else if (zp[i] > 0) { z[i] = zp[i]; slivers++; } // 背景が空で、線が地面に当たる：地面
+  }
+  if (cam) {
+    const h = new Float32Array(n).fill(NaN);
+    for (let i = 0; i < n; i++) { const zi = c.hole[i] ? z[i] : c.z[i]; if (zi > 0) h[i] = heightAt(cam, i % W, (i / W) | 0, zi) - groundY; }
+    const zAt = (i) => (c.hole[i] ? z[i] : c.z[i]), out = new Float32Array(z);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; if (!c.hole[i] || side.run[i] || !(zp[i] > 0)) continue;
+      if (!(z[i] > 0) || z[i] > zp[i]) { out[i] = zp[i]; snapped++; continue; } // 空とされたが地面に当たる所、地面より下に来た所
+      if (Math.abs(h[i]) > 0.25 + 0.02 * z[i] || Math.log(zp[i] / z[i]) > 0.27) continue;
+      // 立っている物の足もとか：0.5 m ぶん上の画素が、同じくらいの奥行きで、地面より高い
+      const up = y - Math.max(4, Math.min(80, Math.round(0.5 * cam.fy / z[i])));
+      if (up >= 0) { const j = up * W + x, zj = zAt(j); if (zj > 0 && Math.abs(Math.log(zj / z[i])) < 0.1 && h[j] > 0.4) continue; }
+      out[i] = zp[i]; snapped++;
+    }
+    z.set(out);
+  }
+  return { slivers, snapped };
+}
+
+/**
+ * 穴の奥行きを、分かっている面の奥行きからなめらかに広げて埋める（奥行きの推定が使えないときの代わり）。z を書き換える。
+ * 手前の物の側（foregroundSide）からは広げない。cam と groundY があれば、地面の高さの所は平面の式に載せる。
+ */
+export function extendDepth(c, { cam = null, groundY = 0 } = {}) {
   const n = c.W * c.H, lz = new Float32Array(n), k = new Uint8Array(n); let any = false;
-  for (let i = 0; i < n; i++) if (c.z[i] > 0) { lz[i] = Math.log(c.z[i]); k[i] = 1; any = true; }
+  const side = foregroundSide(c, { cam, groundY });
+  for (let i = 0; i < n; i++) if (c.z[i] > 0 && !side.fg[i]) { lz[i] = Math.log(c.z[i]); k[i] = 1; any = true; }
+  if (!any) for (let i = 0; i < n; i++) if (c.z[i] > 0) { lz[i] = Math.log(c.z[i]); k[i] = 1; any = true; }
   if (!any) { for (let i = 0; i < n; i++) if (c.hole[i]) c.z[i] = 10; return c.z; }
-  const f = pullPush(lz, k, c.W, c.H);
-  for (let i = 0; i < n; i++) if (c.hole[i]) c.z[i] = Math.exp(f[i]);
+  const f = pullPush(lz, k, c.W, c.H), z = new Float32Array(c.z);
+  for (let i = 0; i < n; i++) if (c.hole[i]) z[i] = Math.exp(f[i]);
+  const known = { W: c.W, H: c.H, hole: c.hole, z: Float32Array.from(c.z, (v, i) => (c.hole[i] ? 0 : v)) };
+  settleHoleDepth(known, z, { cam, groundY, side });
+  for (let i = 0; i < n; i++) if (c.hole[i]) c.z[i] = z[i];
   return c.z;
 }
 
@@ -155,9 +248,11 @@ export function extendDepth(c) {
  *   1. 分かっている面で、1/z = a × disp + b に合わせる（外れ値を除きながら）
  *   2. 残った差（1/z − (a × disp + b)）を、穴の中へなめらかに広げて足す。穴の縁で、すでにある面とつながる
  *   3. とても遠い所（skyZ より遠い）と、近さがほぼ 0 の所は空にする
- * 返すもの：{ z（穴も埋まった奥行き。空は 0）, a, b, samples, skyHoles } または null（合わせられなかった）
+ *   4. 手前の物に接した穴は背景の側の奥行きに寄せ、地面の高さの所は平面の式に載せる（settleHoleDepth。cam = { fx, fy, cx, cy, c2w } があるとき）
+ * 2 と 4 では、穴に接した「手前の物」の面（foregroundSide）を手がかりから外す。
+ * 返すもの：{ z（穴も埋まった奥行き。空は 0）, a, b, samples, skyHoles, slivers, snapped } または null（合わせられなかった）
  */
-export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3 } = {}) {
+export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, groundY = 0 } = {}) {
   const { W, H } = c, n = W * H;
   let lo = Infinity, hi = -Infinity; for (let i = 0; i < n; i++) { if (disp[i] < lo) lo = disp[i]; if (disp[i] > hi) hi = disp[i]; }
   if (!(hi > lo)) return null;
@@ -174,8 +269,8 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3 } = {}) {
     keep = res.map((r) => r <= cut);
   }
   if (!(a > 0)) return null;
-  const r = new Float32Array(n), k = new Uint8Array(n);
-  for (let i = 0; i < n; i++) if (c.z[i] > 0 && !c.hole[i]) { r[i] = 1 / c.z[i] - (a * disp[i] + b); k[i] = 1; }
+  const r = new Float32Array(n), k = new Uint8Array(n), side = foregroundSide(c, { cam, groundY });
+  for (let i = 0; i < n; i++) if (c.z[i] > 0 && !c.hole[i] && !side.fg[i]) { r[i] = 1 / c.z[i] - (a * disp[i] + b); k[i] = 1; }
   const f = pullPush(r, k, W, H), z = new Float32Array(c.z);
   let skyHoles = 0;
   for (let i = 0; i < n; i++) {
@@ -183,7 +278,8 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3 } = {}) {
     const iz = a * disp[i] + b + f[i];
     if (iz < 1 / skyZ || disp[i] - lo < 0.01 * (hi - lo)) { z[i] = 0; skyHoles++; } else z[i] = Math.max(minZ, 1 / iz);
   }
-  return { z, a, b, samples: xs.length, skyHoles };
+  const settled = settleHoleDepth(c, z, { cam, groundY, side });
+  return { z, a, b, samples: xs.length, skyHoles, ...settled };
 }
 
 // 絵の色を点描のつぶより大きくならす（種類を色で見分けるため）。返すのは RGB（Float32、0〜255）

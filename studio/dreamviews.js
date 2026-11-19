@@ -111,7 +111,7 @@ export async function addView(D, cand, name, io) {
   await io.savePaint(`${name}_reproj.png`, c.rgba, c.W, c.H);
   await io.savePaint(`${name}_holes.png`, mask, c.W, c.H);
   await io.savePaint(`${name}_new.png`, mask, c.W, c.H); // 粒にするのは穴だった画素だけ
-  await saveGeometry(D, name, c, extendDepth(c), cam, io);
+  await saveGeometry(D, name, c, extendDepth(c, { cam, groundY: groundY(D) }), cam, io);
   await io.saveAdded([...(await io.loadAdded()).filter((v) => v.name !== name), viewDef(D, name, cand, cam)]);
   return { holes: c.holeCount, pixels: n };
 }
@@ -123,7 +123,7 @@ export async function addView(D, cand, name, io) {
 export async function refineDepth(D, v, holes, disp, io) {
   const n = v.W * v.H, c = { W: v.W, H: v.H, z: new Float32Array(v.z), hole: new Uint8Array(n), type: new Uint8Array(v.type || n), object: new Uint16Array(v.object || n) };
   for (let i = 0; i < n; i++) if (holes[i * 4] > 127) { c.hole[i] = 1; c.z[i] = 0; }
-  const r = alignDepth(c, disp);
+  const r = alignDepth(c, disp, { cam: { cx: v.cx, cy: v.cy, fx: v.fx, fy: v.fy, c2w: v.c2w }, groundY: groundY(D) });
   if (!r) return null;
   // もとの視点から見て、絵に描かれた面より手前に来た穴の画素は、もとの絵と食い違うので粒にしない（絵の前に浮いて隠してしまうため）
   const cam = { cx: v.cx, cy: v.cy, fx: v.fx, fy: v.fy, c2w: v.c2w }, bases = D.views.filter((b) => !b.added && b.z), mask = new Uint8ClampedArray(n * 4);
