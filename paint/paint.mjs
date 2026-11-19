@@ -291,6 +291,11 @@ async function runFill(o) {
     if (!srcFile) throw new Error('--stipple には、点の見本の絵（--stipple-source <もとの絵>）が要ります');
     const source = readPng(srcFile); let exclude = null;
     if (typeof o['stipple-exclude'] === 'string') { const e = resize(readPng(o['stipple-exclude']), source.width, source.height); exclude = new Uint8Array(source.width * source.height); for (let i = 0; i < exclude.length; i++) exclude[i] = e.data[i * 4] > 127 ? 1 : 0; }
+    else if (typeof o['export-dir'] === 'string') { // 印が無ければ、もとの視点の種類分けの絵から、人と空を外す
+      const cams = JSON.parse(fs.readFileSync(path.join(o['export-dir'], 'cameras.json'), 'utf8')), v = cams.views[0], types = (cams.labels && cams.labels.types) || [];
+      const skip = new Set(types.filter((t) => t.name === 'figure' || t.name === 'sky').map((t) => t.id)), lf = v && v.labels ? path.join(o['export-dir'], v.labels) : null;
+      if (skip.size && lf && fs.existsSync(lf)) { const e = readPng(lf); if (e.width === source.width && e.height === source.height) { exclude = new Uint8Array(source.width * source.height); for (let i = 0; i < exclude.length; i++) exclude[i] = skip.has(e.data[i * 4]) ? 1 : 0; } }
+    }
     // 強さ：数を渡されたらその値。無ければ、穴の中の細かさが見本の絵（人と空を除いた所）と同じになるように合わせる
     let gain = o.stipple !== true && Number.isFinite(Number(o.stipple)) ? Math.max(0, Number(o.stipple)) : null, r;
     if (gain === null) {

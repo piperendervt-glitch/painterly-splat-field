@@ -395,7 +395,7 @@ const engineBody = (engine) => {
   const m = $('modelName').value.trim(), nm = $('nvsName').value.trim();
   if (engine === 'model') return { engine: 'local', ...(m ? { model: m } : {}) };
   if (engine === 'nvscodex') return { engine: 'nvs', repaint: true, ...(nm ? { model: nm } : {}), ...(painting ? { hint: dream.LAYOUT_HINT } : {}) };
-  if (engine === 'nvs') return { engine: 'nvs', ...(nm ? { model: nm } : {}), ...($('refineOn').checked ? { refine: Number($('refineStrength').value), ...(m ? { refineModel: m } : {}) } : {}) };
+  if (engine === 'nvs') return { engine: 'nvs', ...(nm ? { model: nm } : {}), ...($('refineOn').checked ? { refine: Number($('refineStrength').value), ...(m ? { refineModel: m } : {}), ...(painting && $('stippleOn').checked ? { stipple: true } : {}) } : {}) };
   return {};
 };
 let watchEngine = 'codex';

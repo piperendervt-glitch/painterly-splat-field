@@ -132,6 +132,8 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
       <label class="check" for="refineOn"><input type="checkbox" id="refineOn"><span>絵の細かさを戻す仕上げをする（PC の生成モデル）</span></label>
       <div class="label"><span>仕上げの強さ</span><output id="oRefine">0.45</output></div>
       <input type="range" id="refineStrength" min="0.05" max="1" step="0.05" value="0.45">
+      <label class="check" for="stippleOn"><input type="checkbox" id="stippleOn" checked><span>仕上げの前に、もとの絵の点の細かさを足す</span></label>
+      <p class="note">仕上げだけでは、別視点のモデルの絵のなめらかさが残りやすく、強くすると人や物を描き足してしまいます。先に、もとの絵の点の層（細かさだけ）を穴の中へ計算で足しておくと、弱い仕上げのまま、配置を保って点描に戻ります。絵 1 枚から作った場面で使えます。</p>
       <p class="note">もとの絵と、この視点のカメラを、手元の PC の「別視点の絵を生成するモデル」に渡し、この視点から見た絵を作ってもらって穴に使います。生成される絵は粗い（数百画素）ので、仕上げを入れると、穴の中を PC の画像生成モデルで描き直して点描の細かさを戻します。強さが大きいほど描き直しが強く、生成した形から離れます。用意の仕方は docs/local-inpaint.md。</p>
       <button type="button" class="main" id="fillNvsCodex">別視点のモデルの絵を下絵に、Codex で描く（利用枠を使う）</button>
       <p class="note">上と同じように別視点のモデルにこの視点の絵を作ってもらい、それを「下絵」にして、Codex（ChatGPT）に穴を描いてもらいます。視点と、どこに何があるかは下絵のまま、画風はもとの絵に合わせます。1 回につき、別視点のモデルを 1 回と Codex を 1 回（絵 1 枚）使います。下絵は「視点の名前_layout.png」として残ります。</p>

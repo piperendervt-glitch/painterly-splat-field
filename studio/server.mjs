@@ -157,7 +157,7 @@ function fillFiles(view, light) {
   const out = (name) => path.join(DIRS['paint-out'], `${view}_${name}${sfx}.png`), pre = (name) => path.join(DIRS['previz-export'], `${view}_${name}.png`);
   return { image: out('reproj'), mask: out('holes'), out: out('painted'), overlay: out('overlay'), previz: pre(ref), depth: pre('depth_view') };
 }
-function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, refine, refineModel, repaint }) {
+function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, refine, refineModel, repaint, stipple }) {
   const f = fillFiles(view, light);
   const args = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', f.image, '--mask', f.mask, '--out', f.out];
   if (!noPreviz) args.push('--previz', f.previz, '--depth', f.depth, '--overlay', f.overlay); // 絵 1 枚から作った場面には、穴の中の形の見本が無い
@@ -178,6 +178,7 @@ function runFill({ view, style, dryRun, light, noPreviz, hint, engine, model, re
       args.push('--refine', String(Math.min(1, Math.max(0.05, Number(refine) || 0.45))));
       if (process.env.PSF_INPAINT) args.push('--local', process.env.PSF_INPAINT);
       if (typeof refineModel === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(refineModel)) args.push('--local-model', refineModel);
+      if (stipple) args.push('--stipple'); // 仕上げの前に、穴の中へ、もとの絵の点の細かさを足す（モデルなしの計算）
     }
   }
   startJob(args, dryRun);
