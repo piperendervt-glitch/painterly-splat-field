@@ -113,7 +113,7 @@ async function main() {
     else if (o.occluder && zOf.get(o.occluder) > 0) { z = zOf.get(o.occluder) + 0.5; rule = '隠れている：隠している物の少し奥'; }
     else if (o.zContact > 0) { z = o.zContact; rule = '足もとが地面に着く所（切れているかもしれない）'; }
     else { z = far; rule = '手がかりなし：遠く'; }
-    if (z > 0 && o.zBack > 0 && z > o.zBack * 1.15) { z = o.zBack * 0.97; rule += '、後ろの背景より奥にならないように'; } // 地平線の近くでは、数行の違いで地面の式の奥行きが大きく変わる（遠くの舟や岸の人）
+    if (z > 0 && o.zBack > 0 && z > o.zBack) { z = o.zBack * 0.97; rule += '、後ろの背景より奥にならないように'; } // 地平線の近くでは、数行の違いで地面の式の奥行きが大きく変わる（遠くの舟や岸の人）
     if (z > 0 && o.cut) { const zb = zPlane((o.x0 + o.x1) / 2, H - 1); if (zb > 0 && z > zb) { z = zb * 0.95; rule += '、下の端の地面より手前に'; } }
     if (z > 0 && o.occluder && zOf.get(o.occluder) > 0 && z < zOf.get(o.occluder) + 0.2) { z = zOf.get(o.occluder) + 0.2; rule += '、隠している物の奥に'; }
     if (z > 0) z = Math.max(0.8, Math.min(far, z));
