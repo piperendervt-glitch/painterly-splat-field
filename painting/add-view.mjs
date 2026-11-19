@@ -15,13 +15,16 @@
 //       local     PC の画像生成モデル（/opt/psf-ext/inpaint/run.sh、PSF_INPAINT）。利用枠なし
 //       none      埋めない（写すところまで。後から画面で埋められる）
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
+//     --stipple [強さ]  PC のモデルで仕上げる前（--fill nvs --refine）や、背景を描く前（--plate --fill local）に、穴の中へ、もとの絵の点の細かさだけを足す
+//       （モデルなしの計算。配置を保ったまま点描に戻すための下ごしらえ。強さを書かなければ、もとの絵と同じ細かさに合わせる）。点の見本は、もとの視点の絵の、人と空を除いた所
 //     --objcloud <.ply>  物ごとの 3D を置いた点群（世界の座標で x y z、red green blue、object_id、radius〔m〕。バイナリ little endian）。
 //       その物体は、もとの絵の画素を動かす代わりに、点群をこの視点から見た形で写す（横から見た形になる）
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
 //   node add-view.mjs --scene jatte --plate --fill codex|local [--local-model <名前>] [--plate-grow 10] [--plate-types figure | --plate-mask <白い所を消す絵>] [--dry-run]
 //     「物を消した背景」の視点を足す：もとの視点のまま、人や動物の所を穴にして、その後ろの背景（芝・水・遠くの木）だけを Codex に描いてもらう（絵 1 枚）。
-//     --fill local なら PC の画像生成モデルで描く（利用枠なし）。
+//     --fill local なら PC の画像生成モデルで描く（利用枠なし）。--stipple を付けると、まわりの色でなめらかに埋めた絵に点を足し、そこから --strength（既定 0.35）の強さで描き直す
+//     （人を描き戻しにくい）。--fill plain は、モデルを呼ばず、なめらかに埋めた絵（--stipple があれば点を足した絵）をそのまま使う。
 //     物の後ろが粒になるので、横や前へ動いたときに物の陰に開く隙間が埋まる。もとの絵は動かさないので、物の縁が伸びたり割れたりしない。
 //   node add-view.mjs --scene jatte --redo-depth R1 [--new-depth]
 //     もうある視点 R1 の、穴の奥行きだけを決め直す（絵は描かない。利用枠も使わない）。奥行きの決め方を直したあとに使う。
@@ -36,13 +39,14 @@ import * as dream from '../studio/dreamviews.js';
 import { parsePly } from '../studio/sharp.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)), ROOT = path.resolve(HERE, '..');
-const FLAGS = new Set(['dry-run', 'new-depth', 'plate']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'none'];
+const FLAGS = new Set(['dry-run', 'new-depth', 'plate']), FILLS = ['nvs', 'nvscodex', 'codex', 'local', 'plain', 'none'];
 
 function args() {
   const a = { scene: 'jatte', right: 0, forward: 0, up: 0, yaw: 0, pitch: 0, orbit: 0, 'orbit-dist': 8, fill: 'none' }, v = process.argv.slice(2);
   for (let i = 0; i < v.length; i++) {
     const k = v[i].replace(/^--/, '');
     if (FLAGS.has(k)) { a[k] = true; continue; }
+    if (v[i + 1] === undefined || v[i + 1].startsWith('--')) { a[k] = true; continue; } // 値なしの印（--stipple など）
     const x = v[++i]; a[k] = x !== undefined && x !== '' && !isNaN(Number(x)) ? Number(x) : x;
   }
   if (!/^[A-Za-z0-9_-]+$/.test(String(a.scene))) throw new Error('--scene の名前が使えません');
@@ -118,9 +122,17 @@ async function main() {
     loadAdded: async () => (fs.existsSync(S.addedFile) ? JSON.parse(fs.readFileSync(S.addedFile, 'utf8')) : []),
     saveAdded: async (list) => fs.writeFileSync(S.addedFile, JSON.stringify(list, null, 1)),
   };
-  for (const kind of ['painted', 'disp', 'layout', 'overlay', 'plateguide']) fs.rmSync(path.join(S.P, `${name}_${kind}.png`), { force: true }); // 同じ名前の古い絵が残っていたら消す
+  for (const kind of ['painted', 'disp', 'layout', 'overlay', 'plateguide', 'nodots']) fs.rmSync(path.join(S.P, `${name}_${kind}.png`), { force: true }); // 同じ名前の古い絵が残っていたら消す
   // 1. 写す（--plate のときは、もとの視点のまま、人や動物の所を穴にする）
   const P = (kind) => path.join(S.P, `${name}_${kind}.png`);
+  // --stipple：点の見本（もとの視点の絵）と、見本に使わない所（人と空）の印を用意して、paint.mjs に渡す引数を作る
+  const stippleArgs = async () => {
+    if (a.stipple === undefined) return [];
+    const b = dream.baseView(D), ids = Object.fromEntries(D.cams.labels.types.map((t) => [t.name, t.id])), no = new Uint8Array(b.W * b.H * 4);
+    for (let i = 0; i < b.W * b.H; i++) { const v = b.type[i] === ids.figure || b.type[i] === ids.sky ? 255 : 0; no[i * 4] = no[i * 4 + 1] = no[i * 4 + 2] = v; no[i * 4 + 3] = 255; }
+    await savePng(P('nodots'), no, b.W, b.H);
+    return ['--stipple', ...(a.stipple === true ? [] : [String(a.stipple)]), '--stipple-source', path.join(S.P, `${b.name}_painted.png`), '--stipple-exclude', P('nodots')];
+  };
   if (a.plate) {
     const types = String(a['plate-types'] || 'figure').split(',').map((t) => t.trim()).filter(Boolean), grow = a['plate-grow'] === undefined ? 10 : a['plate-grow'];
     let mask = null;
@@ -128,17 +140,19 @@ async function main() {
     const { holes, pixels } = await dream.addPlateView(D, name, io, { grow, types, mask });
     console.log(`視点 ${name}：もとの視点のまま、${mask ? '渡された切り抜き' : types.join('・')} の所を穴にしました（輪郭から ${grow} 画素ぶん広げて、絵の ${(100 * holes / pixels).toFixed(1)}%）。穴には、物の後ろの背景だけを描きます。`);
     if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。'); return; }
-    if (a.fill !== 'codex' && a.fill !== 'local') throw new Error('--plate の穴は、--fill codex（ChatGPT）か --fill local（PC の画像生成モデル）か --fill none で埋めてください');
+    if (a.fill !== 'codex' && a.fill !== 'local' && a.fill !== 'plain') throw new Error('--plate の穴は、--fill codex（ChatGPT）か --fill local（PC の画像生成モデル）か --fill plain（モデルなし）か --fill none で埋めてください');
     const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--plate', '--image', P('reproj'), '--mask', P('holes'), '--guide', P('plateguide'), '--out', P('painted'), '--grow', '0'];
     if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
     if (a.fill === 'local') { // PC の画像生成モデル（利用枠なし）。画風と「背景だけ」の指示を文で渡す
       argv.push('--local', ...(process.env.PSF_INPAINT ? [process.env.PSF_INPAINT] : []), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', dream.PLATE_HINT);
       if (a['local-model']) argv.push('--local-model', String(a['local-model']));
+      if (a.stipple !== undefined || a.strength !== undefined) argv.push(...await stippleArgs(), '--init-strength', ...(Number.isFinite(a.strength) ? [String(a.strength)] : []));
     }
+    if (a.fill === 'plain') argv.push('--plain', ...await stippleArgs()); // モデルなし：なめらかに埋めた絵（と点）をそのまま使う
     if (a['dry-run']) argv.push('--dry-run');
     const code = run(process.execPath, argv, path.join(ROOT, 'paint'));
     if (code !== 0) throw new Error(`穴を埋められませんでした（終了コード ${code}）。視点 ${name} は穴が残ったままです`);
-    if (a['dry-run'] || !fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで取り消せます。`); return; }
+    if (!fs.existsSync(P('painted'))) { console.log(`視点 ${name} は穴が残ったままです（Codex は呼んでいません）。「視点を足す」のタブで取り消せます。`); return; }
     await refine(dir, name); return;
   }
   const cand = candidate(D, a), cloud = typeof a.objcloud === 'string' ? readCloud(path.resolve(a.objcloud)) : null;
@@ -146,6 +160,7 @@ async function main() {
   console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%${cloud ? `（物の点群 ${cloud.n} 点を重ねて、絵の ${(100 * cloudPixels / pixels).toFixed(1)}% を埋めました）` : ''}`);
   if (!holes) { fs.copyFileSync(path.join(S.P, `${name}_reproj.png`), path.join(S.P, `${name}_painted.png`)); console.log('穴が無いので、描き足しません。'); return; }
   if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。「視点を足す」のタブの「2. 穴を埋める」で埋められます。'); return; }
+  if (a.fill === 'plain') throw new Error('--fill plain は --plate のときだけ使えます（目安の絵が要るため）');
   // 2. 埋める（画面のサーバーと同じ引数で paint.mjs を呼ぶ）
   const withLayout = a.fill === 'nvscodex';
   const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', withLayout ? dream.LAYOUT_HINT : dream.FILL_HINT];
@@ -157,7 +172,7 @@ async function main() {
       argv.push('--nvs', ...(process.env.PSF_NVS ? [process.env.PSF_NVS] : []), '--export-dir', S.E, '--view', name);
       if (a['nvs-model']) argv.push('--nvs-model', String(a['nvs-model']));
       if (withLayout) argv.push('--repaint');
-      else if (a.refine !== undefined) { argv.push('--refine', String(a.refine), ...(process.env.PSF_INPAINT ? ['--local', process.env.PSF_INPAINT] : [])); if (a['local-model']) argv.push('--local-model', String(a['local-model'])); }
+      else if (a.refine !== undefined) { argv.push('--refine', ...(a.refine === true ? [] : [String(a.refine)]), ...(process.env.PSF_INPAINT ? ['--local', process.env.PSF_INPAINT] : []), ...await stippleArgs()); if (a['local-model']) argv.push('--local-model', String(a['local-model'])); }
     }
   }
   if (a.seam !== undefined) argv.push('--seam', String(a.seam));

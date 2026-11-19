@@ -30,6 +30,11 @@
 //
 // 共通：--codex <コマンド>（既定 codex）、--timeout <秒>（既定 600）
 // fill だけ：--local [コマンド] で、Codex の代わりに手元の PC の画像生成モデルで描く（--local-model <名前>、--seed <数>。既定の待ち時間は 3600 秒）
+//            --stipple [強さ] で、PC のモデルに渡す前の絵（--refine の下地、--guide の絵）の穴の中に、もとの絵の「点の細かさ」だけを足す（モデルなしの計算。強さを書かなければ、見本の絵と同じ細かさになるように合わせる）。
+//              配置を保ったまま点描に戻すための下ごしらえ。点の見本は --stipple-source <絵>（既定は --style-ref、無ければ、もとの視点の絵）、
+//              --stipple-exclude <絵> の白い所（人や空）は見本に使わない。
+//            --local に --guide <穴を埋めた目安の絵> と --init-strength [強さ]（既定 0.35）を付けると、目安の絵（--stipple があれば点を足した絵）から、その強さで描き直す。
+//            --plain は、何のモデルも呼ばず、--guide の絵（--stipple があれば点を足した絵）をそのまま穴に使う。
 //            --nvs [コマンド] --export-dir <previz-export> --view <視点> で、別視点の絵を生成するモデルの絵を穴に使う（--nvs-model <名前>、--refine [強さ] で仕上げ）
 //            --nvs に --repaint を足すと、別視点のモデルの絵を「下絵」にして、Codex（ChatGPT）に穴を描いてもらう（視点は下絵のまま、画風はもとの絵）。
 //              下絵は <出すファイルの所>/<視点>_layout.png に残る。--layout <絵> で、すでにある下絵（穴を埋めた、同じ視点の絵）を渡すと、モデルを呼ばずに Codex だけ動かす。
@@ -44,7 +49,7 @@ import path from 'node:path';
 import { buildPrompt, generate, askJson } from './codex.mjs';
 import { localInpaint, defaultCommand } from './localinpaint.mjs';
 import { nvsJob, nvsGenerate, defaultNvsCommand } from './nvs.mjs';
-import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange, matchSeam } from './image.mjs';
+import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange, matchSeam, stipple, dotTexture } from './image.mjs';
 
 const DEFAULT_STYLE = 'a loose, painterly oil painting with visible brush strokes, soft atmospheric perspective, warm late-afternoon light';
 // 光を描き分けるときは、画風の文に光のことを入れない（光は LIGHT の文で決める）。
@@ -267,11 +272,41 @@ async function runFill(o) {
   const givenLayout = !sky && !plate && typeof o.layout === 'string' ? o.layout : null, repaint = !sky && !plate && ((nvs && !!o.repaint) || !!givenLayout);
   if (repaint && refine) throw new Error('--repaint（Codex で描く）と --refine（PC のモデルで仕上げる）は、どちらか片方にしてください');
   const hint = typeof o.hint === 'string' ? o.hint : '', seed = o.seed !== undefined && o.seed !== true && Number.isFinite(Number(o.seed)) ? Number(o.seed) : undefined;
-  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${typeof o.result === 'string' ? `もうある生成の絵（${path.basename(o.result)}）で、貼り合わせをやり直します（何も呼びません）` : givenLayout ? `下絵（${path.basename(givenLayout)}）をもとに、${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}` : o['dry-run'] && !(nvs && repaint) ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
+  console.log(`穴 ${(100 * holes / mask.length).toFixed(1)}%：${typeof o.result === 'string' ? `もうある生成の絵（${path.basename(o.result)}）で、貼り合わせをやり直します（何も呼びません）` : givenLayout ? `下絵（${path.basename(givenLayout)}）をもとに、${o['dry-run'] ? '文と条件の絵を用意します（Codex は呼びません）' : 'Codex で描いています'}` : o.plain ? 'モデルを使わず、目安の絵を穴に使います' : o['dry-run'] && !(nvs && repaint) ? '文と条件の絵を用意します（Codex は呼びません）' : nvs ? '別視点の絵を生成するモデルで描いています' : local ? 'PC の生成モデルで描いています' : 'Codex で描いています'}`);
   let file;
   const given = typeof o.result === 'string' ? o.result : null; // --result：もうある生成の絵を使う（何も呼ばない）
+  // もとの視点の絵（画風と点の見本の既定）
+  const baseRef = () => {
+    if (typeof o['style-ref'] === 'string') return o['style-ref'];
+    if (typeof o['export-dir'] !== 'string') return null;
+    const cams = JSON.parse(fs.readFileSync(path.join(o['export-dir'], 'cameras.json'), 'utf8')), dir = path.dirname(path.resolve(o.out));
+    const src = cams.views.find((v) => fs.existsSync(path.join(dir, `${v.name}_painted.png`)));
+    return src ? path.join(dir, `${src.name}_painted.png`) : null;
+  };
+  // --stipple：穴の中に、もとの絵の点の細かさだけを足す（モデルなし）
+  const stip = o.stipple !== undefined;
+  const dots = (img) => {
+    if (!stip) return img;
+    const srcFile = typeof o['stipple-source'] === 'string' ? o['stipple-source'] : baseRef();
+    if (!srcFile) throw new Error('--stipple には、点の見本の絵（--stipple-source <もとの絵>）が要ります');
+    const source = readPng(srcFile); let exclude = null;
+    if (typeof o['stipple-exclude'] === 'string') { const e = resize(readPng(o['stipple-exclude']), source.width, source.height); exclude = new Uint8Array(source.width * source.height); for (let i = 0; i < exclude.length; i++) exclude[i] = e.data[i * 4] > 127 ? 1 : 0; }
+    // 強さ：数を渡されたらその値。無ければ、穴の中の細かさが見本の絵（人と空を除いた所）と同じになるように合わせる
+    let gain = o.stipple !== true && Number.isFinite(Number(o.stipple)) ? Math.max(0, Number(o.stipple)) : null, r;
+    if (gain === null) {
+      const allowed = new Uint8Array(source.width * source.height); for (let i = 0; i < allowed.length; i++) allowed[i] = exclude && exclude[i] ? 0 : 1;
+      const want = dotTexture(source, allowed); gain = 1;
+      for (let k = 0; k < 2; k++) { r = stipple(img, mask, source, { exclude, gain, seed: seed ?? 0 }); const got = dotTexture(r.image, mask); if (!(got > 0)) break; gain = Math.max(0.3, Math.min(2.5, gain * want / got)); }
+      gain = +gain.toFixed(2);
+    }
+    r = stipple(img, mask, source, { exclude, gain, seed: seed ?? 0 });
+    console.log(`  穴の中に、もとの絵の点の細かさを足しました（強さ ${gain}、見本の区画 ${r.tiles}、点描の細かさ ${dotTexture(img, mask).toFixed(2)} → ${dotTexture(r.image, mask).toFixed(2)}。見本の絵は ${dotTexture(source).toFixed(2)}）`);
+    return r.image;
+  };
+  const guideImg = () => { if (typeof o.guide !== 'string') throw new Error('--plain と --init-strength には、穴を埋めた目安の絵（--guide <絵>）が要ります'); return dots(composite(original, resize(readPng(o.guide), original.width, original.height), mask)); };
   if (given) file = given;
   else if (givenLayout) file = null; // 下絵はもうある。下で Codex に渡す
+  else if (o.plain) { file = path.join(workDir, 'plain.png'); writePng(file, guideImg()); } // モデルなし：目安の絵（と点）をそのまま使う
   else if ((nvs || local) && (!o['dry-run'] || (nvs && repaint))) {
     fs.mkdirSync(path.join(workDir, 'references'), { recursive: true });
     fs.copyFileSync(holesFile, path.join(workDir, 'references', 'holes.png'));
@@ -283,12 +318,18 @@ async function runFill(o) {
       file = await nvsGenerate({ command: nvs, workDir, job, timeoutSeconds: Number(o.timeout) || 7200 });
       if (refine) { // 生成した絵を穴にはめた絵から、穴の中だけを描き直す
         const init = path.join(workDir, 'nvs-composite.png');
-        writePng(init, composite(original, resize(readPng(file), original.width, original.height), mask));
+        writePng(init, dots(composite(original, resize(readPng(file), original.width, original.height), mask)));
         fs.copyFileSync(file, path.join(workDir, 'nvs-raw.png'));
         const strength = Number.isFinite(Number(o.refine)) && o.refine !== true ? Math.min(1, Math.max(0.05, Number(o.refine))) : 0.45;
         console.log(`  絵の細かさを戻す仕上げ（強さ ${strength}）を PC の生成モデルでしています`);
         file = await localInpaint({ command: cmdOf(o.local || true, defaultCommand), workDir, holesFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600, outName: 'refined.png' });
       }
+    } else if (typeof o.guide === 'string' && (stip || o['init-strength'] !== undefined)) { // 目安の絵（と点）から、弱く描き直す
+      const init = path.join(workDir, 'guide-init.png');
+      writePng(init, guideImg());
+      const strength = Number.isFinite(Number(o['init-strength'])) && o['init-strength'] !== true ? Math.min(1, Math.max(0.05, Number(o['init-strength']))) : 0.35;
+      console.log(`  目安の絵から、強さ ${strength} で PC の生成モデルに描き直してもらいます`);
+      file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600 });
     } else file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel }, timeoutSeconds: Number(o.timeout) || 3600 });
   } else file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (repaint && !given) {
@@ -319,12 +360,13 @@ async function runFill(o) {
   let generated = resize(readPng(file), original.width, original.height);
   // 継ぎ目をなじませる：Codex の絵は穴の外も描き直されて色が少しずれるので、縁でのずれを穴の内側へ薄めながら足す（--seam <画素>、0 で無し）。
   // PC のモデル（--local・--nvs だけ）の絵は、穴の外が何でもよい約束なので、合わせない
-  const byCodex = !!given || repaint || !(nvs || local), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
+  const byCodex = !!given || repaint || !(nvs || local || o.plain), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
   if (byCodex && !sky && !plate && seam > 0) generated = matchSeam(original, generated, mask, { radius: seam });
   const result = composite(original, generated, mask);
   writePng(o.out, result);
   if (hasPreviz && typeof o.overlay === 'string') writePng(o.overlay, overlay(result, resize(readPng(o.previz), original.width, original.height)));
   const drift = outsideChange(original, generated, mask);
+  console.log(`  穴の中の点描の細かさ ${dotTexture(result, mask).toFixed(2)}（もとの絵の、穴の外は ${dotTexture(original, mask.map((m) => (m ? 0 : 1))).toFixed(2)}）`);
   console.log(`  → ${o.out}（穴の外の変わり具合 ${drift.toFixed(1)}/255。${drift > 25 ? '大きい：絵全体が描き直されたかも。継ぎ目を見てください' : '小さい：位置は合っていそう'}）`);
 }
 
