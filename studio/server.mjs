@@ -11,6 +11,8 @@
 //   POST /api/paint/plate           paint/paint.mjs fill --plate を起動（{ view, src, dryRun }）。手前の物を消した背景の絵（背後の層の色）を描く
 //   POST /api/sharp/plate           sharp/psf_sharp.py --plate を起動（{ view, src }）。背景の絵を SHARP に通して、奥行き用の粒を作る
 //   POST /api/view/forget           足した視点の絵を消す（{ view }）
+//   POST /api/objects/run           paint/objects.mjs を起動（{ cmd: segment|complete|make3d, seg, method, ids, source, texture, prompts, segMode, dryRun }）。物を切り出して動かす下ごしらえ
+//   DELETE /api/objects/model       物の 3D を消す（{ seg, method, id }）
 //   POST /api/paint/stop            止める
 //   GET  /api/paint/status          実行中かどうかと出力
 import { spawn } from 'node:child_process';
@@ -67,6 +69,25 @@ function objectModels() {
   return out;
 }
 
+// 物を切り出して動かす（paint/objects.mjs）：切り分けの版（J_seg_<版>.json）、物ごとの 3D（obj3d_<版>_<作り方>_<番号>.glb / .ply / .json）、
+// Codex が描き足した物の全身（obj_<版>_<番号>_full.png）
+const OBJ3D = /^obj3d_([a-z0-9]+)_([a-z0-9]+)_(\d{1,5})\.(glb|ply|json)$/, OBJ_FULL = /^obj_([a-z0-9]+)_(\d{1,5})_full\.png$/, OBJ_VIEW = /^obj_([a-z0-9]+)_(\d{1,5})_view_(front|left|back|right)\.png$/;
+const OBJ3D_METHODS = ['trellis', 'hunyuan3d', 'sam3d', 'hunyuanmv', 'trellismv'];
+function objectParts() {
+  const out = { seg: {}, obj3d: [], full: [], views: [] }; // views：Codex が 4 つの向きから描いた物の絵（obj_<版>_<番号>_view_<向き>.png）
+  try { for (const n of fs.readdirSync(DIRS['previz-export'])) { const m = /^[A-Za-z0-9]+_seg_([a-z0-9]+)\.json$/.exec(n); if (m) out.seg[m[1]] = n; } } catch { /* まだ無い */ }
+  let names = []; try { names = fs.readdirSync(DIRS['paint-out']); } catch { return out; }
+  const by = new Map();
+  for (const n of names.sort()) {
+    let m = OBJ3D.exec(n);
+    if (m) { const k = `${m[1]}_${m[2]}_${m[3]}`; let e = by.get(k); if (!e) by.set(k, (e = { seg: m[1], method: m[2], id: Number(m[3]) })); e[m[4]] = n; continue; }
+    m = OBJ_FULL.exec(n); if (m) { out.full.push({ seg: m[1], id: Number(m[2]), file: n }); continue; }
+    m = OBJ_VIEW.exec(n); if (m) out.views.push({ seg: m[1], id: Number(m[2]), view: m[3], file: n });
+  }
+  out.obj3d = [...by.values()].filter((e) => e.glb || e.ply);
+  return out;
+}
+
 function state() {
   const out = { scene: SCENE, previz: null, views: [], paintReady: fs.existsSync(path.join(ROOT, 'paint', 'node_modules', 'pngjs')) };
   out.depthReady = fs.existsSync(path.join(ROOT, 'painting', 'node_modules', 'onnxruntime-node')); // 描き足した絵の奥行き推定（painting/depth.mjs）が使えるか
@@ -77,6 +98,7 @@ function state() {
   out.ground_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`ground_ai${sfx}`, stat(path.join(DIRS['paint-out'], `ground_ai${sfx}.png`))])); // AI が描いた周囲の地面
   out.world = stat(path.join(DIRS['paint-out'], 'world.ply')); // 外で作った世界の粒（取り込み用。studio/worldimport.js）
   out.objects = objectModels(); // 物体ごとの 3D モデル（object_<番号>.glb / .obj。studio/objectmodel.js）
+  out.parts = objectParts();    // 物を切り出して動かす：切り分けの版、物ごとの 3D、描き足した全身（paint/objects.mjs）
   out.layout_ai = stat(path.join(DIRS['paint-out'], 'layout_ai.json')); // AI が書いた形の配置
   out.sky_ai = Object.fromEntries(['', '_flat', '_lit'].map((sfx) => [`sky_ai${sfx}`, stat(path.join(DIRS['paint-out'], `sky_ai${sfx}.png`))])); // AI が描いた空（天球の層）
   out.views = (cams.views || []).map((v) => ({
@@ -194,6 +216,18 @@ function runSharpPlate({ view, src }) {
   const args = [path.join(ROOT, 'sharp', 'psf_sharp.py'), '--view', view, '--plate', src];
   if (SCENE) args.push('--scene', SCENE);
   startProcess(sharpPython(), args, path.join(ROOT, 'sharp'));
+}
+function runObjects(body) {
+  const args = [path.join(ROOT, 'paint', 'objects.mjs'), body.cmd, '--paint-out', DIRS['paint-out'], '--previz-export', DIRS['previz-export']];
+  if (body.cmd !== 'segment') args.push('--seg', body.seg);
+  if (Array.isArray(body.ids) && body.ids.length) args.push('--ids', body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0).join(','));
+  if (body.cmd === 'make3d') { args.push('--method', body.method); if (body.source === 'cut') args.push('--source', 'cut'); if (body.texture) args.push('--texture'); }
+  if (body.cmd === 'segment') {
+    if (typeof body.prompts === 'string' && body.prompts.trim()) args.push('--prompts', body.prompts.replace(/[^A-Za-z0-9 ,'-]/g, '').slice(0, 400));
+    if (body.segMode === 'masks') args.push('--seg-mode', 'masks');
+  }
+  if (body.cmd === 'complete' || body.cmd === 'views') { if (body.dryRun) args.push('--dry-run'); if (body.perView) args.push('--per-view'); if (body.source === 'cut') args.push('--source', 'cut'); if (process.env.PAINT_CODEX) args.push('--codex', process.env.PAINT_CODEX); }
+  startProcess(process.execPath, args, path.join(ROOT, 'paint'), (body.cmd === 'complete' || body.cmd === 'views') && !!body.dryRun);
 }
 function stopPaint() {
   const child = job.child; if (!child) return;
@@ -330,6 +364,23 @@ export async function handle(req, res, next) {
       if (addedViews().some((v) => v.name === body.view)) { // 絵 1 枚の場面で足した視点：画面が書いた奥行き・札・下絵も消す（もとの視点の物は消さない）
         for (const kind of ['color', 'depth', 'depth_view', 'labels', 'objects']) fs.rmSync(path.join(DIRS['previz-export'], `${body.view}_${kind}.png`), { force: true });
       }
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/objects/run' && req.method === 'POST') {
+      if (job.running) return json(res, 409, { error: 'いま実行中です' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!['segment', 'complete', 'views', 'make3d'].includes(body.cmd)) return json(res, 400, { error: 'cmd が使えません' });
+      if (body.cmd !== 'segment' && !/^[a-z0-9]+$/.test(body.seg || '')) return json(res, 400, { error: '切り分けの版の名前が使えません' });
+      if (body.cmd === 'make3d' && !OBJ3D_METHODS.includes(body.method)) return json(res, 400, { error: '3D の作り方の名前が使えません' });
+      if (body.cmd !== 'segment' && !(Array.isArray(body.ids) && body.ids.length)) return json(res, 400, { error: '物体を選んでください' });
+      runObjects(body);
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/objects/model' && req.method === 'DELETE') {
+      if (!sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
+      const body = JSON.parse((await readBody(req, 1e5)).toString('utf8') || '{}');
+      if (!/^[a-z0-9]+$/.test(body.seg || '') || !OBJ3D_METHODS.includes(body.method) || !Number.isInteger(body.id)) return json(res, 400, { error: '名前が使えません' });
+      for (const ext of ['glb', 'ply', 'json']) fs.rmSync(path.join(DIRS['paint-out'], `obj3d_${body.seg}_${body.method}_${body.id}.${ext}`), { force: true });
       return json(res, 200, { ok: true });
     }
     if (p === '/api/paint/stop' && req.method === 'POST') { stopPaint(); return json(res, 200, { ok: true }); }

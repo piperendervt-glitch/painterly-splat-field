@@ -9,7 +9,7 @@ const SOLID = new Map(TYPES.map((t) => [t.id, t.solid || 'walk']));
 
 // ---- 形を三角形の一覧にする ----
 // 戻り値：tris = 三角形ごとに [ax ay az bx by bz cx cy cz]、nrm = 面の向き（単位）、typeId / objectId、kind = 0 床 / 1 壁
-export function buildCollision(solids, { maxSlopeDeg = 50, cell = 4 } = {}) {
+export function buildCollision(solids, { maxSlopeDeg = 50, cell = 4, dynamicMax = 6144 } = {}) {
   const list = [];
   for (const s of solids) {
     const solid = SOLID.get(s.typeId);
@@ -30,8 +30,11 @@ export function buildCollision(solids, { maxSlopeDeg = 50, cell = 4 } = {}) {
     }
   }
   const n = list.length, cosMax = Math.cos(maxSlopeDeg * Math.PI / 180);
-  const W = { n, tris: new Float32Array(n * 9), nrm: new Float32Array(n * 3), typeId: new Uint8Array(n), objectId: new Uint16Array(n), kind: new Uint8Array(n),
-    cell, grid: new Map(), big: [], stamp: new Uint32Array(n), tick: 0, cosMax, maxSlopeDeg };
+  // 後ろに dynamicMax 個ぶん、動かせる物の三角形（setDynamic）を入れる枠をとる
+  const cap = n + dynamicMax;
+  const W = { n, tris: new Float32Array(cap * 9), nrm: new Float32Array(cap * 3), typeId: new Uint8Array(cap), objectId: new Uint16Array(cap), kind: new Uint8Array(cap),
+    cell, grid: new Map(), big: [], stamp: new Uint32Array(cap), tick: 0, cosMax, maxSlopeDeg,
+    off: new Uint8Array(65536), dyn: [], cap };
   let kept = 0;
   for (const t of list) {
     const [ax, ay, az, bx, by, bz, cx, cy, cz] = t.v;
@@ -55,12 +58,48 @@ export function buildCollision(solids, { maxSlopeDeg = 50, cell = 4 } = {}) {
 
 // 水平の範囲 [x0,x1]×[z0,z1] にかかる三角形を1回ずつ fn(i) に渡す。
 function near(W, x0, z0, x1, z1, fn) {
-  const tick = ++W.tick;
-  for (const i of W.big) fn(i);
+  const tick = ++W.tick, off = W.off;
+  for (const i of W.big) if (!off[W.objectId[i]]) fn(i);
+  for (const i of W.dyn) fn(i); // 動かせる物の今の形（いつも調べる。数は少ない）
   const c = W.cell;
   for (let gx = Math.floor(x0 / c); gx <= Math.floor(x1 / c); gx++) for (let gz = Math.floor(z0 / c); gz <= Math.floor(z1 / c); gz++) {
     const a = W.grid.get(gx * 73856093 ^ gz * 19349663); if (!a) continue;
-    for (const i of a) { if (W.stamp[i] === tick) continue; W.stamp[i] = tick; fn(i); }
+    for (const i of a) { if (W.stamp[i] === tick) continue; W.stamp[i] = tick; if (!off[W.objectId[i]]) fn(i); }
+  }
+}
+
+// ---- 動かせる物（studio/physics.js で動く物）----
+/** 物体の番号 ids の、もとの（動かない）三角形を使う・使わない */
+export function setStaticOff(W, ids, on = true) { for (const id of ids) if (id > 0 && id < 65536) W.off[id] = on ? 1 : 0; }
+
+/**
+ * 動かせる物の今の形を、箱で入れ直す（毎コマ呼んでよい）。boxes = [{ id, typeId, center [x,y,z], rot（行ごとの 3×3）, half [x,y,z] }]
+ * 箱の面は、上を向いて歩ける種類なら床、ほかは壁。入りきらない分は入れない。
+ */
+const BOX_FACES = [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]];
+export function setDynamic(W, boxes) {
+  W.dyn.length = 0;
+  let k = W.n;
+  const c = [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1], [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1]], v = new Float32Array(24);
+  for (const b of boxes) {
+    if (k + 12 > W.cap) break;
+    const R = b.rot, h = b.half, solid = SOLID.get(b.typeId) || 'walk';
+    if (solid === 'none') continue;
+    for (let j = 0; j < 8; j++) {
+      const lx = c[j][0] * h[0], ly = c[j][1] * h[1], lz = c[j][2] * h[2];
+      v[j * 3] = b.center[0] + R[0] * lx + R[1] * ly + R[2] * lz; v[j * 3 + 1] = b.center[1] + R[3] * lx + R[4] * ly + R[5] * lz; v[j * 3 + 2] = b.center[2] + R[6] * lx + R[7] * ly + R[8] * lz;
+    }
+    for (const f of BOX_FACES) for (const tri of [[f[0], f[1], f[2]], [f[0], f[2], f[3]]]) {
+      const o = k * 9;
+      for (let q = 0; q < 3; q++) { W.tris[o + q * 3] = v[tri[q] * 3]; W.tris[o + q * 3 + 1] = v[tri[q] * 3 + 1]; W.tris[o + q * 3 + 2] = v[tri[q] * 3 + 2]; }
+      const t = W.tris, ax = t[o], ay = t[o + 1], az = t[o + 2];
+      let nx = (t[o + 4] - ay) * (t[o + 8] - az) - (t[o + 5] - az) * (t[o + 7] - ay), ny = (t[o + 5] - az) * (t[o + 6] - ax) - (t[o + 3] - ax) * (t[o + 8] - az), nz = (t[o + 3] - ax) * (t[o + 7] - ay) - (t[o + 4] - ay) * (t[o + 6] - ax);
+      const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+      W.nrm[k * 3] = nx; W.nrm[k * 3 + 1] = ny; W.nrm[k * 3 + 2] = nz;
+      W.typeId[k] = b.typeId; W.objectId[k] = 0; // 0：もとの三角形を外す印（off）に左右されない
+      W.kind[k] = solid === 'walk' && ny >= W.cosMax ? 0 : 1;
+      W.dyn.push(k); k++;
+    }
   }
 }
 
