@@ -13,6 +13,7 @@
 //       nvscodex  別視点のモデルの絵を下絵にして、Codex（ChatGPT）に、もとの絵の画風で描いてもらう。1 視点につき Codex を 1 回（絵 1 枚）使う
 //       codex     Codex だけ。1 視点につき 1 回使う
 //       local     PC の画像生成モデル（/opt/psf-ext/inpaint/run.sh、PSF_INPAINT）。利用枠なし
+//       plain     モデルを呼ばない：穴を、まわりの背景の側の色でなめらかに埋める（--stipple を付けると、もとの絵の点の細かさを足す）。物の陰の細い穴向き
 //       none      埋めない（写すところまで。後から画面で埋められる）
 //     --nvs-model <名前>、--local-model <名前>、--refine <強さ>（nvs のとき、PC の画像生成モデルで仕上げ）、--seam <画素>
 //     （--fill nvs に --refine を付けず --stipple だけ付けると、別視点のモデルの絵に点を足したものをそのまま使う。細い穴に、物を描き足されたくないとき）
@@ -131,7 +132,7 @@ async function main() {
     loadAdded: async () => (fs.existsSync(S.addedFile) ? JSON.parse(fs.readFileSync(S.addedFile, 'utf8')) : []),
     saveAdded: async (list) => fs.writeFileSync(S.addedFile, JSON.stringify(list, null, 1)),
   };
-  for (const kind of ['painted', 'disp', 'layout', 'overlay', 'plateguide', 'nodots']) fs.rmSync(path.join(S.P, `${name}_${kind}.png`), { force: true }); // 同じ名前の古い絵が残っていたら消す
+  for (const kind of ['painted', 'disp', 'layout', 'overlay', 'plateguide', 'guide', 'nodots']) fs.rmSync(path.join(S.P, `${name}_${kind}.png`), { force: true }); // 同じ名前の古い絵が残っていたら消す
   // 1. 写す（--plate のときは、もとの視点のまま、人や動物の所を穴にする）
   const P = (kind) => path.join(S.P, `${name}_${kind}.png`);
   // --stipple：点の見本（もとの視点の絵）と、見本に使わない所（人と空）の印を用意して、paint.mjs に渡す引数を作る
@@ -169,12 +170,16 @@ async function main() {
   console.log(`視点 ${name}：位置 ${cand.position.join(', ')}、見る先 ${cand.target.join(', ')}。穴は絵の ${(100 * holes / pixels).toFixed(1)}%${cloud ? `（物の点群 ${cloud.n} 点を重ねて、絵の ${(100 * cloudPixels / pixels).toFixed(1)}% を埋めました）` : ''}`);
   if (!holes) { fs.copyFileSync(path.join(S.P, `${name}_reproj.png`), path.join(S.P, `${name}_painted.png`)); console.log('穴が無いので、描き足しません。'); return; }
   if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。「視点を足す」のタブの「2. 穴を埋める」で埋められます。'); return; }
-  if (a.fill === 'plain') throw new Error('--fill plain は --plate のときだけ使えます（目安の絵が要るため）');
   // 2. 埋める（画面のサーバーと同じ引数で paint.mjs を呼ぶ）
   const withLayout = a.fill === 'nvscodex';
   const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', withLayout ? dream.LAYOUT_HINT : dream.FILL_HINT];
   if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
-  if (a.fill === 'local') { argv.push('--local', ...(process.env.PSF_INPAINT ? [process.env.PSF_INPAINT] : [])); if (a['local-model']) argv.push('--local-model', String(a['local-model'])); }
+  if (a.fill === 'local') {
+    argv.push('--local', ...(process.env.PSF_INPAINT ? [process.env.PSF_INPAINT] : [])); if (a['local-model']) argv.push('--local-model', String(a['local-model']));
+    // --stipple か --strength があれば、まわりの背景の色でなめらかに埋めた絵（と点）から、その強さで描き直す
+    if (a.stipple !== undefined || a.strength !== undefined) argv.push('--guide', P('guide'), ...await stippleArgs(), '--init-strength', ...(Number.isFinite(a.strength) ? [String(a.strength)] : []));
+  }
+  if (a.fill === 'plain') argv.push('--plain', '--guide', P('guide'), ...await stippleArgs()); // モデルなし：なめらかに埋めた絵（と点）をそのまま使う。細い穴向き
   if (a.fill === 'nvs' || withLayout) {
     if (withLayout && typeof a.layout === 'string') argv.push('--layout', path.resolve(a.layout), '--export-dir', S.E, '--view', name);
     else {

@@ -1,7 +1,7 @@
 // 「視点を足す」の、絵 1 枚から作った場面（プレビズの形が無い場面）のための部分。計算は studio/dream.js、ここはファイルの読み書きとの橋渡し。
 // 流れ（LucidDreamer の Dreaming の段と同じ）：すでにある絵を新しい視点へ写す → 穴を埋める（Codex かツール内）→ 埋めた絵の奥行きを推定して、分かっている所に合わせる。
 import { pullPush } from './layers.js';
-import { lookBasis as cameraBasis, cameraMatrices, warp, compose, overlayPoints, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
+import { lookBasis as cameraBasis, cameraMatrices, warp, compose, overlayPoints, foregroundSide, extendDepth, alignDepth, labelHoles, colorModel, inFreeSpace, depthPng, depthViewPng, labelPngs, typeColorPng } from './dream.js';
 
 /** この場面は、絵 1 枚から作った物か（cameras.json の source.kind）。 */
 export const isPainting = (cams) => !!(cams && cams.source && cams.source.kind === 'painting');
@@ -159,6 +159,13 @@ export async function addView(D, cand, name, io, { cloud = null, backfaces = fal
   await io.savePaint(`${name}_reproj.png`, c.rgba, c.W, c.H);
   await io.savePaint(`${name}_holes.png`, mask, c.W, c.H);
   await io.savePaint(`${name}_new.png`, mask, c.W, c.H); // 粒にするのは穴だった画素だけ
+  // 目安の絵：穴を、まわりの背景の側の色でなめらかに埋めたもの（手前の物の色は広げない）。モデルを使わない穴埋め（--fill plain）や、描き直しの下地に使う
+  if (c.holeCount) {
+    const fg = foregroundSide(c, { cam, groundY: groundY(D) }).fg, keep = new Uint8Array(n), guide = new Uint8ClampedArray(c.rgba);
+    for (let i = 0; i < n; i++) keep[i] = c.hole[i] || fg[i] ? 0 : 1;
+    for (let ch = 0; ch < 3; ch++) { const v = new Float32Array(n); for (let i = 0; i < n; i++) v[i] = c.rgba[i * 4 + ch]; const f = pullPush(v, keep, c.W, c.H); for (let i = 0; i < n; i++) if (c.hole[i]) guide[i * 4 + ch] = f[i]; }
+    await io.savePaint(`${name}_guide.png`, guide, c.W, c.H);
+  }
   await saveGeometry(D, name, c, extendDepth(c, { cam, groundY: groundY(D) }), cam, io);
   await io.saveAdded([...(await io.loadAdded()).filter((v) => v.name !== name), viewDef(D, name, cand, cam)]);
   return { holes: c.holeCount, pixels: n, cloudPixels: over ? over.pixels : 0 };
