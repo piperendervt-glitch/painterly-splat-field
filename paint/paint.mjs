@@ -52,7 +52,7 @@ import path from 'node:path';
 import { buildPrompt, generate, askJson } from './codex.mjs';
 import { localInpaint, defaultCommand } from './localinpaint.mjs';
 import { nvsJob, nvsGenerate, defaultNvsCommand } from './nvs.mjs';
-import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange, matchSeam, stipple, dotTexture } from './image.mjs';
+import { readPng, writePng, resize, overlay, holeMask, paintHoles, composite, outsideChange, matchSeam, stipple, dotTexture, widenMask, blendComposite } from './image.mjs';
 
 const DEFAULT_STYLE = 'a loose, painterly oil painting with visible brush strokes, soft atmospheric perspective, warm late-afternoon light';
 // 光を描き分けるときは、画風の文に光のことを入れない（光は LIGHT の文で決める）。
@@ -301,6 +301,12 @@ async function runFill(o) {
   };
   // --stipple：穴の中に、もとの絵の点の細かさだけを足す（モデルなし）
   const stip = o.stipple !== undefined;
+  // --band <画素>：PC のモデルで描くとき、穴の縁の外側（分かっている側）も、その幅ぶん一緒に描き直してもらい、帯の中でもとの絵へなだらかに戻す。
+  // 穴の縁で、描き足した所ともとの絵の調子が段になるのを消す（--init-strength か --refine と一緒に使う。もとの絵が帯の出発点になる）
+  const band = o.band !== undefined && o.band !== true && Number.isFinite(Number(o.band)) ? Math.max(0, Math.round(Number(o.band))) : 0;
+  const wide = band > 0 ? widenMask(mask, original.width, original.height, band) : null;
+  let bandFile = holesFile, banded = false;
+  if (wide) { bandFile = path.join(workDir, 'holes-band.png'); writePng(bandFile, paintHoles(original, wide.wide)); }
   const dots = (img) => {
     if (!stip) return img;
     const srcFile = typeof o['stipple-source'] === 'string' ? o['stipple-source'] : baseRef();
@@ -335,7 +341,8 @@ async function runFill(o) {
     const localModel = typeof o['local-model'] === 'string' && o['local-model'].trim() ? { model: o['local-model'].trim() } : {};
     if (nvs) {
       if (typeof o['export-dir'] !== 'string' || typeof o.view !== 'string') throw new Error('--nvs には --export-dir <previz-export> と --view <視点の名前> が要ります');
-      const job = nvsJob({ exportDir: o['export-dir'], paintDir: path.dirname(path.resolve(o.out)), view: o.view, holesFile, workDir, style, hint, model: typeof o['nvs-model'] === 'string' ? o['nvs-model'].trim() : '', seed });
+      const job = nvsJob({ exportDir: o['export-dir'], paintDir: path.dirname(path.resolve(o.out)), view: o.view, holesFile, workDir, style, hint, model: typeof o['nvs-model'] === 'string' ? o['nvs-model'].trim() : '', seed, from: typeof o['nvs-from'] === 'string' ? o['nvs-from'].trim() : '' });
+      console.log(`  別視点のモデルに渡すもとの絵：視点 ${job.source_name}`);
       file = await nvsGenerate({ command: nvs, workDir, job, timeoutSeconds: Number(o.timeout) || 7200 });
       if (refine) { // 生成した絵を穴にはめた絵から、穴の中だけを描き直す
         const init = path.join(workDir, 'nvs-composite.png');
@@ -343,7 +350,7 @@ async function runFill(o) {
         fs.copyFileSync(file, path.join(workDir, 'nvs-raw.png'));
         const strength = Number.isFinite(Number(o.refine)) && o.refine !== true ? Math.min(1, Math.max(0.05, Number(o.refine))) : 0.45;
         console.log(`  絵の細かさを戻す仕上げ（強さ ${strength}）を PC の生成モデルでしています`);
-        file = await localInpaint({ command: cmdOf(o.local || true, defaultCommand), workDir, holesFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600, outName: 'refined.png' });
+        file = await localInpaint({ command: cmdOf(o.local || true, defaultCommand), workDir, holesFile: bandFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600, outName: 'refined.png' }); banded = !!wide;
       } else if (stip && !repaint) { // 仕上げなしで点だけ足す：生成モデルに描き直させないので、何も描き足されない（細い穴向き）
         const dotted = path.join(workDir, 'nvs-stippled.png');
         writePng(dotted, dots(composite(original, resize(readPng(file), original.width, original.height), mask)));
@@ -355,7 +362,7 @@ async function runFill(o) {
       writePng(init, guideImg());
       const strength = Number.isFinite(Number(o['init-strength'])) && o['init-strength'] !== true ? Math.min(1, Math.max(0.05, Number(o['init-strength']))) : 0.35;
       console.log(`  目安の絵から、強さ ${strength} で PC の生成モデルに描き直してもらいます`);
-      file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600 });
+      file = await localInpaint({ command: local, workDir, holesFile: bandFile, job: { ...base, ...localModel, init, strength }, timeoutSeconds: Number(o.timeout) || 3600 }); banded = !!wide;
     } else file = await localInpaint({ command: local, workDir, holesFile, job: { ...base, ...localModel }, timeoutSeconds: Number(o.timeout) || 3600 });
   } else file = await generate({ workDir, prompt, references, command: o.codex || 'codex', timeoutSeconds: Number(o.timeout) || 600, dryRun: !!o['dry-run'] });
   if (repaint && !given) {
@@ -388,7 +395,9 @@ async function runFill(o) {
   // PC のモデル（--local・--nvs だけ）の絵は、穴の外が何でもよい約束なので、合わせない
   const byCodex = !!given || repaint || !(nvs || local || o.plain), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
   if (byCodex && !sky && !plate && seam > 0) generated = matchSeam(original, generated, mask, { radius: seam });
-  const result = composite(original, generated, mask);
+  const result = banded ? blendComposite(original, generated, wide.weight) : composite(original, generated, mask);
+  if (banded) console.log(`  穴の縁の外側 ${band} 画素も一緒に描き直して、もとの絵へなだらかに戻しました`);
+  else if (wide) console.log('  --band は、PC のモデルが目安の絵から描き直すとき（--init-strength・--refine）だけ効きます。今回は使っていません');
   writePng(o.out, result);
   if (hasPreviz && typeof o.overlay === 'string') writePng(o.overlay, overlay(result, resize(readPng(o.previz), original.width, original.height)));
   const drift = outsideChange(original, generated, mask);

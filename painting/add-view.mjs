@@ -25,6 +25,10 @@
 //       ファイルはコンマで並べられる。ファイル@10043+10045 と書くと、そのファイルからはその物体だけ使う。同じ物体は先に書いたファイルが優先
 //       （例：--objcloud trellis.ply@10043,best.ply で、10043 だけ trellis、残りは best）
 //       --objcloud-backfaces を付けると、向こうを向いた点（裏側の面）も写す（既定は写さない。面の向きが当てにならない点群のとき用）
+//     --nvs-from <視点|auto>  別視点のモデルに渡すもとの絵を選ぶ（既定は、もとの視点）。足した視点の名前（例：R41）なら、その視点の絵と奥行きを渡す。
+//       auto なら、足す視点にいちばん近い、描き終わった視点。その場で回る列（40° → 60°）は、ひとつ前の視点から作るほうがずれが小さい
+//     --band <画素>  PC のモデルで描くとき（--fill local に --stipple か --strength、または --fill nvs --refine）、穴の縁の外側もその幅ぶん一緒に描き直し、
+//       帯の中でもとの絵へなだらかに戻す。穴の縁で調子が段になるのを消す（例：--band 12）
 //     --draft  --layout の絵が、この道具で作った下書き（--fill local --stipple などで仕上げた同じ視点の絵）のときに付ける。Codex への文が、広い穴には下書きを写さず背景を描く頼み方に変わる
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
@@ -176,6 +180,7 @@ async function main() {
       if (a['local-model']) argv.push('--local-model', String(a['local-model']));
       if (a.stipple !== undefined || a.strength !== undefined) argv.push(...await stippleArgs(), '--init-strength', ...(Number.isFinite(a.strength) ? [String(a.strength)] : []));
     }
+    if (a.band !== undefined && a.band !== true) argv.push('--band', String(a.band));
     if (a.fill === 'plain') argv.push('--plain', ...await stippleArgs()); // モデルなし：なめらかに埋めた絵（と点）をそのまま使う
     if (a['dry-run']) argv.push('--dry-run');
     const code = run(process.execPath, argv, path.join(ROOT, 'paint'));
@@ -203,12 +208,14 @@ async function main() {
     else {
       argv.push('--nvs', ...(process.env.PSF_NVS ? [process.env.PSF_NVS] : []), '--export-dir', S.E, '--view', name);
       if (a['nvs-model']) argv.push('--nvs-model', String(a['nvs-model']));
+      if (a['nvs-from'] !== undefined && a['nvs-from'] !== true) argv.push('--nvs-from', String(a['nvs-from']));
       if (withLayout) argv.push('--repaint');
       else if (a.refine !== undefined) { argv.push('--refine', ...(a.refine === true ? [] : [String(a.refine)]), ...(process.env.PSF_INPAINT ? ['--local', process.env.PSF_INPAINT] : []), ...await stippleArgs()); if (a['local-model']) argv.push('--local-model', String(a['local-model'])); }
       else if (a.stipple !== undefined) argv.push(...await stippleArgs()); // 仕上げなし：別視点のモデルの絵に点を足すだけ（何も描き足されない）
     }
   }
   if (a.seam !== undefined) argv.push('--seam', String(a.seam));
+  if (a.band !== undefined && a.band !== true) argv.push('--band', String(a.band));
   if (a['dry-run']) argv.push('--dry-run');
   const code = run(process.execPath, argv, path.join(ROOT, 'paint'));
   if (code !== 0) throw new Error(`穴を埋められませんでした（終了コード ${code}）。視点 ${name} は穴が残ったままです`);

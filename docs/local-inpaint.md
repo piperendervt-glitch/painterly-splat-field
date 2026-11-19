@@ -138,6 +138,19 @@ node painting/add-view.mjs --scene jatte --plate --fill local --stipple --streng
 node painting/add-view.mjs --scene jatte --plate --fill plain --stipple                       # モデルを呼ばない（なめらかに埋めた絵と点だけ）
 ```
 
+### 別視点のモデルに渡す絵を選ぶ（--nvs-from）と、穴の縁をなじませる帯（--band）
+
+- `--nvs-from <視点|auto>`：別視点のモデル（SEVA など）に渡すもとの絵は、既定ではもとの視点の絵。足した視点の名前（`--nvs-from R41`）を書くと、その視点の絵と奥行きを渡す。
+  `auto` は、足す視点にいちばん近い、描き終わった視点（向きの差の度数 + 15 × 距離 m が最小）。その場で回る列（40° → 60°）は、ひとつ前の視点から作るほうがずれが小さい。
+  背景だけの視点（`--plate`）は選ばれない。選んだ視点は「別視点のモデルに渡すもとの絵：視点 …」と出る。
+- `--band <画素>`：PC のモデルが目安の絵から描き直すとき（`--fill local` に `--stipple` か `--strength`、または `--fill nvs --refine`）、穴の縁の外側もその幅ぶん一緒に描き直してもらい、
+  帯の中でもとの絵へなだらかに戻す（穴の中は 1、縁から離れるほど 0 へ）。描き足した所ともとの絵の調子が、穴の縁で段になるのを消す。点の層は穴の中だけに足す。
+
+```
+node painting/add-view.mjs --scene jatte --yaw 60 --fill nvs --nvs-from auto --refine 0.45 --stipple --band 12
+node painting/add-view.mjs --scene jatte --orbit 15 --objcloud <ply> --fill local --stipple --strength 0.3 --band 12
+```
+
 `paint.mjs fill` では `--stipple [強さ] --stipple-source <もとの絵> --stipple-exclude <白い所を見本に使わない絵>`、`--local --guide <絵> --init-strength [強さ]`、`--plain --guide <絵>`。
 実行すると「点描の細かさ」（灰色の絵と、それを 2 画素ぼかした絵の差の平均。点描の絵で 5〜6、なめらかな絵で 1〜3）が出る。
 

@@ -41,13 +41,27 @@ const intr = (def) => ({ width: def.width, height: def.height, fx: def.intrinsic
  * 仕事の中身を作る。exportDir = previz-export（cameras.json と added_views.json、奥行きの絵）、paintDir = 絵の置き場。
  * view = 足した視点の名前、holesFile = その視点へ写した絵（穴はマゼンタ）。もとの絵の奥行きは workDir に .npy で書く。
  */
-export function nvsJob({ exportDir, paintDir, view, holesFile, workDir, style, hint, model, seed }) {
+export function nvsJob({ exportDir, paintDir, view, holesFile, workDir, style, hint, model, seed, from = '' }) {
   const cams = JSON.parse(fs.readFileSync(path.join(exportDir, 'cameras.json'), 'utf8'));
   const addedFile = path.join(exportDir, 'added_views.json'), added = fs.existsSync(addedFile) ? JSON.parse(fs.readFileSync(addedFile, 'utf8')) : [];
-  const src = cams.views.find((v) => fs.existsSync(path.join(paintDir, `${v.name}_painted.png`)));
-  if (!src) throw new Error('もとの視点の絵がありません');
   const tgt = [...cams.views, ...added].find((v) => v.name === view);
   if (!tgt) throw new Error(`視点 ${view} がカメラの一覧にありません`);
+  // モデルに渡すもとの絵（from）：無ければ、もとの視点。視点の名前なら、その足した視点の絵（絵と奥行きがそろっている物）。
+  // 'auto' なら、足す視点にいちばん近い視点（向きの差の度数 + 15 × 離れている距離 m が最小。その場で回る列では、ひとつ前に描いた視点になる）
+  const usable = (v) => v.name !== view && !v.plate && fs.existsSync(path.join(paintDir, `${v.name}_painted.png`)) && v.depth && fs.existsSync(path.join(exportDir, v.depth));
+  const base = cams.views.find((v) => fs.existsSync(path.join(paintDir, `${v.name}_painted.png`)));
+  let src = base;
+  if (from === 'auto') {
+    const pose = (v) => { const m = v.extrinsics.camera_to_world; return { p: [m[0][3], m[1][3], m[2][3]], f: [-m[0][2], -m[1][2], -m[2][2]] }; };
+    const t = pose(tgt), score = (v) => { const s = pose(v), dot = Math.max(-1, Math.min(1, s.f[0] * t.f[0] + s.f[1] * t.f[1] + s.f[2] * t.f[2])); return Math.acos(dot) * 180 / Math.PI + 15 * Math.hypot(s.p[0] - t.p[0], s.p[1] - t.p[1], s.p[2] - t.p[2]); };
+    const list = [...cams.views, ...added].filter(usable).map((v) => ({ v, s: score(v) })).sort((a, b) => a.s - b.s);
+    if (list.length) src = list[0].v;
+  } else if (from) {
+    src = [...cams.views, ...added].find((v) => v.name === from);
+    if (!src) throw new Error(`--nvs-from の視点 ${from} がカメラの一覧にありません`);
+    if (!usable(src)) throw new Error(`--nvs-from の視点 ${from} は使えません（描いた絵 ${from}_painted.png と奥行きの絵が要ります。背景だけの視点（--plate）と、足す視点そのものは使えません）`);
+  }
+  if (!src) throw new Error('もとの視点の絵がありません');
   // もとの絵の奥行き（16bit の絵）をメートルに直して .npy にする
   const dp = readPng(path.join(exportDir, src.depth)), { near, far } = cams.depth, n = dp.width * dp.height, z = new Float32Array(n);
   for (let i = 0; i < n; i++) { const v = dp.data[i * 4] * 256 + dp.data[i * 4 + 1]; z[i] = v ? 1 / (v / 65535 * (1 / near - 1 / far) + 1 / far) : 0; }
@@ -58,7 +72,7 @@ export function nvsJob({ exportDir, paintDir, view, holesFile, workDir, style, h
   const job = {
     source_image: path.join(paintDir, `${src.name}_painted.png`), source_intrinsics: intr(src), source_depth: depthFile,
     targets: [{ name: view, c2w: rows(rel), intrinsics: intr(tgt), render: holesFile, out: path.join(workDir, 'result.png'), out_depth: path.join(workDir, 'result_depth.npy') }],
-    style, hint: hint || '',
+    style, hint: hint || '', source_name: src.name,
   };
   if (model) job.model = model;
   if (Number.isFinite(seed)) job.seed = seed;

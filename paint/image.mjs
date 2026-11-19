@@ -273,3 +273,36 @@ export function stipple(base, mask, source, { exclude = null, tile = 48, grid = 
   }
   return { image: out, tiles: tiles.length };
 }
+
+/**
+ * 穴の印を、分かっている側へ band 画素ぶん広げる。返すもの：wide（広げた印）、weight（穴の中 1、広げた帯の中は穴から離れるほど 0 へ、外は 0）。
+ * 穴の縁の「点描の所と、なめらかな所が隣り合う段」をなくすために、縁の外側の帯も一緒に描き直して、帯の中でもとの絵へなだらかに戻す。
+ */
+export function widenMask(mask, w, h, band) {
+  const n = w * h, wide = Uint8Array.from(mask), weight = new Float32Array(n), dist = new Int32Array(n).fill(-1);
+  let queue = [];
+  for (let i = 0; i < n; i++) if (mask[i]) { weight[i] = 1; dist[i] = 0; queue.push(i); }
+  for (let step = 1; step <= band && queue.length; step++) {
+    const next = [];
+    for (const i of queue) {
+      const x = i % w, y = (i - x) / w;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) {
+        if (j < 0 || dist[j] >= 0) continue;
+        dist[j] = step; wide[j] = 1; weight[j] = 1 - step / (band + 1); next.push(j);
+      }
+    }
+    queue = next;
+  }
+  return { wide, weight };
+}
+
+/** 重み（0〜1）で、元の絵と生成した絵を混ぜる（1 = 生成した絵）。 */
+export function blendComposite(original, generated, weight) {
+  const out = { width: original.width, height: original.height, data: Uint8Array.from(original.data) };
+  for (let i = 0; i < weight.length; i++) {
+    const t = weight[i]; if (!(t > 0)) continue;
+    for (let c = 0; c < 3; c++) out.data[i * 4 + c] = Math.round(original.data[i * 4 + c] * (1 - t) + generated.data[i * 4 + c] * t);
+    out.data[i * 4 + 3] = 255;
+  }
+  return out;
+}
