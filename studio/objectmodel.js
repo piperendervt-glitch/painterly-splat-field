@@ -127,6 +127,65 @@ export function meshPoints(meshes, n, { up = 'y', seed = 1 } = {}) {
   return { n, pos, nrm, col, hasColor, area: total, size: [max[0] - min[0], max[1] - min[1], max[2] - min[2]] };
 }
 
+/**
+ * 3D の粒（3D Gaussian Splatting の .ply。TRELLIS や SAM 3D Objects が書くもの）から、meshPoints と同じ形の点の集まりを作る。
+ * 粒の中心を、見た目の面積（大きい 2 軸の広がりの積 × 不透明さ）に比例して拾い、広がりの中で少しずらす。
+ * 面の向きは、いちばん薄い軸（まん中から外へ向く側）。色は f_dc（無ければ red / green / blue）。
+ *   ply = studio/sharp.js の parsePly の結果、up = 'y' か 'z'
+ */
+export function plyPoints(ply, n, { up = 'y', seed = 1, minOpacity = 0.1 } = {}) {
+  const P = ply.props, N = ply.count, SH = 0.28209479177387814;
+  const has = (k) => !!P[k], sig = (v) => 1 / (1 + Math.exp(-v));
+  if (!has('x') || !has('y') || !has('z')) throw new Error('.ply に位置（x, y, z）がありません');
+  const conv = up === 'z' ? (x, y, z, out) => { out[0] = x; out[1] = z; out[2] = -y; } : (x, y, z, out) => { out[0] = x; out[1] = y; out[2] = z; };
+  const gs = has('scale_0') && has('rot_0'), cdc = has('f_dc_0'), crgb = has('red');
+  const cum = new Float64Array(N), a = [0, 0, 0];
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  let total = 0, kept = 0;
+  for (let i = 0; i < N; i++) {
+    const op = has('opacity') ? sig(P.opacity[i]) : 1;
+    let w = 0;
+    if (op >= minOpacity) {
+      if (gs) { const sc = [Math.exp(P.scale_0[i]), Math.exp(P.scale_1[i]), Math.exp(P.scale_2[i])].sort((p, q) => q - p); w = Math.PI * sc[0] * sc[1] * op; } else w = 1;
+      conv(P.x[i], P.y[i], P.z[i], a); kept++;
+      for (let k = 0; k < 3; k++) { if (a[k] < min[k]) min[k] = a[k]; if (a[k] > max[k]) max[k] = a[k]; }
+    }
+    total += w; cum[i] = total;
+  }
+  if (!kept || !(total > 0)) throw new Error('.ply に見える粒がありません');
+  const ctr = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+  const pos = new Float32Array(n * 3), nrm = new Float32Array(n * 3), col = new Uint8Array(n * 3), rand = rng(seed), R = new Float32Array(9), b = [0, 0, 0];
+  for (let k = 0; k < n; k++) {
+    const want = (k + rand()) / n * total;
+    let lo = 0, hi = N - 1; while (lo < hi) { const mid = (lo + hi) >> 1; if (cum[mid] < want) lo = mid + 1; else hi = mid; }
+    const i = lo;
+    let x = P.x[i], y = P.y[i], z = P.z[i], nx = 0, ny = 0, nz = 0;
+    if (gs) {
+      const q = [P.rot_0[i], P.rot_1[i], P.rot_2[i], P.rot_3[i]], ql = Math.hypot(...q) || 1, [w, qx, qy, qz] = q.map((v) => v / ql); // w, x, y, z
+      R[0] = 1 - 2 * (qy * qy + qz * qz); R[1] = 2 * (qx * qy - w * qz); R[2] = 2 * (qx * qz + w * qy);
+      R[3] = 2 * (qx * qy + w * qz); R[4] = 1 - 2 * (qx * qx + qz * qz); R[5] = 2 * (qy * qz - w * qx);
+      R[6] = 2 * (qx * qz - w * qy); R[7] = 2 * (qy * qz + w * qx); R[8] = 1 - 2 * (qx * qx + qy * qy);
+      const sc = [Math.exp(P.scale_0[i]), Math.exp(P.scale_1[i]), Math.exp(P.scale_2[i])];
+      let thin = 0; if (sc[1] < sc[thin]) thin = 1; if (sc[2] < sc[thin]) thin = 2;
+      if (Math.max(...sc) > sc[thin] * 1.5) { nx = R[thin]; ny = R[3 + thin]; nz = R[6 + thin]; } // いちばん薄い軸（回転行列の列）。丸い粒は向きが無いので、下でまん中から外へ
+      for (let ax = 0; ax < 3; ax++) { if (ax === thin) continue; const t = (rand() * 2 - 1) * sc[ax]; x += R[ax] * t; y += R[3 + ax] * t; z += R[6 + ax] * t; }
+    }
+    conv(x, y, z, a); for (let j = 0; j < 3; j++) pos[k * 3 + j] = a[j] - ctr[j];
+    conv(nx, ny, nz, b);
+    // 向きが分からない・内向きなら、まん中から外へ向ける
+    const ox = pos[k * 3], oy = pos[k * 3 + 1], oz = pos[k * 3 + 2];
+    let l = Math.hypot(b[0], b[1], b[2]);
+    if (l < 1e-6) { b[0] = ox; b[1] = oy; b[2] = oz; l = Math.hypot(ox, oy, oz) || 1; }
+    const sgn = b[0] * ox + b[1] * oy + b[2] * oz < 0 ? -1 : 1;
+    nrm[k * 3] = sgn * b[0] / l; nrm[k * 3 + 1] = sgn * b[1] / l; nrm[k * 3 + 2] = sgn * b[2] / l;
+    let r = 0.5, g = 0.5, bl = 0.5;
+    if (cdc) { r = 0.5 + SH * P.f_dc_0[i]; g = 0.5 + SH * P.f_dc_1[i]; bl = 0.5 + SH * P.f_dc_2[i]; }
+    else if (crgb) { const sc = Math.max(P.red[i], P.green[i], P.blue[i]) > 1.5 ? 255 : 1; r = P.red[i] / sc; g = P.green[i] / sc; bl = P.blue[i] / sc; }
+    col[k * 3] = Math.max(0, Math.min(255, Math.round(r * 255))); col[k * 3 + 1] = Math.max(0, Math.min(255, Math.round(g * 255))); col[k * 3 + 2] = Math.max(0, Math.min(255, Math.round(bl * 255)));
+  }
+  return { n, pos, nrm, col, hasColor: cdc || crgb, area: gs ? total : kept * 1e-4, size: [max[0] - min[0], max[1] - min[1], max[2] - min[2]] };
+}
+
 // ---- 絵の物体の輪郭に合わせて置く ----
 
 /**

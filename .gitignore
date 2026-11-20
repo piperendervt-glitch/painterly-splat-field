@@ -27,3 +27,11 @@ estimated_model.json
 # 物体ごとの切り抜きの絵と、外の道具で作った 3D モデル（studio/objectmodel.js）
 scenes/*/paint-out/object_*
 scenes/*/paint-out/objects.json
+# 物を切り出して動かす（paint/objects.mjs）：切り抜き・描き足した全身・物ごとの 3D、外の切り分け（SAM 3）で作った場面の版
+scenes/*/paint-out/obj_*
+scenes/*/paint-out/obj3d_*
+scenes/*/paint-out/objcloud_*
+scenes/*/previz-export/*_sam3.png
+scenes/*/previz-export/*_seg_*.json
+# 外の道具を手元の PC で試した結果（大きい）
+scenes/*/external/

@@ -8,6 +8,7 @@
     "build:previz": "vite build previz --base ./ --outDir ../dist-previz --emptyOutDir"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
     "fflate": "^0.8.2",
     "three": "0.187.0"
   },

@@ -1,5 +1,9 @@
 // 実在の絵 1 枚から、歩ける粒の空間の元データ（プレビズの書き出しと同じ形式）を作る。
 //   node build.mjs --image <絵> --scene <名前> [--horizon 0.2] [--eye 1.6] [--hfov 60] [--crop 0.012] [--width 1536]
+//   物の切り分けを外の道具（SAM 3 など）の切り抜きで置き換えた版を、別の名前で足す：
+//   node build.mjs --image ../scenes/<名前>/paint-out/J_painted.png --crop 0 --scene <名前> (同じ --horizon --eye --hfov --width)
+//                  --masks <instances.json> --variant sam3 [--seg both|masks] [--minscore 0.4]
+//     instances.json の形は painting/masks.mjs。出すもの：J_depth_sam3.png、J_labels_sam3.png、J_objects_sam3.png、J_seg_sam3.json など
 // 出力（../scenes/<名前>/）:
 //   previz-export/cameras.json, J_depth.png（16bit 奥行き）, J_color.png（プレビズ＝種類ごとの色と陰）,
 //   J_depth_view.png, J_labels.png（種類）, J_objects.png（物体番号）, J_overlay.png（絵とプレビズの輪郭）
@@ -14,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import ort from 'onnxruntime-node';
+import { applyMasks } from './masks.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MODEL_URL = 'https://github.com/fabio-sim/Depth-Anything-ONNX/releases/download/v2.0.0/depth_anything_v2_vits.onnx';
@@ -186,15 +191,26 @@ async function main() {
 
   // ---- 立っているものを物体に分ける（奥行きが急に変わる所では繋げない） ----
   const zm = new Float32Array(W * H); for (let i = 0; i < W * H; i++) zm[i] = zModel(disp[i]);
-  const { id: objId, list } = components(stand, W, H, (i, j) => Math.abs(Math.log(zm[i] / zm[j])) < a.edge);
+  let { id: objId, list } = components(stand, W, H, (i, j) => Math.abs(Math.log(zm[i] / zm[j])) < a.edge);
+  const typeOfComponent = (c) => (c.y0 <= H * 0.03 && c.y1 - c.y0 > H * 0.3 ? 5 : c.y1 <= horizonRow + 2 ? 4 : 3);
+  for (const c of list) c.type = typeOfComponent(c);
+  let segInfo = null;
+  if (a.masks) { // 外の切り分け（SAM 3 など）の物体で置き換える。painting/masks.mjs
+    const r = await applyMasks({ file: String(a.masks), W, H, zm, stand, objId, list, horizonRow, mode: a.seg || 'both', minScore: Number(a.minscore ?? 0.4), components, typeOfComponent, link: (i, j) => Math.abs(Math.log(zm[i] / zm[j])) < a.edge });
+    objId = r.objId; list = r.list; segInfo = r.info;
+    // 外の切り分けだけを使うとき、物体にならなかった「立っているもの」は、地面か遠景に戻す
+    for (let i = 0; i < W * H; i++) if (stand[i] && !objId[i]) {
+      stand[i] = 0; const y = (i / W) | 0;
+      if (y <= horizonRow + 2) { type[i] = 4; z[i] = Math.min(zm[i], 150); } else { type[i] = 1; z[i] = Math.min(zPlane(y), FAR_CLAMP); }
+    }
+    for (let i = 0; i < W * H; i++) if (objId[i]) stand[i] = 1;
+  }
   const objects = [];
   for (const c of list) {
-    const tree = c.y0 <= H * 0.03 && c.y1 - c.y0 > H * 0.3;
-    c.type = tree ? 5 : c.y1 <= horizonRow + 2 ? 4 : 3;
-    if (c.count >= 150) objects.push({ id: c.id, type: TYPES[c.type].name, pixels: c.count, bbox: [c.x0, c.y0, c.x1, c.y1], z_foot: +zm[c.footIndex].toFixed(2) });
+    if (c.count >= 150) objects.push({ id: c.id, type: TYPES[c.type].name, pixels: c.count, bbox: [c.x0, c.y0, c.x1, c.y1], z_foot: +zm[c.footIndex].toFixed(2), ...(c.label ? { label: c.label, score: c.score, source: c.source } : {}) });
   }
   for (let i = 0; i < W * H; i++) if (stand[i]) { type[i] = list[objId[i] - 1].type; z[i] = Math.max(NEAR * 1.5, Math.min(zm[i], 150)); }
-  console.log(`物体 ${list.length} 個（150 画素以上は ${objects.length} 個）`);
+  console.log(`物体 ${list.length} 個（150 画素以上は ${objects.length} 個）${segInfo ? `。外の切り分け：${segInfo.used} 個を使い、${segInfo.dropped} 個を除き、残りの立っているもの ${segInfo.rest} 個` : ''}`);
 
   // ---- 書き出し ----
   const depthPng = new Uint8Array(W * H * 3), view = new Uint8Array(W * H), labels = new Uint8Array(W * H), objPng = new Uint8Array(W * H * 3);
@@ -215,12 +231,24 @@ async function main() {
     const col = TYPES[type[i]].color;
     for (let c = 0; c < 3; c++) overlay[i * 3 + c] = edge ? 255 : rgb[i * 3 + c] * 0.6 + col[c] * 0.4;
   }
-  await png(depthPng, W, H, 3, path.join(outP, 'J_depth.png'));
-  await png(view, W, H, 1, path.join(outP, 'J_depth_view.png'));
-  await png(labels, W, H, 1, path.join(outP, 'J_labels.png'));
-  await png(objPng, W, H, 3, path.join(outP, 'J_objects.png'));
-  await png(previz, W, H, 3, path.join(outP, 'J_color.png'));
-  await png(overlay, W, H, 3, path.join(outP, 'J_overlay.png'));
+  // --variant <名前> のときは、別の名前（J_depth_<名前>.png など）で書き、cameras.json と絵はそのままにする。
+  // 「粒の空間」の「物の切り分け」で、もとの切り分けと見比べるため（studio/splat.js の ui.seg）。
+  const vs = a.variant ? `_${String(a.variant).replace(/[^A-Za-z0-9]/g, '')}` : '';
+  if (vs) {
+    const old = JSON.parse(fs.readFileSync(path.join(outP, 'cameras.json'), 'utf8')).views[0];
+    if (old.width !== W || old.height !== H) throw new Error(`絵の大きさ ${W}x${H} が今の場面（${old.width}x${old.height}）と違います。--image に paint-out/J_painted.png、--crop 0、--width ${old.width} を渡してください`);
+  }
+  await png(depthPng, W, H, 3, path.join(outP, `J_depth${vs}.png`));
+  await png(view, W, H, 1, path.join(outP, `J_depth_view${vs}.png`));
+  await png(labels, W, H, 1, path.join(outP, `J_labels${vs}.png`));
+  await png(objPng, W, H, 3, path.join(outP, `J_objects${vs}.png`));
+  await png(previz, W, H, 3, path.join(outP, `J_color${vs}.png`));
+  await png(overlay, W, H, 3, path.join(outP, `J_overlay${vs}.png`));
+  if (vs) {
+    fs.writeFileSync(path.join(outP, `J_seg${vs}.json`), JSON.stringify({ variant: String(a.variant), files: { depth: `J_depth${vs}.png`, depth_view: `J_depth_view${vs}.png`, labels: `J_labels${vs}.png`, objects: `J_objects${vs}.png`, color: `J_color${vs}.png` }, masks: String(a.masks || ''), mode: a.seg || 'both', info: segInfo, objects }, null, 1));
+    console.log(`書き出しました（切り分け ${a.variant}）: ${path.relative(process.cwd(), outP)}`);
+    return;
+  }
   await img.clone().png().toFile(path.join(outQ, 'J_painted.png'));
 
   const r6 = (n) => Math.round(n * 1e6) / 1e6;
