@@ -30,6 +30,7 @@
 //     --band <画素>  PC のモデルで描くとき（--fill local に --stipple か --strength、または --fill nvs --refine）、穴の縁の外側もその幅ぶん一緒に描き直し、
 //       帯の中でもとの絵へなだらかに戻す。穴の縁で調子が段になるのを消す（例：--band 12）
 //     --dot-match [割合]  描いてもらった穴の中の点が、穴の外より弱いとき（既定は 0.9 倍より下）、もとの絵の点の細かさを足して合わせる（ChatGPT の絵の点が弱い視点に）
+//     --hint "文"  穴埋めの頼みに、英語の一文を足す（例：その向きに何があるか）。--fill codex で穴が絵の 6 割を超えるときは、もとの絵が画風の見本として一緒に渡る
 //     --draft  --layout の絵が、この道具で作った下書き（--fill local --stipple などで仕上げた同じ視点の絵）のときに付ける。Codex への文が、広い穴には下書きを写さず背景を描く頼み方に変わる
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
@@ -136,7 +137,7 @@ async function refine(dir, name, reuse = false) {
   const holesImg = (await rgbaOf(P('holes'), v.W, v.H)).data, dp = (await rgbaOf(P('disp'), v.W, v.H)).data, disp = new Float32Array(v.W * v.H);
   for (let i = 0; i < disp.length; i++) disp[i] = (dp[i * 4] * 256 + dp[i * 4 + 1]) / 65535;
   const r = await dream.refineDepth(D, v, holesImg, disp, io);
-  console.log(r ? `埋めた絵の奥行きを推定して、すでにある面に合わせました（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}、もとの絵の手前に来たので粒にしない画素 ${r.carved}、物の陰で背景の奥行きにした画素 ${r.slivers}、地面の平面に載せた画素 ${r.snapped}、傾いていたので地面に直した画素 ${r.flattened}）。`
+  console.log(r ? `埋めた絵の奥行きを推定して、${r.byGround ? '地面の平面に合わせました（すでにある面がほとんど写っていない視点なので）' : 'すでにある面に合わせました'}（${r.samples} 点で合わせ、穴のうち空にした画素 ${r.skyHoles}、もとの絵の手前に来たので粒にしない画素 ${r.carved}、物の陰で背景の奥行きにした画素 ${r.slivers}、地面の平面に載せた画素 ${r.snapped}、傾いていたので地面に直した画素 ${r.flattened}）。`
     : '奥行きを合わせる手がかりが足りないので、穴の奥行きは仮の値のままです。');
   console.log(`終わりました。「粒の空間」で「ファイルを読み直す」を押すと、視点 ${name} が${reuse ? '新しい奥行きになります' : '加わります'}。`);
 }
@@ -196,7 +197,14 @@ async function main() {
   if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。「視点を足す」のタブの「2. 穴を埋める」で埋められます。'); return; }
   // 2. 埋める（画面のサーバーと同じ引数で paint.mjs を呼ぶ）
   const withLayout = a.fill === 'nvscodex';
-  const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', withLayout ? dream.LAYOUT_HINT : dream.FILL_HINT];
+  const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', (withLayout ? dream.LAYOUT_HINT : a.fill === 'codex' && holes > 0.97 * pixels ? dream.EMPTY_HINT : dream.FILL_HINT) + (typeof a.hint === 'string' && a.hint.trim() ? ' ' + a.hint.trim() : '')];
+  // 穴が絵の 6 割を超える視点を Codex だけで描くときは、もとの絵を画風の見本として渡す（まわりに手がかりが少ないので）
+  if (a.fill === 'codex' && holes > 0.6 * pixels) {
+    const b = dream.baseView(D);
+    argv.push('--style-ref', path.join(S.P, `${b.name}_painted.png`));
+    // 地平線の高さ（目の高さ）を伝える：まわりに絵がほとんど無いと、高さの手がかりが無いので
+    if (!a.pitch) argv[argv.indexOf('--hint') + 1] += ` The horizon (eye level of a standing adult on flat ground) must be at ${Math.round(100 * b.cy / b.H)}% of the image height from the top, as in style.png; the flat ground reaches the bottom edge.`;
+  }
   if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
   if (a.fill === 'local') {
     argv.push('--local', ...(process.env.PSF_INPAINT ? [process.env.PSF_INPAINT] : [])); if (a['local-model']) argv.push('--local-model', String(a['local-model']));

@@ -154,6 +154,13 @@ node painting/add-view.mjs --scene jatte --orbit 15 --objcloud <ply> --fill loca
 `--dot-match [割合]`（add-view、paint.mjs fill）：ChatGPT などが描いた穴の中の点が、穴の外より弱いとき（既定は 0.9 倍より下）だけ、同じ点の層を足して穴の外の細かさに合わせる。
 大きく回った視点で点が弱くなったときに使う。`paint.mjs fill --result <もらった絵> --dot-match --seam <画素>` なら、何も呼ばずに貼り合わせだけやり直せる（継ぎ目の色の段は `--seam` を大きくすると、差を穴の奥までなだらかに運ぶ）。
 
+### まわりに絵がほとんど無い視点（真後ろなど）
+
+`node painting/add-view.mjs --scene jatte --yaw 180 --fill codex --hint "This view looks straight back, away from the river: ..."`
+穴が絵の 6 割を超える視点を Codex だけで描くときは、もとの絵を画風の見本（style.png）として渡し、地平線の高さを文で伝える。`--hint` で、その向きに何があるかを足せる。
+合わせる相手の面が写っていないので、埋めた絵の奥行きは、近くの地面（25 m まで）に当たる画素を地面の平面に合わせて決める（`alignDepth` の `byGround`）。
+大きく回る列は、ひとつずつつなぐと少しずつ崩れるので、先に真後ろなどの「柱」になる視点を描き、あいだの視点は両側が分かっている状態で埋める、という使い方を想定している。
+
 `paint.mjs fill` では `--stipple [強さ] --stipple-source <もとの絵> --stipple-exclude <白い所を見本に使わない絵>`、`--local --guide <絵> --init-strength [強さ]`、`--plain --guide <絵>`。
 実行すると「点描の細かさ」（灰色の絵と、それを 2 画素ぼかした絵の差の平均。点描の絵で 5〜6、なめらかな絵で 1〜3）が出る。
 
