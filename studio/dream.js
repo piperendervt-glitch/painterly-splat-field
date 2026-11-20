@@ -357,6 +357,14 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, ground
   if (!(hi > lo)) return null;
   const xs = [], ys = [];
   for (let y = 1; y < H; y += 3) for (let x = 1; x < W; x += 3) { const i = y * W + x; if (c.z[i] > 0 && !c.hole[i]) { xs.push(disp[i]); ys.push(1 / c.z[i]); } }
+  // 合わせる相手（すでにある面）がほとんど写っていない視点（真後ろなど）：穴のうち、線が近くの地面（25 m まで）に当たる画素を、地面の平面の奥行きに合わせる。
+  // 立っている物は外れ値として落ちる（下の繰り返し）。地面が多数であることが前提
+  let byGround = false;
+  if (xs.length < 200 && cam) {
+    xs.length = 0; ys.length = 0;
+    for (let y = 1; y < H; y += 3) for (let x = 1; x < W; x += 3) { const i = y * W + x; if (!c.hole[i]) continue; const p = planeDepth(cam, x, y, groundY); if (p > 0 && p < 25) { xs.push(disp[i]); ys.push(1 / p); } }
+    byGround = true;
+  }
   if (xs.length < 200) return null;
   let a = 0, b = 0, keep = xs.map(() => true);
   for (let round = 0; round < 4; round++) {
@@ -370,7 +378,7 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, ground
   if (!(a > 0)) return null;
   const r = new Float32Array(n), k = new Uint8Array(n), side = foregroundSide(c, { cam, groundY });
   for (let i = 0; i < n; i++) if (c.z[i] > 0 && !c.hole[i] && !side.fg[i]) { r[i] = 1 / c.z[i] - (a * disp[i] + b); k[i] = 1; }
-  const f = pullPush(r, k, W, H), z = new Float32Array(c.z);
+  const f = byGround ? new Float32Array(n) : pullPush(r, k, W, H), z = new Float32Array(c.z);
   let skyHoles = 0;
   for (let i = 0; i < n; i++) {
     if (!c.hole[i]) continue;
@@ -378,7 +386,7 @@ export function alignDepth(c, disp, { skyZ = 400, minZ = 0.3, cam = null, ground
     if (iz < 1 / skyZ || disp[i] - lo < 0.01 * (hi - lo)) { z[i] = 0; skyHoles++; } else z[i] = Math.max(minZ, 1 / iz);
   }
   const settled = settleHoleDepth(c, z, { cam, groundY, side, maxSlope });
-  return { z, a, b, samples: xs.length, skyHoles, ...settled };
+  return { z, a, b, samples: xs.length, skyHoles, byGround, ...settled };
 }
 
 // 絵の色を点描のつぶより大きくならす（種類を色で見分けるため）。返すのは RGB（Float32、0〜255）
