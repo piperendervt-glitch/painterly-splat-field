@@ -25,7 +25,7 @@ export class TriList {
 }
 
 /** 輪郭をふくらませた形：物体の画素を粗います目にし、縁からの距離 d と幅の半分 w から厚みの半分 = thick × √(d (2w − d))（断面が円に近い）。表と裏の 2 枚。 */
-export function inflateMesh(o, { W, H, z, object, c2w, intr }, { step = 2, thick = 0.7, maxHalf = 1.2, far = 280 } = {}) {
+export function inflateMesh(o, { W, H, z, object, c2w, intr }, { step = 2, thick = 0.7, maxHalf = 1.2, far = 280, groundZ = null } = {}) {
   const [x0, y0, x1, y1] = o.bbox, gx0 = Math.floor(x0 / step) - 1, gy0 = Math.floor(y0 / step) - 1, gw = Math.ceil(x1 / step) - gx0 + 3, gh = Math.ceil(y1 / step) - gy0 + 3;
   const inside = new Uint8Array(gw * gh), dep = new Float32Array(gw * gh);
   const zs = [];
@@ -36,6 +36,32 @@ export function inflateMesh(o, { W, H, z, object, c2w, intr }, { step = 2, thick
   if (zs.length < 6) return null;
   zs.sort((a, b) => a - b); const zm = zs[zs.length >> 1];
   for (let g = 0; g < gw * gh; g++) if (inside[g] && !(dep[g] > 0)) dep[g] = zm; // 奥行きの無い画素（空と見なされた所）は、物のまん中の奥行きに置く
+  // 物は、足もとの奥行きに立てる：縦の列ごとに、いちばん下の画素の先が地面に当たる奥行きを、その列の奥行きにする（奥行きの絵の中の傾きは使わない。
+  // 傾きを使うと、木のように大きな物が、横から見たときに奥へのびた幕になる）。足が地面に着いていない列（地面までの奥行きが、奥行きの絵とかけ離れている）は、着いている近くの列から取る
+  if (groundZ) {
+    const foot = new Float32Array(gw), ok = new Uint8Array(gw);
+    for (let gx = 0; gx < gw; gx++) {
+      let low = -1; for (let gy = gh - 1; gy >= 0; gy--) if (inside[gy * gw + gx]) { low = gy; break; }
+      if (low < 0) continue;
+      const g = groundZ((gx0 + gx) * step, (gy0 + low) * step + step), zd = dep[low * gw + gx];
+      if (g > 0 && g <= far && (!(zd > 0) || (g > zd * 0.6 && g < zd * 1.7))) { foot[gx] = g; ok[gx] = 1; }
+    }
+    let any = false; for (let gx = 0; gx < gw; gx++) if (ok[gx]) any = true;
+    if (any) {
+      // 列ごとの値は、左右 1 m ぶんの列のうち、いちばん手前の足もと（服のすそのように、端の列は下の端が地面から浮いていて、そのままだと奥へ逃げる）。
+      // 幅 2 m までの物（人など）は、ほぼ 1 つの奥行きの板になり、横に広い物（木の列など）は、足もとの線に沿って曲がる
+      let zmin = Infinity; for (let gx = 0; gx < gw; gx++) if (ok[gx] && foot[gx] < zmin) zmin = foot[gx];
+      const win = Math.max(4, Math.round(1.0 * intr.fx / zmin / step)), col = new Float32Array(gw);
+      for (let gx = 0; gx < gw; gx++) {
+        let v = Infinity; for (let k = Math.max(0, gx - win); k <= Math.min(gw - 1, gx + win); k++) if (ok[k] && foot[k] < v) v = foot[k];
+        if (v === Infinity) { for (let r = win; r < gw && v === Infinity; r++) { if (gx - r >= 0 && ok[gx - r]) v = foot[gx - r]; else if (gx + r < gw && ok[gx + r]) v = foot[gx + r]; } }
+        col[gx] = v;
+      }
+      const hw = Math.max(2, win >> 1);
+      for (let gx = 0; gx < gw; gx++) { let sum = 0, n = 0; for (let k = Math.max(0, gx - hw); k <= Math.min(gw - 1, gx + hw); k++) { sum += col[k]; n++; } foot[gx] = sum / n; }
+      for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) if (inside[gy * gw + gx]) dep[gy * gw + gx] = foot[gx];
+    }
+  }
   // 奥行きをならす（物の中だけで、となりとの平均を 3 回）。画素ごとのがたつきが、とげとげの面にならないように
   for (let it = 0; it < 3; it++) {
     const src = Float32Array.from(dep);
@@ -88,13 +114,21 @@ export function inflateMesh(o, { W, H, z, object, c2w, intr }, { step = 2, thick
 export function buildPaintingTris(view, objects, { typeOfObject, grass, size = 300, minPixels = 60, far = 280 }) {
   const { W, H, z, type, object, c2w, intr } = view, list = new TriList(), GRASS = grass, S = size;
   const bz = new Float32Array(W * H), fill = new Uint8Array(W * H), bt = new Uint8Array(W * H).fill(GRASS);
-  // far より遠い物（対岸など）は、far の距離の壁として置く
-  const behind = new Float32Array(W * H);
-  for (let i = 0; i < W * H; i++) { if (object[i]) { fill[i] = 1; behind[i] = z[i] > 0 ? Math.min(z[i], far) + 0.15 : 0; } else { bz[i] = Math.min(z[i], far); bt[i] = type[i] || GRASS; } }
-  const bg = backgroundMesh({ W, H, bz, fill, behind, btype: bt, c2w, intr, step: 6, maxZ: far + 2, edge: 1 }) // 奥行きが 2.7 倍をこえて変わる段差では面を切る（つなぐと、横から見たときに、のびた幕になる）;
+  // 地面の高さ：地面（草地）の画素を 3D に置いたときの高さのまん中
+  const m = c2w, camY = m[7], ys = [];
+  const rayY = (px, py) => m[4] * ((px + 0.5 - intr.cx) / intr.fx) + m[5] * (-(py + 0.5 - intr.cy) / intr.fy) - m[6]; // 奥行き 1 あたりの高さの変わり方
+  for (let y = 0; y < H; y += 3) for (let x = 0; x < W; x += 3) { const i = y * W + x; if (!object[i] && type[i] === GRASS && z[i] > 0) ys.push(camY + rayY(x, y) * z[i]); }
+  ys.sort((a, b) => a - b); const baseY = ys.length ? ys[ys.length >> 1] : 0, by = baseY - 0.12;
+  /** その画素の先で、地面の高さの平面に当たるまでの奥行き（当たらなければ 0） */
+  const groundZ = (px, py) => { const dy = rayY(px, py); if (dy > -1e-4) return 0; const zz = (baseY - camY) / dy; return zz > 0 ? zz : 0; };
+  // 物に隠れた背景は、地面がそのまま後ろへ続いているものとして置く（地平線より上は far の壁）。far より遠い物（対岸など）も far の壁として置く
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (object[i]) { const g = groundZ(x, y); bz[i] = g > 0 ? Math.min(g, far) : far; fill[i] = 1; }
+    else { bz[i] = Math.min(z[i], far); bt[i] = type[i] || GRASS; }
+  }
+  const bg = backgroundMesh({ W, H, bz, btype: bt, c2w, intr, step: 6, maxZ: far + 2, edge: 1 }); // 奥行きが 2.7 倍をこえて変わる段差では面を切る（つなぐと、横から見たときに、のびた幕になる）
   list.addIndexed(bg.positions, bg.indices, (k) => bg.triType[k], 0);
-  const ys = []; for (let k = 0; k < bg.triType.length; k += 5) if (bg.triType[k] === GRASS) ys.push(bg.positions[bg.indices[k * 3] * 3 + 1]);
-  ys.sort((a, b) => a - b); const baseY = ys.length ? ys[Math.floor(ys.length * 0.5)] : 0, by = baseY - 0.12;
   list.addIndexed(new Float32Array([-S, by, -S, S, by, -S, S, by, S, -S, by, S]), [0, 2, 1, 0, 3, 2], GRASS, 0);
   let made = 0;
   // 物の一覧は、物体の札の絵そのものから作る（cameras.json の一覧は、札を付け直した後では番号が合わないことがある）
@@ -108,7 +142,7 @@ export function buildPaintingTris(view, objects, { typeOfObject, grass, size = 3
   const listed = new Map((objects || []).map((o) => [o.id, o])), used = [];
   for (const o of found.values()) {
     if (o.pixels < minPixels) continue;
-    const m = inflateMesh(o, view, { far }); if (!m) continue;
+    const m = inflateMesh(o, view, { far, groundZ }); if (!m) continue;
     let best = 0, bn = 0; for (const [t, n] of o.votes) if (t && n > bn) { bn = n; best = t; }
     const typeId = best || (listed.has(o.id) ? typeOfObject(listed.get(o.id)) : typeOfObject({}));
     list.addIndexed(m.positions, m.indices, typeId, o.id); made++; used.push({ id: o.id, type: typeId, pixels: o.pixels, bbox: o.bbox });

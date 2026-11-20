@@ -131,7 +131,11 @@ export function analyze(tris, refs, opts = {}) {
     const coarse = col.map((ch) => blur(ch, W, H, 3));
     let plate = null;
     if (ref.mask) {
-      const known = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) known[i] = ref.mask.object[i] === 0 && object[i] === 0 && r.tri[i] >= 0 ? 1 : 0;
+      // 物のすぐそば（3 画素）の背景は、物の色がにじんでいるので、背景の色の手本にしない
+      const nearObj = new Uint8Array(W * H), R2 = 3;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { if (!ref.mask.object[y * W + x]) continue; for (let dy = -R2; dy <= R2; dy++) for (let dx = -R2; dx <= R2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) nearObj[yy * W + xx] = 1; } }
+      ref.nearObj = nearObj;
+      const known = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) known[i] = !nearObj[i] && object[i] === 0 && r.tri[i] >= 0 ? 1 : 0;
       plate = col.map((ch) => blur(pullPush(ch, known, W, H), W, H, 3));
     }
     out.refs.push({ ...ref, ...r, kind, object, field: strokes.field, col, coarse, plate, edge, strokes });
@@ -314,11 +318,7 @@ export function paintedAt(A, p, n, out, object = -1) {
     const [x, y, d] = pr, { W, H } = ref.cam; if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) continue;
     const i = Math.floor(y) * W + Math.floor(x), zr = ref.z[i];
     if (!zr) continue;
-    if (ref.plate && object === 0 && ref.mask.object[i] !== 0 && d > zr - 0.02 * d - 0.08) { // 背景が、絵の上では物に隠れている
-      let near = false; const fx = Math.floor(x), fy = Math.floor(y);
-      for (const [dx, dy] of NEAR) { const xx = fx + dx, yy = fy + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H && ref.mask.object[yy * W + xx] === 0) { near = true; break; } }
-      if (!near) { out.plate = [ref.plate[0][i], ref.plate[1][i], ref.plate[2][i]]; continue; }
-    }
+    if (ref.plate && object === 0 && ref.nearObj[i] && d > zr - 0.02 * d - 0.08) { out.plate = [ref.plate[0][i], ref.plate[1][i], ref.plate[2][i]]; continue; } // 背景が、絵の上では物に隠れている（か、物のすぐそば）
     // 手前に別の物がある（隠れている）なら使わない。絵から組んだ物（札の絵がある）で、その画素のいちばん手前が同じ物なら、奥行きのずれは大目に見る（奥行きのがたつく物でも、表側は絵に写っている）
     const same = ref.mask && object > 0 && ref.object[i] === object;
     if (Math.abs(zr - d) > (same ? 0.1 * d + 0.5 : 0.02 * d + 0.08)) continue;
