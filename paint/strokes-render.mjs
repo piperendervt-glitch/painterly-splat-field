@@ -35,7 +35,8 @@ for (let i = 0; i < W * H; i++) {
 const c2w = v.extrinsics.camera_to_world.flat(), GRASS = typeByKey('grass').id;
 const typeOfObject = (o) => remap[((cams.labels.types || []).find((x) => x.name === o.type) || {}).id || 0] || typeByKey('figure').id;
 let t0 = Date.now();
-const { tris, made, baseY, objects: built } = buildPaintingTris({ W, H, z, type, object, c2w, intr }, cams.objects, { typeOfObject, grass: GRASS });
+const { tris, made, baseY, objects: built } = buildPaintingTris({ W, H, z, type, object, c2w, intr }, cams.objects, { typeOfObject, grass: GRASS, volumeTypes: args.novol ? [] : [typeByKey('leaves').id], proxy: (args.proxy || '').split(',').filter(Boolean).map(Number), fit: !!args.fit });
+for (const o of built) if (o.shape && (o.pixels > 5000 || o.vol)) console.log(`  物 ${o.id} 種類 ${o.type} 奥行き ${o.z.toFixed(1)} m 丸さ ${o.shape.round.toFixed(2)} でこぼこ ${(o.shape.bump * 100).toFixed(1)}% 1 周 ${o.shape.waves} 個${o.vol ? ` → かたまり 厚み ${o.vol.toFixed(2)} m でこぼこ ${o.bump.toFixed(2)} m 細かさ ${o.clump.toFixed(2)} m` : ''}`);
 console.log(`形：三角形 ${tris.n} 枚、物 ${made} 個、土台 ${baseY.toFixed(2)} m（${Date.now() - t0} ms）`);
 
 // カメラ（c2w は行ごと。列 0 = 右、1 = 上、2 = 後ろ、3 = 位置）
@@ -69,9 +70,14 @@ const tree = makeTree(tris, { across, minWidth: 0.015 });
 console.log(`絵を調べた（${Date.now() - t0} ms）。筆の幅 ${A.ref.width.toFixed(2)} px、8 分木 ${tree.maxLevel} 段`);
 for (const [k, s] of A.types) console.log(`  種類 ${k}: 幅 ${s.width.toFixed(2)} 長さ ${s.length.toFixed(2)} 点らしさ ${(s.dot || 0).toFixed(2)} 画素 ${s.count}`);
 
+// 下塗りに使う形：かたまりとして描く物と、輪郭を絵に寄せる物（形が絵と違う）は除く（点が面から離れるので、面を塗ると形が透けて見える）
+const proxyIds = new Set((args.proxy || '').split(',').filter(Boolean).map(Number)), keep = [];
+for (let t = 0; t < tris.n; t++) if (!(tris.vol[t] > 0) && !(args.fit && proxyIds.has(tris.object[t]))) keep.push(t);
+const underMap = Int32Array.from(keep), underTris = { n: keep.length, pos: new Float32Array(keep.length * 9), nrm: new Float32Array(keep.length * 9), type: new Uint8Array(keep.length), object: new Uint16Array(keep.length) };
+keep.forEach((t, k) => { underTris.pos.set(tris.pos.subarray(t * 9, t * 9 + 9), k * 9); underTris.nrm.set(tris.nrm.subarray(t * 9, t * 9 + 9), k * 9); underTris.type[k] = tris.type[t]; underTris.object[k] = tris.object[t]; });
 const atlas = brushAtlas(), STAND_TYPE = GRASS;
 const gen = new Map(); // 箱 → 作った筆跡（視点をまたいで使い回す）
-const opts = { coverage, paintedMix: 1, orientMix: 1 };
+const opts = { coverage, paintedMix: 1, orientMix: 1, fit: !!args.fit };
 const allList = Int32Array.from({ length: tris.n }, (_, i) => i);
 const hueRgb = (h) => [0, 2 / 3, 1 / 3].map((o) => Math.min(1, Math.max(0, Math.abs(((h + o) % 1) * 6 - 3) - 1)));
 
@@ -100,10 +106,10 @@ function render(name, m) {
 
   const sky = generateSky(A, opts), skyCol = A.sky ? shadeColor(A.sky, [0, 0.148, -0.989]) : null; // 空の地の色（画面と同じ決め方）
   // 下塗り（形を陰影だけの色で）
-  const ras = rasterize(tris, cam), zb = new Float32Array(w * h).fill(Infinity);
+  const ras = rasterize(underTris, cam), zb = new Float32Array(w * h).fill(Infinity);
   const under = new Float32Array(w * h * 3);
   for (let i = 0; i < w * h; i++) {
-    const t = ras.tri[i]; if (t < 0) { const c = skyCol || [0.55, 0.57, 0.58]; under[i * 3] = c[0]; under[i * 3 + 1] = c[1]; under[i * 3 + 2] = c[2]; continue; }
+    const t0 = ras.tri[i], t = t0 < 0 ? -1 : underMap[t0]; if (t < 0) { const c = skyCol || [0.55, 0.57, 0.58]; under[i * 3] = c[0]; under[i * 3 + 1] = c[1]; under[i * 3 + 2] = c[2]; continue; }
     const c = shadeColor(modelFor(A, tris.object[t], tris.type[t]), [tris.nrm[t * 9], tris.nrm[t * 9 + 1], tris.nrm[t * 9 + 2]]);
     under[i * 3] = c[0]; under[i * 3 + 1] = c[1]; under[i * 3 + 2] = c[2]; zb[i] = ras.z[i];
   }

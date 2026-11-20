@@ -350,14 +350,14 @@ export function generateNode(tris, A, tree, key, list, opts = {}) {
   const [l, ix, iy, iz] = key.split('/').map(Number), { lo, s } = nodeBox(tree, l, ix, iy, iz), w0 = nodeWidth(tree, l);
   const { coverage = 2.4, fill = 0.62, seed = 1, orientMix = 1, paintedMix = 1, maxCount = 400000 } = opts;
   const R = rng(hash3(ix, iy, iz, l * 131 + seed) * 4294967296);
-  const right = camRight(A.refs[0].cam);
+  const ref0 = A.refs[0], right = camRight(ref0.cam);
   const cols = { P: [], N: [], T: [], K: [], M: [], G: [], O: [] };
   const pa = {}, syn = [0, 0, 0];
   let count = 0, dabs = 0;
   for (const t of list) {
     const poly = clipTriToBox(tris, t, lo, s); if (!poly) continue;
     const type = tris.type[t], object = tris.object[t], st = A.types.get(type) || A.types.get(1) || [...A.types.values()][0];
-    const width = w0 * st.scale, length = width * st.aspect, density = coverage / (width * length * fill);
+    const width = w0 * st.scale, length = width * st.aspect, density = coverage / (width * length * fill) * (tris.vol && tris.vol[t] > 0 ? 2.5 : 1); // かたまりとして描く物は、点が奥行きの方向に散るので、多めにまく
     const model = modelFor(A, object, type);
     for (let f = 1; f + 1 < poly.length; f++) {
       const a = poly[0], b = poly[f], c = poly[f + 1];
@@ -367,6 +367,15 @@ export function generateNode(tris, A, tree, key, list, opts = {}) {
         let u = R(), v = R(); if (u + v > 1) { u = 1 - u; v = 1 - v; }
         const p = [0, 1, 2].map((q) => a[q] + e1[q] * u + e2[q] * v);
         const n = norm([0, 1, 2].map((q) => a[q + 3] * (1 - u - v) + b[q + 3] * u + c[q + 3] * v));
+        // 輪郭を絵に寄せる（opts.fit）：絵の上で、その物の輪郭の外に出る点は置かない（形が絵より大きい所を引っこめる）
+        if (opts.fit && object > 0 && ref0.mask) {
+          const pr = project(ref0.cam, p);
+          if (pr && pr[0] >= 0 && pr[1] >= 0 && pr[0] < ref0.cam.W && pr[1] < ref0.cam.H) {
+            const fx = Math.floor(pr[0]), fy = Math.floor(pr[1]); let hit = ref0.mask.object[fy * ref0.cam.W + fx] === object;
+            for (let k = 0; k < 16 && !hit; k++) { const xx = fx + NEAR[k][0], yy = fy + NEAR[k][1]; if (xx >= 0 && yy >= 0 && xx < ref0.cam.W && yy < ref0.cam.H && ref0.mask.object[yy * ref0.cam.W + xx] === object) hit = true; }
+            if (!hit) continue;
+          }
+        }
         const [f1, f2] = surfaceFrame(n, right);
         // 写っていない所の向き：種類ごとの向きの分布から、場所でなめらかに変わる値で引く（隣どうしがそろって流れる）
         const ua = fbm(p, 11, length * 2), phi = angleFromHist(st.phiHist, Math.min(0.999, Math.max(0, ua + (R() - 0.5) * 0.12)));
@@ -408,6 +417,14 @@ export function generateNode(tris, A, tree, key, list, opts = {}) {
             tw = norm([0, 1, 2].map((i) => tw[i] * (1 - wgt) + dir[i] * sg * wgt));
             if (away && best < width / 2) for (let i = 0; i < 3; i++) p[i] += away[i] * (width / 2 - best);
           }
+        }
+        // かたまりとして描く物（tris.vol > 0）：色を決めたあとで、点を面から離す。内側へ（面に近いほど多く）、でこぼこは場所でなめらかに変わる量だけ外・内へ。
+        // 絵から組んだ物は、絵を見た向きに沿ってだけ動かす（絵と同じ視点での輪郭は変えず、横から見たときに、でこぼこのあるかたまりになる）
+        if (tris.vol && tris.vol[t] > 0) {
+          let dir = n;
+          if (ref0.mask) { const v = norm([p[0] - ref0.cam.pos[0], p[1] - ref0.cam.pos[1], p[2] - ref0.cam.pos[2]]); dir = dot(n, v) < 0 ? [-v[0], -v[1], -v[2]] : v; }
+          const cl = tris.clump[t] || 1, r1 = R(), amt = (vnoise(p[0] / cl, p[1] / cl, p[2] / cl, 61) - 0.5) * 2 * tris.bump[t] - tris.vol[t] * r1 * r1;
+          p[0] += dir[0] * amt; p[1] += dir[1] * amt; p[2] += dir[2] * amt;
         }
         const sh = shadeColor(model, n);
         cols.P.push(p[0], p[1], p[2], width); cols.N.push(n[0], n[1], n[2], length); cols.T.push(tw[0], tw[1], tw[2], screen);
