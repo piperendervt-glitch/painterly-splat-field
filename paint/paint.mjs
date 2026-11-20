@@ -112,7 +112,15 @@ function viewInstructions({ style, hasStyleRef, light = 'free' }) {
   ].filter(Boolean).join('\n');
 }
 
-function fillInstructions({ style, hasPreviz, lightLines = [], hint = '', hasStyleRef = false }) {
+function fillInstructions({ style, hasPreviz, lightLines = [], hint = '', hasStyleRef = false, empty = false }) {
+  // empty：絵のほぼ全部が穴（まわりに描かれた所が無い）。「まわりに合わせる」という頼み方ができないので、1 枚まるごと描いてもらう
+  if (empty) return [
+    `Paint one complete new picture: ${style.replace(/;?\s*match the[^.;]*(around|surrounding)[^.;]*/i, '')}.`,
+    'references/holes.png is only a blank magenta canvas of the right size; nothing in it is to be kept. No magenta may remain in the result.',
+    hasStyleRef ? 'references/style.png is the original painting of this same place, seen in another direction from the same spot. The new picture must look like another canvas by the same painter of the same park at the same hour: the same technique, dot size, palette, light direction, eye height and horizon height. It shows a different direction, so do not copy its composition, its people or its objects.' : '',
+    ...lightLines,
+    hint,
+  ].filter(Boolean).join('\n');
   return [
     `references/holes.png is ${style}. The bright magenta (#FF00FF) areas are holes with no paint yet.`,
     'Paint ONLY inside the magenta areas, continuing the surrounding scene naturally (same perspective, same light, same brush style).',
@@ -282,7 +290,7 @@ async function runFill(o) {
   if (plainStyleRef) references.push({ name: 'style.png', file: o['style-ref'], note: 'the original painting of this place, seen in another direction (style, palette, light and horizon height to match; not its composition)' });
   if (hasPreviz) references.push({ name: 'previz.png', file: o.previz, note: 'previz render from the same camera (layout to follow inside the holes)' });
   if (hasPreviz && typeof o.depth === 'string') references.push({ name: 'depth.png', file: o.depth, note: 'depth of previz.png (white = near, black = far / sky)' });
-  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: ground ? groundInstructions({ style, hasStyleRef }) : sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines, hint: typeof o.hint === 'string' ? o.hint : '', hasStyleRef: plainStyleRef }) });
+  const prompt = buildPrompt({ width: original.width, height: original.height, references, instructions: ground ? groundInstructions({ style, hasStyleRef }) : sky ? skyInstructions({ style, hasStyleRef, lightLines: LIGHT[light].lines }) : plate ? plateInstructions({ hasGuide }) : fillInstructions({ style, hasPreviz, lightLines: LIGHT[light].lines, hint: typeof o.hint === 'string' ? o.hint : '', hasStyleRef: plainStyleRef, empty: holes > 0.97 * mask.length }) });
   // --local：Codex の代わりに、手元の PC の画像生成モデルで穴を描く（利用枠を使わない。paint/localinpaint.mjs）
   // --nvs  ：別視点の絵を生成するモデルに、この視点から見た絵を作ってもらい、穴に使う（paint/nvs.mjs）。--export-dir と --view が要る
   // --refine [強さ]：--nvs の絵は粗いので、穴の中を PC の画像生成モデルで描き直して、絵の細かさを戻す（強さ 0〜1、既定 0.45）

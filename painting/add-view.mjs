@@ -197,13 +197,13 @@ async function main() {
   if (a.fill === 'none') { console.log('埋めずに終わります（--fill none）。「視点を足す」のタブの「2. 穴を埋める」で埋められます。'); return; }
   // 2. 埋める（画面のサーバーと同じ引数で paint.mjs を呼ぶ）
   const withLayout = a.fill === 'nvscodex';
-  const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', (withLayout ? dream.LAYOUT_HINT : dream.FILL_HINT) + (typeof a.hint === 'string' && a.hint.trim() ? ' ' + a.hint.trim() : '')];
+  const argv = [path.join(ROOT, 'paint', 'paint.mjs'), 'fill', '--image', P('reproj'), '--mask', P('holes'), '--out', P('painted'), '--style', dream.fillStyle(D.cams).slice(0, 500), '--hint', (withLayout ? dream.LAYOUT_HINT : a.fill === 'codex' && holes > 0.97 * pixels ? dream.EMPTY_HINT : dream.FILL_HINT) + (typeof a.hint === 'string' && a.hint.trim() ? ' ' + a.hint.trim() : '')];
   // 穴が絵の 6 割を超える視点を Codex だけで描くときは、もとの絵を画風の見本として渡す（まわりに手がかりが少ないので）
   if (a.fill === 'codex' && holes > 0.6 * pixels) {
     const b = dream.baseView(D);
     argv.push('--style-ref', path.join(S.P, `${b.name}_painted.png`));
     // 地平線の高さ（目の高さ）を伝える：まわりに絵がほとんど無いと、高さの手がかりが無いので
-    if (!a.pitch) argv[argv.indexOf('--hint') + 1] += ` Almost the whole picture is empty here. The horizon (eye level of a standing adult on flat ground) must be at ${Math.round(100 * b.cy / b.H)}% of the image height from the top, as in style.png; the flat ground reaches the bottom edge.`;
+    if (!a.pitch) argv[argv.indexOf('--hint') + 1] += ` The horizon (eye level of a standing adult on flat ground) must be at ${Math.round(100 * b.cy / b.H)}% of the image height from the top, as in style.png; the flat ground reaches the bottom edge.`;
   }
   if (process.env.PAINT_CODEX) argv.push('--codex', process.env.PAINT_CODEX);
   if (a.fill === 'local') {
