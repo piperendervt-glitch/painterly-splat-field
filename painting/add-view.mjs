@@ -29,6 +29,7 @@
 //       auto なら、足す視点にいちばん近い、描き終わった視点。その場で回る列（40° → 60°）は、ひとつ前の視点から作るほうがずれが小さい
 //     --band <画素>  PC のモデルで描くとき（--fill local に --stipple か --strength、または --fill nvs --refine）、穴の縁の外側もその幅ぶん一緒に描き直し、
 //       帯の中でもとの絵へなだらかに戻す。穴の縁で調子が段になるのを消す（例：--band 12）
+//     --dot-match [割合]  描いてもらった穴の中の点が、穴の外より弱いとき（既定は 0.9 倍より下）、もとの絵の点の細かさを足して合わせる（ChatGPT の絵の点が弱い視点に）
 //     --draft  --layout の絵が、この道具で作った下書き（--fill local --stipple などで仕上げた同じ視点の絵）のときに付ける。Codex への文が、広い穴には下書きを写さず背景を描く頼み方に変わる
 //     --layout <絵>  すでにある下絵（穴を埋めた同じ視点の絵）を使って、Codex だけ動かす（--fill nvscodex のとき、別視点のモデルを呼ばない）
 //     --dry-run  Codex を呼ばず、送る文と条件の絵だけ作る（利用枠は減らない。視点は「穴あり」で残る）
@@ -215,6 +216,7 @@ async function main() {
     }
   }
   if (a.seam !== undefined) argv.push('--seam', String(a.seam));
+  if (a['dot-match'] !== undefined) { const b = dream.baseView(D); argv.push('--dot-match', ...(a['dot-match'] === true ? [] : [String(a['dot-match'])]), ...(a.stipple === undefined ? ['--stipple-source', path.join(S.P, `${b.name}_painted.png`), '--export-dir', S.E] : [])); }
   if (a.band !== undefined && a.band !== true) argv.push('--band', String(a.band));
   if (a['dry-run']) argv.push('--dry-run');
   const code = run(process.execPath, argv, path.join(ROOT, 'paint'));

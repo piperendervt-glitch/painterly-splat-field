@@ -307,8 +307,8 @@ async function runFill(o) {
   const wide = band > 0 ? widenMask(mask, original.width, original.height, band) : null;
   let bandFile = holesFile, banded = false;
   if (wide) { bandFile = path.join(workDir, 'holes-band.png'); writePng(bandFile, paintHoles(original, wide.wide)); }
-  const dots = (img) => {
-    if (!stip) return img;
+  const dots = (img, force = false, target = null) => {
+    if (!stip && !force) return img;
     const srcFile = typeof o['stipple-source'] === 'string' ? o['stipple-source'] : baseRef();
     if (!srcFile) throw new Error('--stipple には、点の見本の絵（--stipple-source <もとの絵>）が要ります');
     const source = readPng(srcFile); let exclude = null;
@@ -322,8 +322,8 @@ async function runFill(o) {
     let gain = o.stipple !== true && Number.isFinite(Number(o.stipple)) ? Math.max(0, Number(o.stipple)) : null, r;
     if (gain === null) {
       const allowed = new Uint8Array(source.width * source.height); for (let i = 0; i < allowed.length; i++) allowed[i] = exclude && exclude[i] ? 0 : 1;
-      const want = dotTexture(source, allowed); gain = 1;
-      for (let k = 0; k < 2; k++) { r = stipple(img, mask, source, { exclude, gain, seed: seed ?? 0 }); const got = dotTexture(r.image, mask); if (!(got > 0)) break; gain = Math.max(0.3, Math.min(2.5, gain * want / got)); }
+      const want = target ?? dotTexture(source, allowed); gain = 1;
+      for (let k = 0; k < (force ? 4 : 2); k++) { r = stipple(img, mask, source, { exclude, gain, seed: seed ?? 0 }); const got = dotTexture(r.image, mask); if (!(got > 0)) break; gain = Math.max(0.3, Math.min(2.5, gain * want / got)); }
       gain = +gain.toFixed(2);
     }
     r = stipple(img, mask, source, { exclude, gain, seed: seed ?? 0 });
@@ -395,6 +395,15 @@ async function runFill(o) {
   // PC のモデル（--local・--nvs だけ）の絵は、穴の外が何でもよい約束なので、合わせない
   const byCodex = !!given || repaint || !(nvs || local || o.plain), seam = o.seam !== undefined && o.seam !== true && Number.isFinite(Number(o.seam)) ? Math.max(0, Number(o.seam)) : 40;
   if (byCodex && !sky && !plate && seam > 0) generated = matchSeam(original, generated, mask, { radius: seam });
+  // --dot-match [割合]：描いてもらった穴の中の点が、もとの絵（穴の外）より弱いとき（既定は 0.9 倍より下）、もとの絵の点の細かさを足して合わせる（モデルなし）
+  if (o['dot-match'] !== undefined && !sky && !plate) {
+    // 合わせる先は穴の外の細かさ。穴の外がほとんど無い視点（絵の 5% より少ない）では、点の見本の絵の細かさ
+    const outside = mask.map((m) => (m ? 0 : 1)), few = mask.length - holes < 0.05 * mask.length, srcFile = typeof o['stipple-source'] === 'string' ? o['stipple-source'] : baseRef();
+    const want = few && srcFile ? dotTexture(readPng(srcFile)) : dotTexture(original, outside), got = dotTexture(composite(original, generated, mask), mask);
+    const ratio = o['dot-match'] !== true && Number.isFinite(Number(o['dot-match'])) ? Number(o['dot-match']) : 0.9;
+    if (got < ratio * want) { console.log(`  穴の中の点が弱い（${got.toFixed(2)}、穴の外は ${want.toFixed(2)}）ので、点を足します`); generated = dots(composite(original, generated, mask), true, want); }
+    else console.log(`  穴の中の点は足りています（${got.toFixed(2)}、穴の外は ${want.toFixed(2)}）。点は足しません`);
+  }
   const result = banded ? blendComposite(original, generated, wide.weight) : composite(original, generated, mask);
   if (banded) console.log(`  穴の縁の外側 ${band} 画素も一緒に描き直して、もとの絵へなだらかに戻しました`);
   else if (wide) console.log('  --band は、PC のモデルが目安の絵から描き直すとき（--init-strength・--refine）だけ効きます。今回は使っていません');
