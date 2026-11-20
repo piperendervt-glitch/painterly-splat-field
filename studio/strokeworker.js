@@ -30,7 +30,7 @@ self.onmessage = (e) => {
       A = analyze(tris, m.refs, opts);
       tree = makeTree(tris, m.tree || {});
       const ref = A.refs[0], W = ref.cam.W, H = ref.cam.H;
-      const types = [...A.types.entries()].map(([k, s]) => ({ kind: k, width: s.width, length: s.length, aspect: s.aspect, scale: s.scale, bristle: s.bristle, coh: s.cohMean, count: s.count, measured: s.measured, hist: Array.from(s.hist), phiHist: Array.from(s.phiHist), curves: s.curves }));
+      const types = [...A.types.entries()].map(([k, s]) => ({ kind: k, width: s.width, length: s.length, aspect: s.aspect, scale: s.scale, dot: s.dot || 0, fine: s.fine, coarse: s.coarse, bristle: s.bristle, coh: s.cohMean, count: s.count, measured: s.measured, hist: Array.from(s.hist), phiHist: Array.from(s.phiHist), curves: s.curves }));
       const models = {};
       for (const [k, md] of A.models) models[k] = { coef: md.coef, count: md.count, bank: md.bank.filter((_, i) => i % Math.max(1, Math.floor(md.bank.length / 24)) === 0).slice(0, 24) };
       if (A.sky) models.sky = { coef: A.sky.coef, count: A.sky.count, bank: A.sky.bank.filter((_, i) => i % Math.max(1, Math.floor(A.sky.bank.length / 24)) === 0).slice(0, 24) };

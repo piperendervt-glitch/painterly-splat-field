@@ -8,8 +8,7 @@
 import * as THREE from 'three/webgpu';
 import { attribute, positionGeometry, cameraPosition, cameraViewMatrix, uniform, vec2, vec3, vec4, float, normalize, cross, dot, mix, step, cos, sin, texture, abs, clamp, pow, max, atan, fract, varying } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { buildScene, EXPORT } from '../previz/scene.js';
-import { labelScene } from '../previz/gbuffer.js';
+import { loadScene } from './strokescene.js';
 import { TYPES, hexToRgb } from '../shared/labels.js';
 import { createWalk } from './walk.js';
 import { brushAtlas, BRUSH_N } from './brushtex.js';
@@ -32,54 +31,7 @@ const PAINTS = { painted: { sfx: '', name: '最初の絵' }, painted_flat: { sfx
 
 let app = null, worker = null, summary = null, maps = null, cams = [], paintings = new Map(), gen = 0;
 
-// ---- 形とカメラ ----
-function bakeScene() {
-  const scene = buildScene(), labels = labelScene(scene), pos = [], nrm = [], type = [], object = [];
-  const v = new THREE.Vector3();
-  for (const s of labels.solids) {
-    const g = s.mesh.geometry.index ? s.mesh.geometry.toNonIndexed() : s.mesh.geometry;
-    const P = g.attributes.position, N = g.attributes.normal, m = s.mesh.matrixWorld, nm = new THREE.Matrix3().getNormalMatrix(m);
-    for (let i = 0; i < P.count; i++) {
-      v.fromBufferAttribute(P, i).applyMatrix4(m); pos.push(v.x, v.y, v.z);
-      v.fromBufferAttribute(N, i).applyMatrix3(nm).normalize(); nrm.push(v.x, v.y, v.z);
-      if (i % 3 === 0) { type.push(s.typeId); object.push(s.objectId); }
-    }
-  }
-  const tris = { n: type.length, pos: Float32Array.from(pos), nrm: Float32Array.from(nrm), type: Uint8Array.from(type), object: Uint16Array.from(object) };
-  tris.sharp = sharpEdges(tris);
-  return { scene, labels, tris };
-}
-// 三角形の辺のうち、形の角（となりの面と 35° 以上折れている辺・となりの無い辺）に印を付ける（3 bit / 三角形）。
-// 角のそばの筆跡は、角に沿う向きに寄せて、角からはみ出さないようにする（shared/strokefield.js）
-function sharpEdges(tris) {
-  const q = (o) => `${Math.round(tris.pos[o] * 1000)},${Math.round(tris.pos[o + 1] * 1000)},${Math.round(tris.pos[o + 2] * 1000)}`;
-  const faceN = (t) => { const o = t * 9, a = new THREE.Vector3().fromArray(tris.pos, o), b = new THREE.Vector3().fromArray(tris.pos, o + 3), c = new THREE.Vector3().fromArray(tris.pos, o + 6); return b.sub(a).cross(c.sub(a)).normalize(); };
-  const edges = new Map(), normals = [];
-  for (let t = 0; t < tris.n; t++) {
-    normals.push(faceN(t));
-    for (let k = 0; k < 3; k++) { const a = q(t * 9 + k * 3), b = q(t * 9 + ((k + 1) % 3) * 3), key = a < b ? a + '|' + b : b + '|' + a; if (!edges.has(key)) edges.set(key, []); edges.get(key).push(t * 3 + k); }
-  }
-  const sharp = new Uint8Array(tris.n), cos35 = Math.cos(35 * Math.PI / 180);
-  for (const list of edges.values()) {
-    for (const e of list) {
-      const t = Math.floor(e / 3), others = list.filter((x) => Math.floor(x / 3) !== t);
-      if (!others.length || others.every((x) => normals[t].dot(normals[Math.floor(x / 3)]) < cos35)) sharp[t] |= 1 << (e % 3);
-    }
-  }
-  return sharp;
-}
-async function loadCams() {
-  let list = EXPORT.cameras.map((c) => ({ name: c.name, position: c.position, target: c.target, W: EXPORT.width, H: EXPORT.height, fov: EXPORT.fovY }));
-  try { // プレビズの書き出し（足した視点も入る）があれば、そちらの一覧を使う
-    const r = await fetch('/files/previz-export/cameras.json', { cache: 'no-store' });
-    if (r.ok) { const j = await r.json(); list = j.views.filter((v) => v.extrinsics && v.extrinsics.target).map((v) => ({ name: v.name, position: v.extrinsics.position, target: v.extrinsics.target, W: v.width, H: v.height, fov: v.intrinsics.fov_y_deg })); }
-  } catch { /* 無ければ previz/scene.js の 2 視点 */ }
-  return list.map((c) => {
-    const cam = new THREE.PerspectiveCamera(c.fov, c.W / c.H, 0.1, 5000); cam.position.fromArray(c.position); cam.lookAt(...c.target); cam.updateMatrixWorld(true);
-    const fy = c.H / 2 / Math.tan(c.fov * Math.PI / 360);
-    return { ...c, three: cam, cam: { W: c.W, H: c.H, fx: fy, fy, cx: c.W / 2, cy: c.H / 2, view: Array.from(cam.matrixWorldInverse.elements), pos: c.position } };
-  });
-}
+// ---- 形とカメラ（studio/strokescene.js） ----
 async function loadPainting(name, key) {
   const id = `${name}${PAINTS[key].sfx}`; if (paintings.has(id)) return paintings.get(id);
   let out = null;
@@ -124,11 +76,14 @@ function strokeMaterial(tex, sky) {
   // 立てる筆：絵の上の傾き（画面の向き D）で根元から立ち、板はカメラの方を向く
   const tUp2 = normalize(D.mul(step(0, dot(D, n)).mul(2).sub(1)).add(n.mul(0.35))); // D を面の外向き（上）へそろえ、少し立てる
   const bUp = normalize(cross(tUp2, toCam));
-  const stand = sky ? float(0) : texture(tex.types, vec2(M.x.add(0.5).div(16), 0.5)).a.mul(uStand);
-  const t = mix(tF, tUp2, stand), b = mix(bF, bUp, stand);
+  const stand = sky ? float(0) : texture(tex.types, vec2(M.x.add(0.5).div(16), 0.5)).a.mul(uStand).mul(step(M.z, 7.5)); // 点（筆の形 8 番から）は立てない
+  // 点（点描の一筆。筆の形 8 番から）：面に寝かせず、いつもカメラの方を向く丸。斜めに見た地面でも、絵と同じ大きさの点に見える
+  const dab = sky ? float(0) : step(7.5, M.z);
+  const tDab = normalize(cross(up, toCam)), bDab = cross(toCam, tDab);
+  const t = mix(mix(tF, tUp2, stand), tDab, dab), b = mix(mix(bF, bUp, stand), bDab, dab);
   // 立てる筆の高さ：地面を浅い角度で見るほど低くする（遠くの草が、地平線より上へ伸びて物の足元を隠さないように）
   const lenS = len.mul(mix(float(1), clamp(dot(n, toCam).abs().sqrt().mul(1.8), 0.12, 1), stand));
-  const base = mix(vec3(0), t.mul(lenS.mul(0.5)), stand); // 立てる筆は根元を地面に
+  const base = mix(vec3(0), t.mul(lenS.mul(0.5)), stand).add(n.mul(width.mul(0.5)).mul(dab)); // 立てる筆は根元を地面に。点は半分だけ面から浮かせる（面に埋まらないように）
   const show = sky ? float(1) : max(step(-0.05, dot(n, toCam)), stand); // 裏を向いた面の筆跡は描かない
   const lift = sky ? vec3(0) : toCam.mul(K.w.mul(width).mul(uLayer)); // 後から塗った筆ほど手前（同じ面の上の重なりの順番）
   const pos = center.add(base).add(lift).add(t.mul(corner.x.mul(lenS))).add(b.mul(corner.y.mul(width)));
@@ -174,7 +129,7 @@ function nodeOf(key) {
   return n;
 }
 const _v = new THREE.Vector3(), _c = new THREE.Vector3(), _box = new THREE.Box3(), _frustum = new THREE.Frustum(), _m = new THREE.Matrix4();
-function pxPerMeter() { const a = app; return a.canvasH / (2 * Math.tan(THREE.MathUtils.degToRad(a.camera.fov) / 2)); }
+function pxPerMeter() { const a = app; return a.canvasH * (a.focalScale || 1) / (2 * Math.tan(THREE.MathUtils.degToRad(a.camera.fov) / 2)); }
 function targetPx() { return summary.ref.width * (app.canvasH / summary.ref.H) * ui.brush; }
 function select() {
   const a = app, tree = summary.tree, cam = a.camera.position, f = pxPerMeter(), target = targetPx() * Math.SQRT2, now = performance.now();
@@ -190,7 +145,13 @@ function select() {
     const d = Math.max(0.05, _box.distanceToPoint(cam));
     // 平らな箱を斜めに見るときは、筆跡が画面の上でつぶれて小さく見えるので、そのぶん粗い段で足りる（面積で √cos）
     let tilt = 1;
-    if (ui.tilt && n.flat && n.flat.k > 0.85) { _v.copy(_box.getCenter(_c)).sub(cam).normalize(); tilt = Math.max(0.2, Math.sqrt(Math.abs(_v.x * n.flat.n[0] + _v.y * n.flat.n[1] + _v.z * n.flat.n[2]))); }
+    n.frac = 1;
+    if (ui.tilt && n.flat && n.flat.k > 0.85) {
+      _v.copy(_box.getCenter(_c)).sub(cam).normalize(); const cos = Math.abs(_v.x * n.flat.n[0] + _v.y * n.flat.n[1] + _v.z * n.flat.n[2]);
+      // 点（いつもカメラの方を向く）は、斜めに見ても画面の上で小さくならない。段は粗くせず、同じ面積に重なりすぎるぶん、描く数を減らす（筆跡は箱の中で順不同なので、先頭から何割かを描けば一様に間引ける）
+      if (n.flat.dab > 0.5) { if (d > s) n.frac = Math.min(1, Math.max(0.12, cos * 1.6)); }
+      else tilt = Math.max(0.2, Math.sqrt(cos));
+    }
     const px = nodeWidth(tree, n.l) * f / d * tilt;
     if (n.mask && px > target && n.l < tree.maxLevel && !ui.freeze) {
       const kids = []; for (let c = 0; c < 8; c++) if (n.mask & (1 << c)) kids.push(nodeKey(n.l + 1, n.x * 2 + (c & 1), n.y * 2 + ((c >> 1) & 1), n.z * 2 + ((c >> 2) & 1)));
@@ -232,12 +193,13 @@ function clearNodes() { for (const n of [...nodes.values()]) dropNode(n); nodes.
 // ---- 始める ----
 async function start() {
   say('形と絵を読んでいます…');
-  const baked = bakeScene();
-  cams = await loadCams();
+  const baked = await loadScene();
+  cams = baked.cams;
+  if (!cams.some((c) => ui.refs.includes(c.name))) ui.refs = [cams[0].name];
   const refs = [];
   for (const name of ui.refs) {
     const c = cams.find((x) => x.name === name), p = c && await loadPainting(name, ui.paint);
-    if (p) refs.push({ name, cam: c.cam, rgba: rgbaOf(p.bmp, c.W, c.H) });
+    if (p) refs.push({ name, cam: c.cam, rgba: rgbaOf(p.bmp, c.W, c.H), mask: c.mask || null });
   }
   for (const c of cams) await loadPainting(c.name, ui.paint); // 見比べ用（参照に使わない視点の絵も）
   setupViewButtons();
@@ -272,7 +234,7 @@ async function makeApp(baked) {
   const under = new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 });
   const ug = new THREE.BufferGeometry(); ug.setAttribute('position', new THREE.BufferAttribute(baked.tris.pos, 3)); ug.setAttribute('color', new THREE.BufferAttribute(new Float32Array(baked.tris.n * 9).fill(0.3), 3));
   a.under = new THREE.Mesh(ug, under); a.under.frustumCulled = false;
-  a.walk = createWalk(scene, baked.labels.solids, baked.labels.objects);
+  a.walk = createWalk(scene, baked.solids, baked.objects);
   a.boxes = new THREE.Group();
   scene.add(a.under, a.strokes, a.boxes);
   jump(cams[0] ? cams[0].name : null);
@@ -292,7 +254,7 @@ function frame() {
   const a = app, draw = select();
   for (const n of nodes.values()) if (n.mesh) n.mesh.visible = false;
   let strokes = 0; const levels = new Map();
-  for (const n of draw) if (n.mesh) { n.mesh.visible = true; strokes += n.count; levels.set(n.l, (levels.get(n.l) || 0) + n.count); }
+  for (const n of draw) if (n.mesh) { n.mesh.visible = true; const c = Math.max(1, Math.round(n.count * (n.frac || 1))); n.mesh.geometry.instanceCount = c; strokes += c; levels.set(n.l, (levels.get(n.l) || 0) + c); }
   pump();
   lastSel = { drawn: draw.length, strokes, levels: [...levels].sort((x, y) => x[0] - y[0]), want: queue.size + busy };
   $('sStrokes').textContent = `${(strokes / 10000).toFixed(1)} 万本（箱 ${draw.length}）`;
@@ -364,14 +326,18 @@ function layout() {
   Object.assign(view.style, { width: w + 'px', height: h + 'px', left: Math.round((W - w) / 2) + 'px', top: Math.round((H - h) / 2) + 'px' });
   a.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1)); a.renderer.setSize(w, h, false);
   a.canvasH = h * a.renderer.getPixelRatio();
-  a.camera.aspect = w / h; a.camera.updateProjectionMatrix();
+  // 絵と比べるときだけ、絵のカメラの枠（光軸が絵のまん中に無い場面は、大きな対称の枠の一部）に合わせる
+  const locked = (ui.compare !== 'off' || ui.page === 'analysis') && c;
+  if (locked && c.offset) { a.camera.setViewOffset(...c.offset); a.camera.aspect = c.offset[0] / c.offset[1]; a.camera.fov = c.fovFull; a.focalScale = c.offset[1] / c.H; }
+  else { a.camera.clearViewOffset(); a.camera.aspect = w / h; if (c) a.camera.fov = c.fovPlain; a.focalScale = 1; }
+  a.camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', layout);
 
 function jump(name) {
   const a = app, c = cams.find((x) => x.name === name); if (!a || !c) return;
   cmpView = name;
-  a.camera.position.fromArray(c.position); a.camera.fov = c.fov; a.controls.target.fromArray(c.target); a.camera.lookAt(...c.target); a.camera.updateProjectionMatrix();
+  c.apply(a.camera); a.controls.target.fromArray(c.target); 
   const p = paintings.get(`${name}${PAINTS[ui.paint].sfx}`);
   $('cmpImg').src = p ? p.url : '';
   $('cmpNote').textContent = p ? (ui.refs.includes(name) ? `${name} は参照に使っている絵です（写した色がそのまま出る視点）。` : `${name} は参照に使っていない絵です（答え合わせ用。筆跡はこの絵を見ていません）。`) : `${name} の「${PAINTS[ui.paint].name}」はまだありません。`;
@@ -442,7 +408,7 @@ function showStats() {
   }).join('');
   $('typeStats').innerHTML = rows;
   const sw = Object.entries(summary.models).filter(([k]) => k.startsWith('o') || k === 'sky').map(([k, md]) => {
-    const name = k === 'sky' ? '空' : ((app.baked.labels.objects.find((o) => 'o' + o.id === k) || {}).name || k);
+    const name = k === 'sky' ? '空' : ((app.baked.objects.find((o) => 'o' + o.id === k) || {}).name || k);
     const dirs = k === 'sky' ? [[0, 0.05, -1], [0, 0.4, -1], [0, 1, 0], [1, 0.2, 0], [0, 0.2, 1]] : [[0, 0, 1], [1, 0, 0], [-1, 0, 0], [0, 0, -1], [0, 1, 0]];
     const cells = dirs.map((d) => { const c = [0, 1, 2].map((i) => Math.round(255 * Math.min(1, Math.max(0, md.coef[0][i] + md.coef[1][i] * d[0] + md.coef[2][i] * d[1] + md.coef[3][i] * d[2])))); return `<i style="background:rgb(${c})"></i>`; }).join('');
     const bank = md.bank.map((b) => { const c = [0, 1, 2].map((i) => Math.round(255 * Math.min(1, Math.max(0, md.coef[0][i] + b[i])))); return `<i style="background:rgb(${c})"></i>`; }).join('');

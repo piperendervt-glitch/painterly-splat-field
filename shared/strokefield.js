@@ -12,7 +12,8 @@
 //
 // カメラ：{ W, H, fx, fy, cx, cy, view（ワールド → カメラの 4×4、列ごと = THREE の matrixWorldInverse.elements）, pos }
 //   カメラは -Z を向き、+Y が上。画素の y は下向き。
-import { measureStrokes, blurColor, angleFromHist, ANGLE_BINS } from './brushstats.js';
+import { pullPush } from '../studio/layers.js';
+import { measureStrokes, blur, blurColor, angleFromHist, ANGLE_BINS } from './brushstats.js';
 
 export const SRC = { painted: 0, synth: 1 };
 const UP = [0, 1, 0];
@@ -115,7 +116,7 @@ export function analyze(tris, refs, opts = {}) {
     const kind = new Uint8Array(W * H), object = new Uint16Array(W * H);
     for (let i = 0; i < W * H; i++) { const t = r.tri[i]; kind[i] = t < 0 ? 0 : tris.type[t]; object[i] = t < 0 ? 0 : tris.object[t]; }
     const strokes = measureStrokes(ref.rgba, W, H, kind);
-    const col = blurColor(ref.rgba, W, H, 1.2);
+    const col = blurColor(ref.rgba, W, H, strokes.all && strokes.all.dot > 0.5 ? 0.55 : 1.2); // 点描は、点ごとの色の違いが絵の持ち味なので、ほとんどぼかさない
     // 物の境目・奥行きの境目のそば（色が背景とまざっている）を印にする
     const edge = new Uint8Array(W * H), R = 3;
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -126,13 +127,20 @@ export function analyze(tris, refs, opts = {}) {
         if (object[j] !== object[i] || kind[j] !== kind[i] || (r.z[i] && Math.abs(r.z[j] - r.z[i]) > 0.03 * r.z[i] + 0.05)) { edge[i] = 1; break; }
       }
     }
-    out.refs.push({ ...ref, ...r, kind, object, field: strokes.field, col, edge, strokes });
+    // 粗い色（点ごとの違いをならした色）と、背景だけの色（物の所を、まわりの背景の色からなめらかに埋めたもの。物に隠れた背景の色に使う）
+    const coarse = col.map((ch) => blur(ch, W, H, 3));
+    let plate = null;
+    if (ref.mask) {
+      const known = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) known[i] = ref.mask.object[i] === 0 && object[i] === 0 && r.tri[i] >= 0 ? 1 : 0;
+      plate = col.map((ch) => blur(pullPush(ch, known, W, H), W, H, 3));
+    }
+    out.refs.push({ ...ref, ...r, kind, object, field: strokes.field, col, coarse, plate, edge, strokes });
   }
   // 種類ごとの筆跡（参照の絵が何枚かあれば、画素の多い絵の値を使う）
   for (const ref of out.refs) for (const [k, s] of ref.strokes.byKind) { const old = out.types.get(k); if (!old || old.count < s.count) out.types.set(k, { ...s }); }
   const all = out.refs[0].strokes.all;
   out.ref = { width: all ? all.width : 4, length: all ? all.length : 16, H: out.refs[0].cam.H };
-  for (const s of out.types.values()) { s.scale = Math.min(3, Math.max(0.4, s.width / out.ref.width)); s.aspect = Math.min(8, Math.max(1.2, s.length / Math.max(0.5, s.width))); s.phiHist = new Float64Array(ANGLE_BINS); }
+  for (const s of out.types.values()) { s.scale = Math.min(3, Math.max(0.4, s.width / out.ref.width)); s.aspect = Math.min(8, Math.max(1, s.length / Math.max(0.5, s.width))); s.phiHist = new Float64Array(ANGLE_BINS); }
   learnModels(tris, out, opts);
   return out;
 }
@@ -161,7 +169,14 @@ function makeModel(rows, lam, seed) {
     bank.push([r.c[0] - g[0], r.c[1] - g[1], r.c[2] - g[2]]); lums.push(lumOf(r.c));
   }
   bank.sort((a, b) => lumOf(a) - lumOf(b)); lums.sort((a, b) => a - b);
-  return { coef, bank, count: rows.length, lumLo: lums[Math.floor(lums.length * 0.01)] || 0, lumHi: lums[Math.floor(lums.length * 0.99)] || 1 };
+  // 点描用に、揺らぎを 2 つに分ける：粗い揺らぎ（日なた・日かげのような、広い範囲の色の違い。暗い順）と、細かい揺らぎ（点ごとの色の違い。順不同）
+  const low = [], fine = [];
+  if (rows[0] && rows[0].f) for (let k = 0; k < Math.min(4096, rows.length * 2); k++) {
+    const r = rows[Math.floor(R() * rows.length)], g = evalLinear(coef, r.x);
+    low.push([r.c[0] - r.f[0] - g[0], r.c[1] - r.f[1] - g[1], r.c[2] - r.f[2] - g[2]]); fine.push(r.f);
+  }
+  low.sort((a, b) => lumOf(a) - lumOf(b));
+  return { coef, bank, low, fine, count: rows.length, lumLo: lums[Math.floor(lums.length * 0.01)] || 0, lumHi: lums[Math.floor(lums.length * 0.99)] || 1 };
 }
 export function evalLinear(coef, x) { return [0, 1, 2].map((c) => coef[0][c] + coef[1][c] * x[0] + coef[2][c] * x[1] + coef[3][c] * x[2]); }
 
@@ -190,9 +205,9 @@ function learnModels(tris, A, { lam = 0.15, seed = 3 } = {}) {
     for (let y = 1; y < H - 1; y += 2) for (let x = (y >> 1) & 1; x < W; x += 2) {
       const i = y * W + x;
       if (ref.edge[i]) continue;
-      const c = [ref.col[0][i], ref.col[1][i], ref.col[2][i]];
+      const c = [ref.col[0][i], ref.col[1][i], ref.col[2][i]], f = [c[0] - ref.coarse[0][i], c[1] - ref.coarse[1][i], c[2] - ref.coarse[2][i]];
       if (ref.tri[i] < 0) {
-        const d = rayDir(ref.cam, x + 0.5, y + 0.5); sky.push({ x: d, c });
+        const d = rayDir(ref.cam, x + 0.5, y + 0.5); sky.push({ x: d, c, f });
         const coh = ref.field.coh[i], st = A.types.get(0); if (coh < 0.15 || !st) continue;
         const th = ref.field.theta[i], d2 = rayDir(ref.cam, x + 0.5 + 4 * Math.cos(th), y + 0.5 + 4 * Math.sin(th)), nn = [-d[0], -d[1], -d[2]], u = dot(d2, nn);
         const t = norm([d2[0] - u * nn[0], d2[1] - u * nn[1], d2[2] - u * nn[2]]), [e1, e2] = surfaceFrame(nn, [1, 0, 0]);
@@ -200,7 +215,7 @@ function learnModels(tris, A, { lam = 0.15, seed = 3 } = {}) {
         st.phiHist[Math.min(ANGLE_BINS - 1, Math.floor(phi / Math.PI * ANGLE_BINS))] += coh;
         continue;
       }
-      const n = [ref.nrm[i * 3], ref.nrm[i * 3 + 1], ref.nrm[i * 3 + 2]], row = { x: n, c };
+      const n = [ref.nrm[i * 3], ref.nrm[i * 3 + 1], ref.nrm[i * 3 + 2]], row = { x: n, c, f };
       const o = ref.object[i], k = ref.kind[i];
       if (!byObj.has(o)) byObj.set(o, []); byObj.get(o).push(row);
       if (!byType.has(k)) byType.set(k, []); byType.get(k).push(row);
@@ -223,12 +238,14 @@ function learnModels(tris, A, { lam = 0.15, seed = 3 } = {}) {
 function camForward(cam) { const m = cam.view; return norm([-m[2], -m[6], -m[10]]); }
 
 /** 物体 → 種類 → 全体 の順に、ある色の決まりを返す。 */
-export function modelFor(A, object, type) { return A.models.get('o' + object) || A.models.get('t' + type) || A.models.get('all'); }
+export function modelFor(A, object, type) { return (object ? A.models.get('o' + object) : null) || A.models.get('t' + type) || A.models.get('all'); }
 
 /** 学んだ決まりからの色（写っていない所）：陰影の 1 次式 + 揺らぎの見本（u = 0〜1 で、暗い見本〜明るい見本） */
-export function synthColor(model, x, u, out = [0, 0, 0]) {
-  const g = evalLinear(model.coef, x), b = model.bank[Math.min(model.bank.length - 1, Math.max(0, Math.floor(u * model.bank.length)))] || [0, 0, 0];
+export function synthColor(model, x, u, out = [0, 0, 0], fineU = -1) {
+  const two = fineU >= 0 && model.low && model.low.length > 0, src = two ? model.low : model.bank;
+  const g = evalLinear(model.coef, x), b = src[Math.min(src.length - 1, Math.max(0, Math.floor(u * src.length)))] || [0, 0, 0];
   let c = [g[0] + b[0], g[1] + b[1], g[2] + b[2]];
+  if (two) { const f = model.fine[Math.min(model.fine.length - 1, Math.floor(fineU * model.fine.length))]; c = [c[0] + f[0], c[1] + f[1], c[2] + f[2]]; }
   const L = lumOf(c), lo = model.lumLo, hi = model.lumHi;
   if (L > hi && L > 1e-4) c = c.map((v) => v * hi / L); else if (L < lo) c = c.map((v) => v + (lo - L));
   out[0] = Math.min(1, Math.max(0, c[0])); out[1] = Math.min(1, Math.max(0, c[1])); out[2] = Math.min(1, Math.max(0, c[2]));
@@ -288,19 +305,35 @@ export function trisInBox(tris, list, lo, s, margin = 0) {
 export const STROKE_ATTRS = ['P', 'N', 'T', 'K', 'M', 'G'];
 export const OBJECT_ATTR = 'O'; // 物体の札（書き出し用。描画では使わない）
 
+const NEAR = []; for (let r = 1; r <= 6; r++) for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) NEAR.push([a * r, b * r]); // 近い順に 8 方向
 /** 参照の絵のうち、この点がいちばんよく写っているもの。[q（0〜1）, 色, 画像の上の筆の角度, はっきりさ, 面の上の筆の向き] */
-export function paintedAt(A, p, n, out) {
-  let best = 0, wsum = 0; const c = [0, 0, 0]; out.theta = 0; out.coh = 0; out.t = null; out.q = 0;
+export function paintedAt(A, p, n, out, object = -1) {
+  let best = 0, wsum = 0; const c = [0, 0, 0]; out.theta = 0; out.coh = 0; out.t = null; out.q = 0; out.plate = null;
   for (const ref of A.refs) {
     const pr = project(ref.cam, p); if (!pr) continue;
     const [x, y, d] = pr, { W, H } = ref.cam; if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) continue;
     const i = Math.floor(y) * W + Math.floor(x), zr = ref.z[i];
-    if (!zr || Math.abs(zr - d) > 0.02 * d + 0.08) continue; // 手前に別の物がある（隠れている）
+    if (!zr) continue;
+    if (ref.plate && object === 0 && ref.mask.object[i] !== 0 && d > zr - 0.02 * d - 0.08) { // 背景が、絵の上では物に隠れている
+      let near = false; const fx = Math.floor(x), fy = Math.floor(y);
+      for (const [dx, dy] of NEAR) { const xx = fx + dx, yy = fy + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H && ref.mask.object[yy * W + xx] === 0) { near = true; break; } }
+      if (!near) { out.plate = [ref.plate[0][i], ref.plate[1][i], ref.plate[2][i]]; continue; }
+    }
+    // 手前に別の物がある（隠れている）なら使わない。絵から組んだ物（札の絵がある）で、その画素のいちばん手前が同じ物なら、奥行きのずれは大目に見る（奥行きのがたつく物でも、表側は絵に写っている）
+    const same = ref.mask && object > 0 && ref.object[i] === object;
+    if (Math.abs(zr - d) > (same ? 0.1 * d + 0.5 : 0.02 * d + 0.08)) continue;
+    // 絵のその画素が別の物（形と絵の輪郭のずれ）なら、すぐそばの同じ物の画素の色を借りる。無ければ使わない
+    let ci = i, near = 1;
+    if (ref.mask && object >= 0 && ref.mask.object[i] !== object) {
+      ci = -1; const fx = Math.floor(x), fy = Math.floor(y);
+      for (const [dx, dy] of NEAR) { const xx = fx + dx, yy = fy + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; if (ref.mask.object[yy * W + xx] === object) { ci = yy * W + xx; break; } }
+      if (ci < 0) continue; near = 0.9;
+    }
     const v = norm([ref.cam.pos[0] - p[0], ref.cam.pos[1] - p[1], ref.cam.pos[2] - p[2]]), cos = dot(v, n);
-    let q = smooth(0.04, 0.3, cos); if (q <= 0) continue;
-    if (ref.edge[i]) q *= 0.35; // 境目のそば：色が背景とまざっている
+    let q = (ref.mask ? smooth(0.0005, 0.004, cos) : smooth(0.04, 0.3, cos)) * near; if (q <= 0) continue; // 絵から組んだ場面（札の絵がある）では、浅い角度で見えている面も写す（点描の 1 筆は絵の 1 点の色を取るだけ）。それ以外は、浅い角度の面は学んだ色へ寄せる
+    if (ref.edge[i]) q *= ref.mask ? 0.85 : 0.35; // 境目のそば：色が背景とまざっている（物体の札の絵がある場面では、札で分けているので弱く）
     const w = q * q; wsum += w;
-    c[0] += ref.col[0][i] * w; c[1] += ref.col[1][i] * w; c[2] += ref.col[2][i] * w;
+    c[0] += ref.col[0][ci] * w; c[1] += ref.col[1][ci] * w; c[2] += ref.col[2][ci] * w;
     if (q > best) { best = q; out.theta = ref.field.theta[i]; out.coh = ref.field.coh[i]; out.t = paintedTangent(ref.cam, x, y, out.theta, p, n); }
   }
   if (wsum > 0) { out.color = [c[0] / wsum, c[1] / wsum, c[2] / wsum]; out.q = best; }
@@ -320,7 +353,7 @@ export function generateNode(tris, A, tree, key, list, opts = {}) {
   const right = camRight(A.refs[0].cam);
   const cols = { P: [], N: [], T: [], K: [], M: [], G: [], O: [] };
   const pa = {}, syn = [0, 0, 0];
-  let count = 0;
+  let count = 0, dabs = 0;
   for (const t of list) {
     const poly = clipTriToBox(tris, t, lo, s); if (!poly) continue;
     const type = tris.type[t], object = tris.object[t], st = A.types.get(type) || A.types.get(1) || [...A.types.values()][0];
@@ -340,10 +373,17 @@ export function generateNode(tris, A, tree, key, list, opts = {}) {
         let tw = [f1[0] * Math.cos(phi) + f2[0] * Math.sin(phi), f1[1] * Math.cos(phi) + f2[1] * Math.sin(phi), f1[2] * Math.cos(phi) + f2[2] * Math.sin(phi)];
         let screen = angleFromHist(st.hist, Math.min(0.999, Math.max(0, fbm(p, 23, length * 2) + (R() - 0.5) * 0.12)));
         // 色：学んだ決まりから
-        synthColor(model, n, Math.min(1, Math.max(0, fbm(p, 37, length) + (R() - 0.5) * 0.25)), syn);
+        // 点描（dot が 1 に近い）ほど、隣どうしの色をばらばらにする（点ごとに違う色を置く塗り方）
+        // 点描（dot が 1 に近い）：広い範囲の色（日なた・日かげ）は場所でなめらかに選び、点ごとの色の違いは別の見本からばらばらに足す
+        const isDot = (st.dot || 0) > 0.5, fineU = isDot ? R() : -1;
+        if (isDot) synthColor(model, n, Math.min(1, Math.max(0, fbm(p, 37, 0.7) + (R() - 0.5) * 0.1)), syn, fineU);
+        else synthColor(model, n, Math.min(1, Math.max(0, fbm(p, 37, length) + (R() - 0.5) * 0.25)), syn);
         let col = syn, q = 0;
-        paintedAt(A, p, n, pa);
-        if (pa.q > 0 && paintedMix > 0) {
+        paintedAt(A, p, n, pa, object);
+        if (pa.q === 0 && pa.plate && paintedMix > 0) { // 物に隠れた背景：まわりの背景の色からなめらかに埋めた色に、点ごとの色の違いを足す
+          const f = isDot && model.fine && model.fine.length ? model.fine[Math.floor(fineU * model.fine.length)] : [0, 0, 0];
+          col = [0, 1, 2].map((i) => Math.min(1, Math.max(0, syn[i] + (pa.plate[i] + f[i] - syn[i]) * paintedMix))); q = 0.5 * paintedMix;
+        } else if (pa.q > 0 && paintedMix > 0) {
           q = pa.q * paintedMix;
           col = [0, 1, 2].map((i) => syn[i] + (pa.color[i] - syn[i]) * q);
           const wt = q * smooth(0.1, 0.4, pa.coh) * orientMix;
@@ -371,16 +411,21 @@ export function generateNode(tris, A, tree, key, list, opts = {}) {
         }
         const sh = shadeColor(model, n);
         cols.P.push(p[0], p[1], p[2], width); cols.N.push(n[0], n[1], n[2], length); cols.T.push(tw[0], tw[1], tw[2], screen);
-        cols.K.push(col[0], col[1], col[2], R()); cols.M.push(type, q, Math.floor(R() * 8), l); cols.G.push(sh[0], sh[1], sh[2], st.bristle); cols.O.push(object);
-        count++;
+        cols.K.push(col[0], col[1], col[2], R()); cols.M.push(type, q, Math.floor(R() * 8) + ((st.dot || 0) > 0.5 ? 8 : 0), l); cols.G.push(sh[0], sh[1], sh[2], st.bristle); cols.O.push(object);
+        count++; if ((st.dot || 0) > 0.5) dabs++;
       }
     }
   }
-  const arrays = {}; for (const k of STROKE_ATTRS) arrays[k] = Float32Array.from(cols[k]); arrays.O = Uint16Array.from(cols.O);
+  // 筆跡の順番をまぜる（先頭から何割かだけ描いても、箱の中で一様な間引きになるように）
+  const order = Uint32Array.from({ length: count }, (_, i) => i);
+  for (let i = count - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)), t = order[i]; order[i] = order[j]; order[j] = t; }
+  const arrays = {};
+  for (const k of STROKE_ATTRS) { const src = cols[k], a = new Float32Array(count * 4); for (let i = 0; i < count; i++) { const o = order[i] * 4; a[i * 4] = src[o]; a[i * 4 + 1] = src[o + 1]; a[i * 4 + 2] = src[o + 2]; a[i * 4 + 3] = src[o + 3]; } arrays[k] = a; }
+  arrays.O = new Uint16Array(count); for (let i = 0; i < count; i++) arrays.O[i] = cols.O[order[i]];
   // 箱の面の向きのそろい方（平均の向きと、その長さ。1 に近いほど平ら）。見る側が、斜めに見る平らな面を粗くするのに使う
   let nx = 0, ny = 0, nz = 0; for (let i = 0; i < count; i++) { nx += arrays.N[i * 4]; ny += arrays.N[i * 4 + 1]; nz += arrays.N[i * 4 + 2]; }
   const nl = Math.hypot(nx, ny, nz);
-  return { count, arrays, flat: count ? { n: [nx / (nl || 1), ny / (nl || 1), nz / (nl || 1)], k: nl / count } : null };
+  return { count, arrays, flat: count ? { n: [nx / (nl || 1), ny / (nl || 1), nz / (nl || 1)], k: nl / count, dab: dabs / count } : null }; // dab = 点（いつもカメラの方を向く筆）の割合
 }
 
 /** 子の箱のうち、形が掛かっているもの（8 bit）と、それぞれの三角形の一覧。 */
@@ -401,7 +446,7 @@ export function childLists(tris, tree, key, list) {
  *   P.xyz = 向き（長さ 1）、P.w = 幅（ラジアン）。N = 球の内向きの面の向き（-向き）、N.w = 長さ（ラジアン）
  */
 export function generateSky(A, opts = {}) {
-  const { coverage = 2.4, fill = 0.62, seed = 5, scale = 1, minElev = -0.12, orientMix = 1, paintedMix = 1, maxCount = 600000 } = opts;
+  const { coverage = 2.4, fill = 0.62, seed = 5, scale = 1, minElev = -0.12, orientMix = 1, paintedMix = 1, maxCount = 1500000 } = opts;
   const st = A.types.get(0), model = A.sky;
   if (!st || !model) return { count: 0, arrays: Object.fromEntries([...STROKE_ATTRS.map((k) => [k, new Float32Array(0)]), ['O', new Uint16Array(0)]]) };
   const ref0 = A.refs[0], width = st.width / ref0.cam.fy * scale, length = width * st.aspect;
@@ -413,7 +458,7 @@ export function generateSky(A, opts = {}) {
     const p = [d[0] * 40, d[1] * 40, d[2] * 40]; // ノイズ用の場所（半径 40 の球の上として）
     const phi = angleFromHist(st.phiHist, Math.min(0.999, Math.max(0, fbm(p, 11, 0) + (R() - 0.5) * 0.12)));
     let tw = [0, 1, 2].map((i) => f1[i] * Math.cos(phi) + f2[i] * Math.sin(phi)), screen = angleFromHist(st.hist, Math.min(0.999, Math.max(0, fbm(p, 23, 0) + (R() - 0.5) * 0.12)));
-    synthColor(model, d, Math.min(1, Math.max(0, fbm(p, 37, 0) + (R() - 0.5) * 0.25)), syn);
+    synthColor(model, d, Math.min(1, Math.max(0, fbm(p, 37, 0) + (R() - 0.5) * (0.25 + 0.75 * (st.dot || 0)))), syn);
     let col = syn.slice(), q = 0;
     for (const ref of A.refs) { // 絵に写っている空（形の無い画素）なら、その色と筆の向き
       const pr = projectDir(ref.cam, d); if (!pr) continue;
@@ -427,7 +472,7 @@ export function generateSky(A, opts = {}) {
     }
     const sh = shadeColor(model, d);
     cols.P.push(d[0], d[1], d[2], width); cols.N.push(nn[0], nn[1], nn[2], length); cols.T.push(tw[0], tw[1], tw[2], screen);
-    cols.K.push(col[0], col[1], col[2], R()); cols.M.push(0, q, Math.floor(R() * 8), 0); cols.G.push(sh[0], sh[1], sh[2], st.bristle); cols.O.push(0);
+    cols.K.push(col[0], col[1], col[2], R()); cols.M.push(0, q, Math.floor(R() * 8) + ((st.dot || 0) > 0.5 ? 8 : 0), 0); cols.G.push(sh[0], sh[1], sh[2], st.bristle); cols.O.push(0);
   }
   const arrays = {}; for (const k of STROKE_ATTRS) arrays[k] = Float32Array.from(cols[k]); arrays.O = Uint16Array.from(cols.O);
   return { count: n, arrays, width, length };

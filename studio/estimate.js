@@ -11,12 +11,13 @@ import { pullPush } from './layers.js';
  *   W, H        絵の大きさ
  *   bz          背景の奥行き（画素ごと。0 = 空）。手前の物の所は、物を消した後ろの奥行き
  *   fill        1 = 背景の奥行きが決まらなかった所（まわりから埋める）。無ければ null
+ *   behind      埋めた所の奥行きの下限（画素ごと。そこに写っている物の奥行き＋厚み）。無ければ null
  *   btype       背景の種類の札（画素ごと）
  *   c2w         カメラ → 世界（行ごとに並んだ 4x4）、intr = { fx, fy, cx, cy }
  *   step        何画素おきに頂点を置くか、maxZ = これより遠い所は作らない（m）、edge = 隣との奥行きの比（対数）がこれを超えたら面を張らない
  * 返すもの：{ positions（頂点 × 3）, indices（三角形 × 3）, triType（三角形ごとの種類）, gw, gh }
  */
-export function backgroundMesh({ W, H, bz, fill = null, btype, c2w, intr, step = 8, maxZ = 150, edge = 0.5 }) {
+export function backgroundMesh({ W, H, bz, fill = null, behind = null, btype, c2w, intr, step = 8, maxZ = 150, edge = 0.5 }) {
   const gw = Math.floor((W - 1) / step) + 1, gh = Math.floor((H - 1) / step) + 1, n = gw * gh;
   const lz = new Float32Array(n), known = new Uint8Array(n), hole = new Uint8Array(n), vt = new Uint8Array(n);
   for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
@@ -28,8 +29,11 @@ export function backgroundMesh({ W, H, bz, fill = null, btype, c2w, intr, step =
   const { fx, fy, cx, cy } = intr, m = c2w, positions = new Float32Array(n * 3), ok = new Uint8Array(n), zz = new Float32Array(n);
   for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
     const g = gy * gw + gx; if (!known[g] && !hole[g]) continue;
-    const z = Math.exp(filled[g]); if (!(z > 0) || z > maxZ) continue;
-    const x = Math.min(W - 1, gx * step), y = Math.min(H - 1, gy * step), xc = (x + 0.5 - cx) / fx * z, yc = -(y + 0.5 - cy) / fy * z, zc = -z;
+    let z = Math.exp(filled[g]); if (!(z > 0)) continue;
+    const x = Math.min(W - 1, gx * step), y = Math.min(H - 1, gy * step);
+    if (behind && hole[g] && behind[y * W + x] > z) z = behind[y * W + x]; // 埋めた面が、そこに写っている物より手前に出ないように
+    if (z > maxZ) continue;
+    const xc = (x + 0.5 - cx) / fx * z, yc = -(y + 0.5 - cy) / fy * z, zc = -z;
     positions[g * 3] = m[0] * xc + m[1] * yc + m[2] * zc + m[3]; positions[g * 3 + 1] = m[4] * xc + m[5] * yc + m[6] * zc + m[7]; positions[g * 3 + 2] = m[8] * xc + m[9] * yc + m[10] * zc + m[11];
     ok[g] = 1; zz[g] = z;
   }

@@ -2,13 +2,13 @@
 //   R = 塗れている（255）・いない（0）。中間の値はふちのぼかし（シェーダーで半分を境に切る）
 //   G = 毛の筋の明暗（128 が中立）。シェーダーで色に掛ける（強さは絵から測った「毛の筋の強さ」）
 // 形：入りは丸く太く、抜きは細くかすれる。ふちは少しぎざぎざにし、抜きのかすれは毛の筋に沿って切れる。
-export const BRUSH_W = 256, BRUSH_H = 64, BRUSH_N = 8;
+export const BRUSH_W = 256, BRUSH_H = 64, BRUSH_N = 16; // 0〜7 = 筆、8〜15 = 点（点描の一筆）
 
 function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
 export function brushAtlas() {
   const W = BRUSH_W, H = BRUSH_H, data = new Uint8Array(W * H * BRUSH_N * 4);
-  for (let v = 0; v < BRUSH_N; v++) {
+  for (let v = 0; v < 8; v++) {
     const R = rng(1000 + v * 77);
     // 毛の筋：縦（幅の方向）に並ぶ細い筋。筋ごとに明るさと、どこで切れるかが違う
     const nb = 18 + Math.floor(R() * 14), bristles = Array.from({ length: nb }, () => ({ y: R(), tone: R(), end: 0.55 + R() * 0.45, w: 0.02 + R() * 0.03 }));
@@ -33,6 +33,17 @@ export function brushAtlas() {
       data[o] = Math.round(a * 255);
       data[o + 1] = Math.round(Math.min(255, Math.max(0, 128 + (tone - 0.5) * 200 + Math.sin(u * 40 + tone * 9) * 10)));
       data[o + 2] = 0; data[o + 3] = 255;
+    }
+  }
+  // 点：少しいびつな丸。ふちはぎざぎざ、毛の筋は弱い
+  for (let v = 8; v < BRUSH_N; v++) {
+    const R = rng(5000 + v * 91), lob = Array.from({ length: 5 }, (_, k) => [R() * 6.28, k + 2, 0.02 + R() * 0.05]), sx = 0.9 + R() * 0.1, sy = 0.78 + R() * 0.2, rot = R() * 3.14, tones = Array.from({ length: 9 }, () => R());
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const u = (x + 0.5) / W - 0.5, w = (y + 0.5) / H - 0.5, a = Math.atan2(w / sy, u / sx), r = Math.hypot(u / sx, w / sy);
+      let lim = 0.44; for (const [ph, f, amp] of lob) lim += Math.sin(a * f + ph + rot) * amp;
+      const o = ((v * H + y) * W + x) * 4, tone = tones[Math.min(8, Math.floor((w + 0.5) * 9))];
+      data[o] = Math.round(Math.min(1, Math.max(0, (lim - r) * 30 + 0.5)) * 255);
+      data[o + 1] = Math.round(128 + (tone - 0.5) * 70 + (0.25 - r) * 60); data[o + 2] = 0; data[o + 3] = 255;
     }
   }
   return { data, width: W, height: H * BRUSH_N };

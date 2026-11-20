@@ -92,7 +92,7 @@ function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>>
  *   field        orientationField() の戻り値（無ければ作る）
  * 返すもの：{ field, hp, byKind: Map<種類, { count, width, length, aspect, hist, bristle, cohMean, curves: { along, across } }> , all }
  */
-export function measureStrokes(rgba, W, H, kind = null, { field = null, maxD = 48, samples = 5000, seed = 7, highpass = 10 } = {}) {
+function measureBand(rgba, W, H, kind = null, { field = null, maxD = 48, samples = 5000, seed = 7, highpass = 10, minCoh = 0.15 } = {}) {
   const L = luminance(rgba, W, H);
   field = field || orientationField(L, W, H);
   const low = blur(L, W, H, highpass), fine = blur(L, W, H, 0.8), mid = blur(L, W, H, 2.5);
@@ -109,7 +109,7 @@ export function measureStrokes(rgba, W, H, kind = null, { field = null, maxD = 4
       const i = pix[Math.floor(R() * pix.length)], x = i % W, y = (i / W) | 0, t = field.theta[i], c = field.coh[i];
       hist[Math.min(ANGLE_BINS - 1, Math.floor(t / Math.PI * ANGLE_BINS))] += c;
       cohSum += c; vf += hf[i] * hf[i]; vh += hp[i] * hp[i];
-      if (c < 0.15) continue; // 向きのはっきりしない所は、長さ・幅を測らない
+      if (c < minCoh) continue; // 向きのはっきりしない所は、長さ・幅を測らない
       const h0 = hp[i], ux = Math.cos(t), uy = Math.sin(t);
       var0 += h0 * h0; n0++;
       for (let d = 1; d <= maxD; d++) {
@@ -137,4 +137,23 @@ export function angleFromHist(hist, u) {
   let s = 0;
   for (let i = 0; i < hist.length; i++) { const p = hist[i]; if (s + p >= u && p > 0) return (i + (u - s) / p) / hist.length * Math.PI; s += p; }
   return Math.PI * (hist.length - 0.5) / hist.length;
+}
+
+const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+/**
+ * 筆跡の大きさと向きを、種類ごとに測る（引数と返すものは上の measureBand と同じ。各種類に fine・dot が加わる）。
+ * 2 つの細かさで測って合わせる：
+ *   粗い帯（ぼかし 10 画素までの明暗、向きのはっきりした所だけ）… 長い筆跡の幅と長さ
+ *   細かい帯（ぼかし 2 画素までの明暗、全部の画素）… 点描のような細かいタッチ。長さ ÷ 幅（fine.aspect）が 1 に近ければ点
+ * fine.aspect が 1.7 以下なら点として細かい帯の値を使い、2.6 以上なら筆として粗い帯の値を使う（あいだはなめらかにまぜる）。dot = 点らしさ（1 = 点、0 = 筆）
+ */
+export function measureStrokes(rgba, W, H, kind = null, opts = {}) {
+  const coarse = measureBand(rgba, W, H, kind, opts), fine = measureBand(rgba, W, H, kind, { ...opts, field: coarse.field, highpass: 2, minCoh: 0 });
+  const merge = (c, f) => {
+    if (!c || !f) return c;
+    const t = smoothstep(1.7, 2.6, f.aspect), width = f.width + (c.width - f.width) * t, aspect = f.aspect + (c.aspect - f.aspect) * t;
+    return { ...c, width, length: width * aspect, aspect, dot: 1 - t, fine: { width: f.width, length: f.length, aspect: f.aspect }, coarse: { width: c.width, length: c.length, aspect: c.aspect } };
+  };
+  const byKind = new Map(); for (const [k, c] of coarse.byKind) byKind.set(k, merge(c, fine.byKind.get(k)));
+  return { field: coarse.field, hp: coarse.hp, byKind, all: merge(coarse.all, fine.all) };
 }
