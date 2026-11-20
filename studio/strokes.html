@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>筆跡の粒</title>
+<link rel="stylesheet" href="./ui.css">
+<style>
+#view{position:absolute}
+#view canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#cmpImg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;object-fit:fill}
+#anaCanvas{position:absolute;inset:0;width:100%;height:100%;background:var(--room)}
+.seg button{font-size:13px}
+.seg.grid4{grid-auto-flow:row;grid-template-columns:repeat(4,1fr)}
+.seg.grid4 button:nth-child(4n+1){border-left:0}
+.seg.grid4 button:nth-child(n+5){border-top:1px solid var(--line)}
+.sub{color:var(--muted);font-size:12px}
+.c{text-align:center}
+.trow{display:grid;grid-template-columns:1fr 60px 60px;gap:6px;align-items:center;border-top:1px solid var(--line);padding-top:6px}
+.mrow{display:grid;grid-template-columns:56px auto 1fr;gap:8px;align-items:center;font-size:12.5px}
+.sw{display:flex;gap:2px;flex-wrap:wrap}
+.sw i{display:block;width:16px;height:16px;border-radius:3px}
+.sw.small i{width:8px;height:16px;border-radius:1px}
+.checks{display:flex;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body class="tool">
+<main id="stage">
+  <div id="view"><img id="cmpImg" alt="" hidden><canvas id="anaCanvas" hidden></canvas></div>
+  <div id="msg">準備しています…</div>
+  <div id="hint"></div>
+</main>
+<aside>
+  <header>
+    <h1>筆跡の粒</h1>
+    <p class="lead">プレビズの 3D の形を、参照の絵画から測った筆のタッチ（筆の幅・長さ・向き・色）の粒に変えます。絵に写っていない面も、絵から学んだ決まりで同じタッチに塗ります。</p>
+  </header>
+
+  <div class="group">
+    <div class="label">画面</div>
+    <div class="seg" id="page">
+      <button type="button" data-v="3d" aria-pressed="true">3D で見る</button>
+      <button type="button" data-v="analysis" aria-pressed="false">絵を調べる</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="label">参照にする絵</div>
+    <div class="seg" id="paint">
+      <button type="button" data-v="painted" aria-pressed="true">最初の絵</button>
+      <button type="button" data-v="painted_flat" aria-pressed="false">光の少ない絵</button>
+      <button type="button" data-v="painted_lit" aria-pressed="false">影つきの絵</button>
+    </div>
+    <div class="sub">使う視点（入れなかった視点は、答え合わせに使えます）</div>
+    <div class="checks" id="refs"></div>
+    <button type="button" class="main" id="restart">絵を調べ直して作り直す</button>
+  </div>
+
+  <div class="group">
+    <div class="label">表示</div>
+    <div class="seg grid4" id="mode">
+      <button type="button" data-v="color" aria-pressed="true">色</button>
+      <button type="button" data-v="source" aria-pressed="false">出どころ</button>
+      <button type="button" data-v="type" aria-pressed="false">種類</button>
+      <button type="button" data-v="orient" aria-pressed="false">筆の向き</button>
+      <button type="button" data-v="level" aria-pressed="false">LOD の段</button>
+      <button type="button" data-v="normal" aria-pressed="false">面の向き</button>
+      <button type="button" data-v="shade" aria-pressed="false">陰影だけ</button>
+    </div>
+    <p class="note">出どころ：緑 = 絵に写っていた色、橙 = 学んだ決まりで作った色。陰影だけ：揺らぎを抜いた「面の向き → 色」の決まり。</p>
+    <label class="check"><input type="checkbox" id="underpaint"> 下塗り（すき間から見える、形そのものの陰影の色）</label>
+    <label class="check"><input type="checkbox" id="holes"> すき間を赤紫で見る</label>
+    <label class="check"><input type="checkbox" id="skyOn"> 空の筆跡</label>
+    <label class="check"><input type="checkbox" id="boxesOn"> 描いている箱（LOD）を見る</label>
+    <label class="check"><input type="checkbox" id="tiltOn"> 斜めに見る平らな面は粗い段にする（数を減らす）</label>
+    <label class="check"><input type="checkbox" id="freeze"> LOD を細かくしない（いまの段で止める）</label>
+  </div>
+
+  <div class="group">
+    <div class="label">筆の向き</div>
+    <div class="seg" id="orient">
+      <button type="button" data-v="world" aria-pressed="true">面に固定</button>
+      <button type="button" data-v="screen" aria-pressed="false">画面に合わせる</button>
+    </div>
+    <label class="check"><input type="checkbox" id="standOn"> 草は立てて描く（根元から立つ葉のように）</label>
+    <p class="note">面に固定：筆跡は物に描かれていて、歩いても動かない。画面に合わせる：どこから見ても絵と同じ画面の向きに筆が流れる（歩くと筆跡が回る）。</p>
+  </div>
+
+  <div class="group">
+    <div class="label">筆の大きさ <output id="oBrush"></output></div>
+    <input type="range" id="brush" min="0.5" max="6" step="0.05">
+    <p class="note">1 倍 = 画面の上で、絵の筆と同じ太さ（画面の高さに合わせて直した太さ）。大きくすると粒が減って速くなります。</p>
+    <div class="label">重なりの順番のずらし <output id="oLayer"></output></div>
+    <input type="range" id="layer" min="0" max="1" step="0.01">
+    <div class="label">毛の筋の強さ <output id="oBristle"></output></div>
+    <input type="range" id="bristle" min="0" max="3" step="0.1">
+  </div>
+
+  <div class="group">
+    <div class="label">筆跡のまき方（作り直す）</div>
+    <div class="label">重ね塗りの厚さ <output id="oCoverage"></output></div>
+    <input type="range" id="coverage" min="0.6" max="5" step="0.1">
+    <div class="label">絵に写っている色を使う <output id="oPaintedMix"></output></div>
+    <input type="range" id="paintedMix" min="0" max="1" step="0.05">
+    <div class="label">絵の筆の向きを使う <output id="oOrientMix"></output></div>
+    <input type="range" id="orientMix" min="0" max="1" step="0.05">
+    <p class="note">0% にすると、絵に写っている所も学んだ決まりだけで塗ります（写っていない所がどう見えるかを、写っている所で確かめる用）。</p>
+    <button type="button" class="plain" id="regen">筆跡を作り直す</button>
+  </div>
+
+  <div class="group">
+    <div class="label">視点へ飛ぶ・絵と見比べる</div>
+    <div class="seg" id="views"></div>
+    <div class="seg" id="compare">
+      <button type="button" data-v="off" aria-pressed="true">比べない</button>
+      <button type="button" data-v="overlay" aria-pressed="false">重ねる</button>
+      <button type="button" data-v="split" aria-pressed="false">左半分を絵に</button>
+    </div>
+    <div class="label">重ねる濃さ <output id="oOpacity"></output></div>
+    <input type="range" id="opacity" min="0" max="1" step="0.05">
+    <p class="note" id="cmpNote"></p>
+  </div>
+
+  <div class="group">
+    <div class="label">動き方</div>
+    <div class="seg" id="nav">
+      <button type="button" data-v="orbit" aria-pressed="true">回して見る</button>
+      <button type="button" data-v="walk" aria-pressed="false">歩く</button>
+    </div>
+    <label class="check"><input type="checkbox" id="third"> 後ろから見る</label>
+    <label class="check"><input type="checkbox" id="shapes"> 当たりの形を見る</label>
+  </div>
+
+  <div class="group">
+    <div class="label">絵を調べる画面で重ねるもの</div>
+    <div class="seg grid4" id="overlay">
+      <button type="button" data-v="none" aria-pressed="false">なし</button>
+      <button type="button" data-v="orient" aria-pressed="true">筆の向き</button>
+      <button type="button" data-v="coh" aria-pressed="false">はっきりさ</button>
+      <button type="button" data-v="sample" aria-pressed="false">測った筆</button>
+      <button type="button" data-v="kind" aria-pressed="false">種類</button>
+      <button type="button" data-v="edge" aria-pressed="false">境目</button>
+    </div>
+    <p class="note">測った筆：測った幅 × 長さの四角を、その場所の筆の向きで並べたもの。絵の筆跡と大きさが合っているかを見ます。</p>
+  </div>
+
+  <div class="group">
+    <div class="label">種類ごとの筆跡（絵から測った値）</div>
+    <p class="note" id="sMeasure"></p>
+    <div id="typeStats"></div>
+  </div>
+
+  <div class="group">
+    <div class="label">物ごとの色の決まり</div>
+    <p class="note">左：面の向き（正面・右・左・裏・上）ごとの陰影の色。右：色の揺らぎの見本（暗い → 明るい）。空は向き（地平線・中ほど・真上・右・後ろ）ごと。</p>
+    <div id="models" class="group"></div>
+  </div>
+
+  <dl>
+    <dt>描画</dt><dd id="sBackend">-</dd>
+    <dt>速さ</dt><dd id="sFps">-</dd>
+    <dt>描いている筆跡</dt><dd id="sStrokes">-</dd>
+    <dt>段ごと</dt><dd id="sLevels">-</dd>
+    <dt>作成待ち</dt><dd id="sQueue">-</dd>
+    <dt>画面での筆の太さ</dt><dd id="sTarget">-</dd>
+    <dt>空の筆跡</dt><dd id="sSky">-</dd>
+    <dt>8 分木</dt><dd id="sTree">-</dd>
+    <dt>絵を調べた時間</dt><dd id="sAnalyze">-</dd>
+  </dl>
+</aside>
+<script type="module" src="./strokes.js"></script>
+</body>
+</html>
