@@ -17,11 +17,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
-import ort from 'onnxruntime-node';
+import { disparity } from './depthmodel.mjs';
 import { applyMasks } from './masks.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const MODEL_URL = 'https://github.com/fabio-sim/Depth-Anything-ONNX/releases/download/v2.0.0/depth_anything_v2_vits.onnx';
 const NEAR = 0.5, FAR = 2000, FAR_CLAMP = 400;
 
 export const TYPES = [
@@ -39,37 +38,6 @@ function args() {
   for (let i = 0; i < v.length; i += 2) a[v[i].replace(/^--/, '')] = isNaN(Number(v[i + 1])) ? v[i + 1] : Number(v[i + 1]);
   if (!a.image) { console.error('--image <絵のファイル> を指定してください'); process.exit(1); }
   return a;
-}
-
-async function model() {
-  const file = path.join(HERE, 'models', 'depth_anything_v2_vits.onnx');
-  if (!fs.existsSync(file)) {
-    console.log('奥行き推定モデルを取得します（約 95 MB、初回のみ）…');
-    const res = await fetch(MODEL_URL);
-    if (!res.ok) throw new Error(`モデルを取得できませんでした: ${res.status}`);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
-  }
-  return file;
-}
-
-// 視差（大きいほど近い）を W×H で返す。
-async function disparity(img, W, H) {
-  const S = 518;
-  const small = await img.clone().resize(S, S, { fit: 'fill', kernel: 'cubic' }).raw().toBuffer();
-  const x = new Float32Array(3 * S * S), mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
-  for (let i = 0; i < S * S; i++) for (let c = 0; c < 3; c++) x[c * S * S + i] = (small[i * 3 + c] / 255 - mean[c]) / std[c];
-  const session = await ort.InferenceSession.create(await model());
-  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', x, [1, 3, S, S]) });
-  const d = out[session.outputNames[0]].data, up = new Float32Array(W * H);
-  for (let y = 0; y < H; y++) {
-    const fy = Math.min(S - 1.001, Math.max(0, (y + 0.5) * S / H - 0.5)), y0 = fy | 0, ty = fy - y0;
-    for (let xx = 0; xx < W; xx++) {
-      const fx = Math.min(S - 1.001, Math.max(0, (xx + 0.5) * S / W - 0.5)), x0 = fx | 0, tx = fx - x0, i = y0 * S + x0;
-      up[y * W + xx] = (d[i] * (1 - tx) + d[i + 1] * tx) * (1 - ty) + (d[i + S] * (1 - tx) + d[i + S + 1] * tx) * ty;
-    }
-  }
-  return up;
 }
 
 // 連結成分（4近傍）。mask が 1 の画素に 1 からの番号を振る。
@@ -254,7 +222,8 @@ async function main() {
   const r6 = (n) => Math.round(n * 1e6) / 1e6;
   const cams = {
     generator: 'painterly-splat-field painting/build.mjs',
-    source: { kind: 'painting', image: path.basename(String(a.image)), crop: a.crop, params: { horizon: a.horizon, eye: a.eye, hfov: a.hfov } },
+    // style = 穴を描き足してもらうときに伝える画風（英語の名詞句。「視点を足す」のタブが使う。--style で指定。無ければ「まわりと同じ画風」）
+    source: { kind: 'painting', image: path.basename(String(a.image)), crop: a.crop, params: { horizon: a.horizon, eye: a.eye, hfov: a.hfov }, ...(typeof a.style === 'string' && a.style.trim() ? { style: a.style.trim() } : {}) },
     units: 'meters', world: 'right-handed, +Y up',
     camera_axes: 'three.js / OpenGL: +X right, +Y up, camera looks down -Z',
     pixel_coords: 'origin at top-left, +x right, +y down, pixel centers at +0.5',

@@ -27,11 +27,18 @@ estimated_model.json
 # 物体ごとの切り抜きの絵と、外の道具で作った 3D モデル（studio/objectmodel.js）
 scenes/*/paint-out/object_*
 scenes/*/paint-out/objects.json
+# 絵 1 枚の場面に足した視点（「視点を足す」。作り直せる。studio/dreamviews.js）
+scenes/*/previz-export/added_views.json
+scenes/*/previz-export/R[0-9]*_*.png
+scenes/*/paint-out/R[0-9]*_*.png
+# 外の手法の「絵＋奥行き＋カメラ」を取り込んだ視点（painting/import-views.mjs。名前は X1, X2, …）
+scenes/*/previz-export/X[0-9]*_*.png
+scenes/*/paint-out/X[0-9]*_*.png
 # 物を切り出して動かす（paint/objects.mjs）：切り抜き・描き足した全身・物ごとの 3D、外の切り分け（SAM 3）で作った場面の版
 scenes/*/paint-out/obj_*
 scenes/*/paint-out/obj3d_*
 scenes/*/paint-out/objcloud_*
 scenes/*/previz-export/*_sam3.png
 scenes/*/previz-export/*_seg_*.json
-# 外の道具を手元の PC で試した結果（大きい）
+# 外部の手法で作った結果の置き場（大きい。ライセンスが研究目的のものもある）。外の道具を手元の PC で試した結果もここ
 scenes/*/external/

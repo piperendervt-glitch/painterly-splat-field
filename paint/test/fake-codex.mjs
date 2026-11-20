@@ -16,7 +16,7 @@ process.stdin.on('end', () => {
     console.log('done');
     return;
   }
-  const src = fs.existsSync('references/holes.png') ? 'references/holes.png' : 'references/previz.png';
+  const src = ['holes.png', 'view.png', 'previz.png'].map((n) => `references/${n}`).find((f) => fs.existsSync(f));
   const img = readPng(src);
   for (let i = 0; i < img.data.length; i += 4) {
     if (img.data[i] === 255 && img.data[i + 1] === 0 && img.data[i + 2] === 255) img.data.set([40, 160, 60], i);

@@ -75,11 +75,11 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
 <aside>
   <header>
     <h1>視点を足す</h1>
-    <p class="lead">まだ絵に描かれていない所（穴）が多く見える視点を足し、穴だけを描き足して、その分の粒を空間に加えます。</p>
+    <p class="lead" id="lead">まだ絵に描かれていない所（穴）が多く見える視点を足し、穴だけを描き足して、その分の粒を空間に加えます。</p>
   </header>
   <p class="note warn" id="problem" hidden></p>
 
-  <div class="group">
+  <div class="group" id="lightBox">
     <div class="label">光の描き方（どの絵を基準にするか）</div>
     <div class="seg" id="light">
       <button type="button" data-v="free" aria-pressed="true">自由</button>
@@ -91,9 +91,11 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
 
   <div class="group">
     <h2>1. 視点を決める</h2>
+    <div class="group" id="searchBox">
     <button type="button" class="plain" id="search">穴の多い視点を自動で探す</button>
     <label class="check" for="high"><input type="checkbox" id="high" checked><span>高い視点・真上からの視点も探す</span></label>
     <p class="note" id="searchNote">まわりの位置から形を見たときに、穴がいちばん多く見える所を計算で探します。チェックを外すと、下の「カメラの高さ」だけで探します。</p>
+    </div>
     <div class="label"><span>カメラの高さ</span><output id="oCamY"></output></div>
     <input type="range" id="camY" min="1" max="200" step="0.1" value="1.7">
     <div class="label"><span>見下ろす角度</span><output id="oPitch"></output></div>
@@ -109,7 +111,7 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
     </div>
     <p class="note">マゼンタが穴（どの絵にも描かれていない面）、紫が空の穴です。</p>
     <button type="button" class="main" id="add">この視点を足す</button>
-    <p class="note">プレビズをこの視点から書き出し直し、すでにある絵をこの視点へ写します。ChatGPT の利用枠は使いません。</p>
+    <p class="note" id="addNote">プレビズをこの視点から書き出し直し、すでにある絵をこの視点へ写します。ChatGPT の利用枠は使いません。</p>
   </div>
 
   <div class="group">
@@ -124,14 +126,30 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
       </div>
       <button type="button" class="plain" id="rewarp">すでにある絵を写し直す</button>
       <p class="note">もとの視点の絵を描き直した後や、この光の描き方でまだ写していないときに押します。埋めた絵は消えます。</p>
+      <button type="button" class="main" id="fillNvs">別視点の絵を生成するモデルで埋める（利用枠なし）</button>
+      <div class="label"><span>別視点の生成モデルの名前</span></div>
+      <input type="text" id="nvsName" placeholder="空欄 = 既定（例：viewcrafter、seva、ugg）" autocomplete="off" spellcheck="false">
+      <label class="check" for="refineOn"><input type="checkbox" id="refineOn"><span>絵の細かさを戻す仕上げをする（PC の生成モデル）</span></label>
+      <div class="label"><span>仕上げの強さ</span><output id="oRefine">0.45</output></div>
+      <input type="range" id="refineStrength" min="0.05" max="1" step="0.05" value="0.45">
+      <label class="check" for="stippleOn"><input type="checkbox" id="stippleOn" checked><span>仕上げの前に、もとの絵の点の細かさを足す</span></label>
+      <p class="note">仕上げだけでは、別視点のモデルの絵のなめらかさが残りやすく、強くすると人や物を描き足してしまいます。先に、もとの絵の点の層（細かさだけ）を穴の中へ計算で足しておくと、弱い仕上げのまま、配置を保って点描に戻ります。絵 1 枚から作った場面で使えます。</p>
+      <p class="note">もとの絵と、この視点のカメラを、手元の PC の「別視点の絵を生成するモデル」に渡し、この視点から見た絵を作ってもらって穴に使います。生成される絵は粗い（数百画素）ので、仕上げを入れると、穴の中を PC の画像生成モデルで描き直して点描の細かさを戻します。強さが大きいほど描き直しが強く、生成した形から離れます。用意の仕方は docs/local-inpaint.md。</p>
+      <button type="button" class="main" id="fillNvsCodex">別視点のモデルの絵を下絵に、Codex で描く（利用枠を使う）</button>
+      <p class="note">上と同じように別視点のモデルにこの視点の絵を作ってもらい、それを「下絵」にして、Codex（ChatGPT）に穴を描いてもらいます。視点と、どこに何があるかは下絵のまま、画風はもとの絵に合わせます。1 回につき、別視点のモデルを 1 回と Codex を 1 回（絵 1 枚）使います。下絵は「視点の名前_layout.png」として残ります。</p>
       <button type="button" class="main" id="fillLocal">ツール内で埋める（すぐ・利用枠なし）</button>
       <p class="note">穴のまわりの色を、同じ面の中だけで内側へ広げます。届かない面は、同じ物体（無ければ同じ種類）の色で塗ります。新しい模様は作れないので、広い穴はのっぺりします。</p>
       <button type="button" class="main" id="fillCodex">Codex で描き足す（きれい・利用枠を使う）</button>
+      <button type="button" class="main" id="fillModel">PC の生成モデルで描き足す（利用枠なし）</button>
+      <div class="label"><span>PC の生成モデルの名前</span></div>
+      <input type="text" id="modelName" placeholder="空欄 = 既定のモデル" autocomplete="off" spellcheck="false">
+      <p class="note">手元の PC に用意した画像生成モデル（Stable Diffusion の inpainting など）で穴を描きます。ChatGPT の利用枠は使いません。用意の仕方は docs/local-inpaint.md。プレビズの形に従わせることはできないので、絵 1 枚の場面向けです。</p>
       <div class="row">
         <button type="button" class="plain" id="fillDry">送る文だけ作る</button>
         <button type="button" class="plain" id="stop" disabled>止める</button>
       </div>
       <p class="note">どちらも穴の所だけを描き、穴の外は 1 画素も変えません。やり直すと上書きします。</p>
+      <p class="note" id="fillNote"></p>
     </div>
   </div>
 
@@ -151,13 +169,16 @@ pre{margin:0;background:var(--room);border:1px solid var(--line);border-radius:6
     <p class="note" id="autoHint"></p>
     <div class="label">穴の埋め方</div>
     <div class="seg" id="autoFill">
+      <button type="button" data-v="nvs" aria-pressed="false">別視点の生成モデル</button>
+      <button type="button" data-v="nvscodex" aria-pressed="false">別視点の生成モデル＋Codex</button>
+      <button type="button" data-v="model" aria-pressed="false">PC の生成モデル</button>
       <button type="button" data-v="codex" aria-pressed="true">Codex で描き足す</button>
       <button type="button" data-v="local" aria-pressed="false">ツール内で埋める</button>
     </div>
     <button type="button" class="main" id="autoRun">連続で進める</button>
     <p class="note" id="autoCount"></p>
     <pre id="autoLog"></pre>
-    <p class="note">いまの候補の視点から、1 歩ずつ角度を進めて「視点を足す → 穴を埋める」を繰り返します。埋めた絵は、次の 1 歩の土台になります。押すとボタンが「止める」に変わり、もう一度押すまで続きます。回数の上限はありません（1 周を過ぎても続きます）。「Codex で描き足す」では、1 歩につき Codex を 1 回（絵 1 枚）使います。穴が 1 画素も無い 1 歩では Codex を呼ばずに次へ進みます。Codex が利用枠に当たったときや失敗したときは、そこで止まります。角度・向き・埋め方は、進めている途中でも変えられます（次の 1 歩から効きます）。</p>
+    <p class="note">いまの候補の視点から、1 歩ずつ角度を進めて「視点を足す → 穴を埋める」を繰り返します。埋めた絵は、次の 1 歩の土台になります。押すとボタンが「止める」に変わり、もう一度押すまで続きます。回数の上限はありません（1 周を過ぎても続きます）。「Codex で描き足す」と「別視点の生成モデル＋Codex」では、1 歩につき Codex を 1 回（絵 1 枚）使います。「別視点の生成モデル」と「PC の生成モデル」は利用枠を使わず、手元の GPU で描きます（名前や仕上げの設定は「2. 穴を埋める」の欄のものを使います）。穴が 1 画素も無い 1 歩では Codex を呼ばずに次へ進みます。Codex が利用枠に当たったときや失敗したときは、そこで止まります。角度・向き・埋め方は、進めている途中でも変えられます（次の 1 歩から効きます）。</p>
   </div>
 
   <div class="group">
